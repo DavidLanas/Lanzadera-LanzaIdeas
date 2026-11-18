@@ -1,0 +1,9 @@
+[package]
+name = "lanzadera-controller"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lanzadera-core   = { path = "../core" }
+lanzadera-engine = { path = "../engine" }  # solo para el hilo de LEDs (RtStore)
+midir = "0.9"

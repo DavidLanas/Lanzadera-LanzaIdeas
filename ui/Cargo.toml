@@ -1,0 +1,11 @@
+[package]
+name = "lanzadera-ui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+caja-core = { path = "../../CAJA.GrooveMaschine-/core" }
+lanzadera-core   = { path = "../core" }
+lanzadera-engine = { path = "../engine" }  # RtStore + SessionShared para los widgets
+egui = "0.28"
+# egui_extras = "0.28"  # Fase 3 (imágenes/tablas avanzadas)

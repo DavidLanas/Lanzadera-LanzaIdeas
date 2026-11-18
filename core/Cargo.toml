@@ -1,0 +1,10 @@
+[package]
+name = "lanzadera-core"
+version = "0.1.0"
+edition = "2021"
+
+# Nota: el spec §3 decía "sin dependencias", pero §10 exige JSON de persistencia.
+# serde/serde_json son las únicas deps (igual que el persist de Caja).
+[dependencies]
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"

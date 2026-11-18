@@ -1,0 +1,13 @@
+# lanzadera — mini-DAW de improvisación en vivo (workspace)
+[workspace]
+resolver = "2"
+members = ["core", "engine", "controller", "ui", "app"]
+
+[profile.release]
+lto = "thin"
+strip = "symbols"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"

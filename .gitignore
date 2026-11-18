@@ -1,0 +1,14 @@
+/target
+# Rust
+/target
+Cargo.lock.bak
+
+# Backups de parches
+*.bak
+
+# WAVs temporales de grabación
+/tmp/lanzadera_rec_*.wav
+
+# Editor
+.vscode/
+.idea/

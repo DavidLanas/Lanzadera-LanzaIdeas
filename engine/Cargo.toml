@@ -1,0 +1,30 @@
+[package]
+name = "lanzadera-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+caja-core = { path = "../../CAJA.GrooveMaschine-/core" }
+lanzadera-core = { path = "../core" }
+arc-swap  = "1"
+cpal      = "0.15"
+symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm", "flac", "ogg", "vorbis"] }
+ringbuf = "0.4"
+hound = "3.5"
+# Hosting CLAP (Fase 3B): solo se compila con --features clap
+clack-host = { version = "0.2", optional = true }
+clack-extensions = { version = "0.2", optional = true }
+serde_json = "1.0.154"
+
+[features]
+default = []
+# JACK opcional (requiere libjack-jackd2-dev); si no, ALSA/PipeWire
+jack = ["cpal/jack"]
+# Hosting de plugins CLAP
+clap = ["dep:clack-host", "dep:clack-extensions", "clack-extensions/params", "clack-extensions/clack-host"]
+
+# ── Fase 4: motor de drums de Caja ──
+# caja-core = { path = "../../caja/core" }
+
+[dev-dependencies]
+assert_no_alloc = "1.1"
