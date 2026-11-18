@@ -34,7 +34,7 @@ pub struct ActiveClip {
 enum TrigAction { Launch, Stop }
 
 #[derive(Clone, Copy)]
-struct PendingTrigger { scene: u8, action: TrigAction, quantize_ticks: u64 }
+struct PendingTrigger { scene: u8, action: TrigAction, quantize_ticks: u64, restart: bool }
 
 pub struct ClipEngine {
     active: [Option<ActiveClip>; MAX_TRACKS],
@@ -48,6 +48,11 @@ pub struct ClipEngine {
     /// Ciclo de Groove Machine en ticks (0 = ignorar). Los lanzamientos
     /// cuantizados se alinean a este ciclo para no caer a mitad de frase.
     pub groove_loop_ticks: u32,
+    /// Escena lanzada con el transporte en marcha: en esta frontera el reloj
+    /// global vuelve a 0 (todo —clips y Groove— reinicia en 1.1).
+    restart_q: Option<u64>,
+    /// Durante un reinicio de escena, start_clip NO es idempotente.
+    force_restart: bool,
 }
 
 impl ClipEngine {
@@ -62,6 +67,8 @@ impl ClipEngine {
             last_tempo: 120.0,
             rng: 0x9E37_79B9_7F4A_7C15,
             groove_loop_ticks: 0,
+            restart_q: None,
+            force_restart: false,
         }
     }
 
@@ -80,18 +87,21 @@ impl ClipEngine {
     /// múltiplo común del quantize del clip y del loop de batería.
     /// Así un clip con quantize de 1 compás no arranca a mitad del ciclo
     /// de 2 compases de la batería.
-    fn effective_quantize_ticks(&self, q: Quantize) -> u64 {
+    fn effective_quantize_ticks(&self, q: Quantize, clip_loop_ticks: u64) -> u64 {
         let qt = q.ticks();
         if qt == 0 {
             return 0;
         }
         let gt = self.groove_loop_ticks as u64;
-        if gt == 0 {
+        if gt == 0 || clip_loop_ticks == 0 {
             return qt;
         }
-        // LCM(qt, gt) sin overflow absurdo (loops de sesión son pequeños).
-        let g = Self::gcd_u64(qt, gt);
-        qt / g * gt
+        // El clip solo necesita caer en un múltiplo de MCD(loop_clip, loop_groove):
+        // un clip de 1 compás sobre una batería de 8 compases no espera 8;
+        // uno de 4 sobre 8 espera como mucho 4. (Antes: MCM(q, groove) siempre.)
+        let period = Self::gcd_u64(clip_loop_ticks, gt);
+        let g = Self::gcd_u64(qt, period);
+        qt / g * period
     }
 
     fn gcd_u64(mut a: u64, mut b: u64) -> u64 {
@@ -127,6 +137,10 @@ impl ClipEngine {
         }
     }
     pub fn global_ticks(&self) -> u64 { self.global_ticks }
+    /// Posición del reloj en ticks, con la fracción de tick acumulada.
+    pub fn position_ticks(&self) -> f64 {
+        self.global_ticks as f64 + self.fractional / self.samples_per_tick.max(1.0)
+    }
     pub fn set_seed(&mut self, seed: u64) { self.rng = if seed == 0 { 1 } else { seed }; }
 
     /// Reinicia el reloj de transporte a 1.1 (tick 0). Llamar al parar
@@ -159,49 +173,50 @@ impl ClipEngine {
                 ControlCmd::LaunchClip { track, scene } => self.queue_launch(audio, track as usize, scene as usize, out),
                 ControlCmd::StopClip { track } => self.queue_stop(audio, track as usize, out),
                 ControlCmd::LaunchScene { scene } => {
-                    // Frontera comun: LCM de todos los effective_quantize de la escena.
-                    // Asi todos los clips de la fila disparan en el MISMO downbeat,
-                    // alineado al ciclo de Groove si esta activo.
+                    let s = scene as usize;
+                    // Frontera común: MCM de los quantize de los clips de la fila,
+                    // así todos disparan en el MISMO downbeat.
                     let mut common_q: u64 = 0;
                     for t in 0..audio.track_count as usize {
-                        let meta = audio.clip_meta(t, scene as usize);
+                        let meta = audio.clip_meta(t, s);
                         if !meta.exists { continue; }
-                        let eq = self.effective_quantize_ticks(meta.quantize);
-                        if eq == 0 { continue; }
-                        if common_q == 0 {
-                            common_q = eq;
-                        } else {
-                            let g = Self::gcd_u64(common_q, eq);
-                            common_q = common_q / g * eq;
-                        }
+                        let qt = meta.quantize.ticks();
+                        if qt == 0 { continue; }
+                        common_q = if common_q == 0 { qt } else {
+                            let g = Self::gcd_u64(common_q, qt);
+                            common_q / g * qt
+                        };
                     }
-                    if common_q == 0 {
-                        for t in 0..audio.track_count as usize {
-                            self.queue_launch(audio, t, scene as usize, out);
-                        }
-                    } else {
-                        for t in 0..audio.track_count as usize {
-                            let meta = audio.clip_meta(t, scene as usize);
-                            if !meta.exists { continue; }
-                            if meta.quantize == Quantize::Immediate {
-                                self.start_clip(t, scene as usize, meta, out);
-                            } else {
-                                if let Some(p) = self.pending[t] {
-                                    if matches!(p.action, TrigAction::Launch) && p.scene as usize != scene as usize {
-                                        Self::emit(out, ClipEvent::StateChange {
-                                            track: t as u8, scene: p.scene, new_state: ClipState::Empty,
-                                        });
-                                    }
+                    // Con el transporte en marcha, lanzar una escena reinicia TODO
+                    // desde 1.1: en la frontera el reloj global vuelve a 0 y Groove
+                    // Machine (que sigue ese reloj) arranca su ciclo de nuevo.
+                    let restart = audio.playing;
+                    if restart {
+                        if common_q == 0 { self.global_ticks = 0; } else { self.restart_q = Some(common_q); }
+                    }
+                    for t in 0..audio.track_count as usize {
+                        let meta = audio.clip_meta(t, s);
+                        if !meta.exists { continue; }
+                        let ahora = common_q == 0 || (meta.quantize == Quantize::Immediate && !restart);
+                        if ahora {
+                            self.force_restart = restart;
+                            self.start_clip(t, s, meta, out);
+                            self.force_restart = false;
+                        } else {
+                            if let Some(p) = self.pending[t] {
+                                if matches!(p.action, TrigAction::Launch) && p.scene as usize != s {
+                                    Self::emit(out, ClipEvent::StateChange {
+                                        track: t as u8, scene: p.scene, new_state: ClipState::Empty,
+                                    });
                                 }
-                                self.pending[t] = Some(PendingTrigger {
-                                    scene: scene as u8,
-                                    action: TrigAction::Launch,
-                                    quantize_ticks: common_q,
-                                });
-                                Self::emit(out, ClipEvent::StateChange {
-                                    track: t as u8, scene: scene as u8, new_state: ClipState::Triggered,
-                                });
                             }
+                            self.pending[t] = Some(PendingTrigger {
+                                scene: s as u8, action: TrigAction::Launch,
+                                quantize_ticks: common_q, restart,
+                            });
+                            Self::emit(out, ClipEvent::StateChange {
+                                track: t as u8, scene: s as u8, new_state: ClipState::Triggered,
+                            });
                         }
                     }
                 }
@@ -220,6 +235,7 @@ impl ClipEngine {
                             });
                         }
                     }
+                    self.restart_q = None;
                     self.global_ticks = 0;
                     self.fractional = 0.0;
                 }
@@ -252,7 +268,7 @@ impl ClipEngine {
                     });
                 }
             }
-            self.pending[t] = Some(PendingTrigger { scene: s as u8, action: TrigAction::Launch, quantize_ticks: self.effective_quantize_ticks(meta.quantize) });
+            self.pending[t] = Some(PendingTrigger { scene: s as u8, action: TrigAction::Launch, quantize_ticks: self.effective_quantize_ticks(meta.quantize, meta.loop_bars.max(1) as u64 * TICKS_PER_BAR), restart: false });
             Self::emit(out, ClipEvent::StateChange { track: t as u8, scene: s as u8, new_state: ClipState::Triggered });
         }
     }
@@ -266,7 +282,7 @@ impl ClipEngine {
                 Self::emit(out, ClipEvent::StateChange { track: t as u8, scene, new_state: ClipState::Empty });
             }
         } else if self.active[t].is_some() || self.pending[t].is_some() {
-            self.pending[t] = Some(PendingTrigger { scene, action: TrigAction::Stop, quantize_ticks: self.effective_quantize_ticks(audio.quantize) });
+            self.pending[t] = Some(PendingTrigger { scene, action: TrigAction::Stop, quantize_ticks: self.effective_quantize_ticks(audio.quantize, 0), restart: false });
             Self::emit(out, ClipEvent::StateChange { track: t as u8, scene, new_state: ClipState::Stopping });
         }
     }
@@ -277,7 +293,7 @@ impl ClipEngine {
         // abrir el piano roll o al re-lanzar por error (estilo Bitwig/Ableton:
         // re-trigger solo si el usuario lo pide o LaunchMode lo exige).
         if let Some(prev) = self.active[t] {
-            if prev.scene as usize == s && prev.state == ClipState::Playing {
+            if prev.scene as usize == s && prev.state == ClipState::Playing && !self.force_restart {
                 self.pending[t] = None;
                 return;
             }
@@ -340,6 +356,13 @@ impl ClipEngine {
     }
 
     fn on_tick(&mut self, audio: &SessionAudio, out: &mut Vec<ClipEvent>) {
+        // Reinicio de escena: en la frontera el reloj vuelve a 1.1.
+        if let Some(q) = self.restart_q {
+            if q == 0 || self.global_ticks % q == 0 {
+                self.restart_q = None;
+                self.global_ticks = 0;
+            }
+        }
         let now = self.global_ticks;
         for t in 0..audio.track_count as usize {
             // 1) Triggers pendientes → aplicar en el punto de quantize
@@ -351,7 +374,11 @@ impl ClipEngine {
                     match p.action {
                         TrigAction::Launch => {
                             let meta = audio.clip_meta(t, p.scene as usize);
-                            if meta.exists { self.start_clip(t, p.scene as usize, meta, out); }
+                            if meta.exists {
+                                self.force_restart = p.restart;
+                                self.start_clip(t, p.scene as usize, meta, out);
+                                self.force_restart = false;
+                            }
                         }
                         TrigAction::Stop => {
                             if let Some(a) = self.active[t].take() {
@@ -363,6 +390,17 @@ impl ClipEngine {
             }
             // 2) Avanzar el playhead del clip activo (sample-accurate vía ticks).
             if let Some(mut a) = self.active[t] {
+                // Si el usuario cambia los compases en el Inspector, el clip que
+                // suena lo adopta al instante (antes quedaba con la longitud con
+                // que arrancó hasta el siguiente stop global).
+                let m = audio.clip_meta(t, a.scene as usize);
+                if m.exists {
+                    let nl = m.loop_bars.max(1) as u32 * TICKS_PER_BAR as u32;
+                    if nl != a.loop_ticks {
+                        a.loop_ticks = nl;
+                        a.playhead %= nl;
+                    }
+                }
                 a.playhead += 1;
                 if a.playhead >= a.loop_ticks {
                     a.playhead = 0;

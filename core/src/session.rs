@@ -289,10 +289,14 @@ impl SessionState {
                 let t = self.resolve_track(track);
                 let s = self.resolve_scene(scene);
                 let q = self.quantize;
+                let mut empezar_a_grabar = false;
                 if let Some(tr) = self.tracks.get_mut(t) {
                     if let Some(slot) = tr.clips.get_mut(s) {
                         // Nunca pisar un clip existente: el pad solo crea en vacío.
                         if slot.is_none() {
+                            // Pista ya armada + pad en ranura vacía = arma la
+                            // grabación (RecQueued → cuenta atrás en la frontera).
+                            empezar_a_grabar = tr.arm;
                             *slot = Some(Clip {
                                 name: format!("Clip {}", s + 1),
                                 loop_bars: bars.clamp(1, 64),
@@ -306,6 +310,9 @@ impl SessionState {
                 self.selected_track = t;
                 self.selected_scene = s;
                 self.selected_clip = Some((t, s));
+                if empezar_a_grabar && !self.recording {
+                    self.apply_control(ControlCmd::Record);
+                }
             }
             ControlCmd::LaunchScene { scene } => { let s = self.resolve_scene(scene); self.launch_scene(s); }
             ControlCmd::StopAll => self.stop_all(),

@@ -108,6 +108,8 @@ struct Renderer {
     /// Las notas se graban relativas a este origen para que el primer
     /// ataque caiga en tick 0 del clip, no en el compás 2 del transporte.
     rec_origin_ticks: u64,
+    /// Último global_ticks visto: si retrocede (escena relanzada en play), Groove se reinicia.
+    last_global_ticks: u64,
     channels: usize,
     sample_rate: u32,
     bufs: Box<[[[f32; MAX_BLOCK]; 2]; MAX_TRACKS]>,
@@ -296,16 +298,10 @@ impl Renderer {
         // Puerta de captura: quantize del clip alineado al ciclo de la batería.
         let mut rec_q = audio.rec_q_ticks;
         if rec_q > 0 && groove_loop > 0 {
-            let a = rec_q as u64;
-            let b = groove_loop as u64;
-            let mut x = a;
-            let mut y = b;
-            while y != 0 {
-                let t = y;
-                y = x % y;
-                x = t;
-            }
-            rec_q = (a / x.max(1) * b) as u32;
+            let gcd = |mut x: u64, mut y: u64| { while y != 0 { let t = y; y = x % y; x = t; } x.max(1) };
+            let q = rec_q as u64;
+            let period = gcd(audio.rec_loop_ticks.max(1) as u64, groove_loop as u64);
+            rec_q = (q / gcd(q, period) * period) as u32;
         }
         let rec_live = rec_gate(
             audio.recording,
@@ -348,7 +344,8 @@ impl Renderer {
         let mut force_stop_track: Option<usize> = None;
         if rec_live && !old_rec_on {
             force_stop_track = Some(audio.rec_track as usize);
-            self.rec_origin_ticks = self.engine.global_ticks();
+            let now = self.engine.global_ticks();
+            self.rec_origin_ticks = if rec_q > 0 { (now / rec_q as u64) * rec_q as u64 } else { now };
         }
 
         // Borrados pedidos por la UI: matar el clip activo de esa pista de
@@ -596,10 +593,19 @@ impl Renderer {
             // Llamar al scheduler para obtener triggers automáticos del patrón
             // Posición musical del launcher (fuente de verdad para toda la sesión).
             // Convierte ticks a beats: 1920 ticks = 4 beats = 1 compás 4/4.
-            let song_beats = self.engine.global_ticks() as f64 * 4.0 / TICKS_PER_BAR as f64;
+            // OJO: el motor de clips ya avanzó `frames` ticks dentro de este bloque
+            // (bucle por frame de arriba). Groove espera la posición del INICIO del
+            // bloque; antes recibía la del final y sonaba adelantado un buffer
+            // respecto a los clips.
+            let spt = self.engine.samples_per_tick().max(1.0);
+            let inicio_ticks = self.engine.position_ticks() - frames as f64 / spt;
+            let song_beats = inicio_ticks * 4.0 / TICKS_PER_BAR as f64;
             // Publicar el ciclo de Groove al motor de clips: así el
             // scene barrier y effective_quantize_ticks alinean los
             // lanzamientos al downbeat real de la batería.
+            let gt_now = self.engine.global_ticks();
+            if gt_now < self.last_global_ticks { self.caja_scheduler.reset(); }
+            self.last_global_ticks = gt_now;
             let glt = self.caja_scheduler.groove_loop_ticks();
             self.engine.set_groove_loop_ticks(glt);
 
@@ -741,13 +747,13 @@ impl Renderer {
 
         // ── RecordEngine (Fase F3) ──
         // Detectar cambios en audio.recording y arrancar/parar slots.
-        if audio.recording && !self.was_recording {
+        if self.rec_on && !self.was_recording {
             let rt = audio.rec_track as usize;
             let rs = audio.rec_scene as usize;
             self.record_engine
                 .start_recording(rt, rs, self.audio_in_ch, self.sample_rate);
             println!("[record] inicio: pista {} escena {}", rt + 1, rs + 1);
-        } else if !audio.recording && self.was_recording {
+        } else if !self.rec_on && self.was_recording {
             let rt = audio.rec_track as usize;
             let rs = audio.rec_scene as usize;
             if let Some(clip) = self.record_engine.stop_recording(rt, rs) {
@@ -765,7 +771,7 @@ impl Renderer {
                 *slot = Some((rt, rs, clip));
             }
         }
-        self.was_recording = audio.recording;
+        self.was_recording = self.rec_on;
 
         // Escribir muestras en todos los slots activos.
         if self.record_engine.is_any_recording() {
@@ -888,6 +894,7 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
         rec_pending: [None; 32],
         rec_on: false,
         rec_origin_ticks: 0,
+        last_global_ticks: 0,
         channels,
         sample_rate,
         bufs: Box::new([[[0.0; MAX_BLOCK]; 2]; MAX_TRACKS]),

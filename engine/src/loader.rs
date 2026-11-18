@@ -156,10 +156,19 @@ fn drain_rec_slot(shared: &SessionShared) {
                 let frames = clip.samples.len() / ch;
                 let audio_secs = frames as f64 / clip.sample_rate.max(1) as f64;
                 let mut bars_used = 0u8;
+                // Si Groove está activo, el clip grabado dura un múltiplo de su ciclo
+                // (p. ej. 2 compases): así el loop vuelve a caer en el 1.1 de la
+                // batería en cada vuelta. Un clip de 5 u 9 compases deriva.
+                let g_bars: f64 = if shared.caja_sched.enabled.load(std::sync::atomic::Ordering::Relaxed) {
+                    shared.caja_sched.schedule.lock()
+                        .map(|s| ((s.loop_ticks as u64 / lanzadera_core::TICKS_PER_BAR).max(1)) as f64)
+                        .unwrap_or(1.0)
+                } else { 1.0 };
                 shared.edit(|st| {
                     let tempo = st.tempo.max(20.0);
                     // 240 = 60 s/min * 4 beats/compás (4/4).
-                    let bars = ((audio_secs * tempo / 240.0).round() as i64)
+                    let raw = audio_secs * tempo / 240.0;
+                    let bars = (((raw / g_bars).round().max(1.0) * g_bars) as i64)
                         .clamp(1, 255) as u8;
                     bars_used = bars;
                     if let Some(tr) = st.tracks.get_mut(t) {
