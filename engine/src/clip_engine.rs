@@ -34,7 +34,7 @@ pub struct ActiveClip {
 enum TrigAction { Launch, Stop }
 
 #[derive(Clone, Copy)]
-struct PendingTrigger { scene: u8, action: TrigAction, quantize: Quantize }
+struct PendingTrigger { scene: u8, action: TrigAction, quantize_ticks: u64 }
 
 pub struct ClipEngine {
     active: [Option<ActiveClip>; MAX_TRACKS],
@@ -159,7 +159,51 @@ impl ClipEngine {
                 ControlCmd::LaunchClip { track, scene } => self.queue_launch(audio, track as usize, scene as usize, out),
                 ControlCmd::StopClip { track } => self.queue_stop(audio, track as usize, out),
                 ControlCmd::LaunchScene { scene } => {
-                    for t in 0..audio.track_count as usize { self.queue_launch(audio, t, scene as usize, out); }
+                    // Frontera comun: LCM de todos los effective_quantize de la escena.
+                    // Asi todos los clips de la fila disparan en el MISMO downbeat,
+                    // alineado al ciclo de Groove si esta activo.
+                    let mut common_q: u64 = 0;
+                    for t in 0..audio.track_count as usize {
+                        let meta = audio.clip_meta(t, scene as usize);
+                        if !meta.exists { continue; }
+                        let eq = self.effective_quantize_ticks(meta.quantize);
+                        if eq == 0 { continue; }
+                        if common_q == 0 {
+                            common_q = eq;
+                        } else {
+                            let g = Self::gcd_u64(common_q, eq);
+                            common_q = common_q / g * eq;
+                        }
+                    }
+                    if common_q == 0 {
+                        for t in 0..audio.track_count as usize {
+                            self.queue_launch(audio, t, scene as usize, out);
+                        }
+                    } else {
+                        for t in 0..audio.track_count as usize {
+                            let meta = audio.clip_meta(t, scene as usize);
+                            if !meta.exists { continue; }
+                            if meta.quantize == Quantize::Immediate {
+                                self.start_clip(t, scene as usize, meta, out);
+                            } else {
+                                if let Some(p) = self.pending[t] {
+                                    if matches!(p.action, TrigAction::Launch) && p.scene as usize != scene as usize {
+                                        Self::emit(out, ClipEvent::StateChange {
+                                            track: t as u8, scene: p.scene, new_state: ClipState::Empty,
+                                        });
+                                    }
+                                }
+                                self.pending[t] = Some(PendingTrigger {
+                                    scene: scene as u8,
+                                    action: TrigAction::Launch,
+                                    quantize_ticks: common_q,
+                                });
+                                Self::emit(out, ClipEvent::StateChange {
+                                    track: t as u8, scene: scene as u8, new_state: ClipState::Triggered,
+                                });
+                            }
+                        }
+                    }
                 }
                 ControlCmd::ToggleMetronome => {
                     // Este comando se maneja en el UI thread, no en el audio thread
@@ -208,7 +252,7 @@ impl ClipEngine {
                     });
                 }
             }
-            self.pending[t] = Some(PendingTrigger { scene: s as u8, action: TrigAction::Launch, quantize: meta.quantize });
+            self.pending[t] = Some(PendingTrigger { scene: s as u8, action: TrigAction::Launch, quantize_ticks: self.effective_quantize_ticks(meta.quantize) });
             Self::emit(out, ClipEvent::StateChange { track: t as u8, scene: s as u8, new_state: ClipState::Triggered });
         }
     }
@@ -222,7 +266,7 @@ impl ClipEngine {
                 Self::emit(out, ClipEvent::StateChange { track: t as u8, scene, new_state: ClipState::Empty });
             }
         } else if self.active[t].is_some() || self.pending[t].is_some() {
-            self.pending[t] = Some(PendingTrigger { scene, action: TrigAction::Stop, quantize: audio.quantize });
+            self.pending[t] = Some(PendingTrigger { scene, action: TrigAction::Stop, quantize_ticks: self.effective_quantize_ticks(audio.quantize) });
             Self::emit(out, ClipEvent::StateChange { track: t as u8, scene, new_state: ClipState::Stopping });
         }
     }
@@ -301,7 +345,7 @@ impl ClipEngine {
             // 1) Triggers pendientes → aplicar en el punto de quantize
             //    (alineado al ciclo de Groove si está activo).
             if let Some(p) = self.pending[t] {
-                let q = self.effective_quantize_ticks(p.quantize);
+                let q = p.quantize_ticks;
                 if q == 0 || now % q == 0 {
                     self.pending[t] = None;
                     match p.action {

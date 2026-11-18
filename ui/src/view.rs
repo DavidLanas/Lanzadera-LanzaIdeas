@@ -559,15 +559,21 @@ impl SessionView {
                 if ui.add(egui::DragValue::new(&mut tempo).speed(0.1).range(20.0..=666.0)).changed() {
                     cmds.push(ControlCmd::SetTempo { bpm: tempo as f32 });
                 }
-                if ui.add(egui::Button::new(if playing { "⏹ Stop" } else { "▶ Play" })
+                if ui.add(egui::Button::new(if playing { "⏸ Pause" } else { "▶ Play" })
                     .fill(if playing { T.clip_playing.gamma_multiply(0.5) } else { T.panel })).clicked() {
+                    // Segundo press = pausa: el transporte se congela y al volver
+                    // a Play retoma en el mismo compás (no resetea el reloj).
                     cmds.push(if playing { ControlCmd::Stop } else { ControlCmd::Play });
                 }
                 if ui.add(egui::Button::new("⏺ Rec")
                     .fill(if recording { T.clip_rec.gamma_multiply(0.6) } else { T.panel })).clicked() {
                     cmds.push(ControlCmd::Record);
                 }
-                if ui.button("⏹ Todo").clicked() { cmds.push(ControlCmd::StopAll); }
+                if ui.button("⏹ Todo").clicked() {
+                    // Stop global único: para todo y vuelve al compás 1.1.
+                    lanzadera_engine::audio_io::STOP_ALL_REQ.store(true, std::sync::atomic::Ordering::Relaxed);
+                    cmds.push(ControlCmd::StopAll);
+                }
                 ui.separator();
                 ui.separator();
                 ui.label("Quantize");
@@ -860,19 +866,26 @@ impl SessionView {
             cmds.push(ControlCmd::SelectClip { track: t as u8, scene: s as u8 });
             self.inspector_focus = InspectorFocus::Clip;
         } else if resp.clicked() {
-            // Clic izquierdo: el slot SIEMPRE toma el foco del Inspector.
-            // Si tiene contenido, además se lanza. SelectClip va después
-            // para que el foco quede aquí aunque launch_clip salga antes
-            // (modo Toggle sobre un clip que ya suena).
             if clip.is_some() {
+                // Clic izquierdo: el slot SIEMPRE toma el foco del Inspector.
+                // Si tiene contenido, además se lanza. SelectClip va después
+                // para que el foco quede aquí aunque launch_clip salga antes
+                // (modo Toggle sobre un clip que ya suena).
                 cmds.push(ControlCmd::LaunchClip { track: t as u8, scene: s as u8 });
-            }
-            cmds.push(ControlCmd::SelectClip { track: t as u8, scene: s as u8 });
-            self.inspector_focus = if clip.is_some() {
-                InspectorFocus::Clip
+                cmds.push(ControlCmd::SelectClip { track: t as u8, scene: s as u8 });
+                self.inspector_focus = InspectorFocus::Clip;
             } else {
-                InspectorFocus::Track
-            };
+                // Flujo Bitwig: pista armada + celda vacía + click = grabar con
+                // count-in. La celda se pone roja parpadeante (RecQueued) y la
+                // captura abre en el 1.1 real, con margen para la latencia MIDI.
+                // Sin arm, el click solo selecciona (comportamiento anterior).
+                let armed = { shared.state.lock().unwrap().tracks.get(t).map(|tr| tr.arm).unwrap_or(false) };
+                cmds.push(ControlCmd::SelectClip { track: t as u8, scene: s as u8 });
+                if armed {
+                    cmds.push(ControlCmd::Record);
+                }
+                self.inspector_focus = InspectorFocus::Track;
+            }
         }
         if resp.secondary_clicked() {
             cmds.push(ControlCmd::SelectClip { track: t as u8, scene: s as u8 });

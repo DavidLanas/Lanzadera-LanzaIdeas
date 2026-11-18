@@ -159,7 +159,7 @@ fn drain_rec_slot(shared: &SessionShared) {
                 shared.edit(|st| {
                     let tempo = st.tempo.max(20.0);
                     // 240 = 60 s/min * 4 beats/compás (4/4).
-                    let bars = ((audio_secs * tempo / 240.0).ceil() as i64)
+                    let bars = ((audio_secs * tempo / 240.0).round() as i64)
                         .clamp(1, 255) as u8;
                     bars_used = bars;
                     if let Some(tr) = st.tracks.get_mut(t) {

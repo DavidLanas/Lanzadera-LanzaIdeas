@@ -329,8 +329,8 @@ impl SessionState {
                         if let Some(slot) = tr.clips.get_mut(s) {
                             if slot.is_none() {
                                 *slot = Some(Clip {
-                                    name: format!("Rec {}", s + 1), loop_bars: 8,
-                                    quantize: Quantize::Immediate, ..Default::default()
+                                    name: format!("Rec {}", s + 1), loop_bars: 8, quantize: q,
+                                    ..Default::default()
                                 });
                             }
                             // Con quantize ≠ Immediate la captura espera la

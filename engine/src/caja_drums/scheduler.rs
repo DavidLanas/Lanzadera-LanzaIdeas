@@ -24,6 +24,9 @@ pub struct CajaSchedulerShared {
     pub current_abs_step: AtomicU32,
     /// Tempo fijo para el reloj libre (run_mode=1). Se copia desde el launcher.
     pub free_bpm: AtomicU8,
+    /// Ciclo de Groove en ticks, publicado para el motor de clips.
+    /// Se lee sin lock en el callback RT.
+    pub groove_loop_ticks: AtomicU32,
 }
 
 impl Default for CajaSchedulerShared {
@@ -39,6 +42,7 @@ impl Default for CajaSchedulerShared {
             current_step: AtomicU8::new(255),
             current_abs_step: AtomicU32::new(u32::MAX),
             free_bpm: AtomicU8::new(120),
+            groove_loop_ticks: AtomicU32::new(1920),
         }
     }
 }
@@ -46,6 +50,7 @@ impl Default for CajaSchedulerShared {
 impl CajaSchedulerShared {
     /// Publica un nuevo calendario (llamado desde la UI).
     pub fn set_schedule(&self, sch: Schedule) {
+        self.groove_loop_ticks.store(sch.loop_ticks.max(1), Ordering::Relaxed);
         *self.schedule.lock().unwrap() = Arc::new(sch);
     }
 
@@ -140,6 +145,11 @@ impl CajaScheduler {
         }
 
         out_buf
+    }
+
+    /// Ciclo de Groove en ticks, para alinear lanzamientos de clips.
+    pub fn groove_loop_ticks(&self) -> u32 {
+        self.shared.groove_loop_ticks.load(Ordering::Relaxed)
     }
 
     pub fn reset(&mut self) {

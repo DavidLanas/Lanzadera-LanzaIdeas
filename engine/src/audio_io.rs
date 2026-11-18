@@ -24,6 +24,12 @@ pub static REC_SLOT: Mutex<RecSlot> = Mutex::new(None);
 /// Mismo handoff que REC_SLOT, inspirado en Maolan (BSD-2).
 pub static KILL_TRACKS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
 
+/// Flag de stop global (⏹ Todo). La UI lo pone; el RT lo consume al
+/// detectar la transición playing→stop. Pausa (⏸) NO lo pone, así que
+/// el reloj no se resetea y al volver a Play retoma donde quedó.
+pub static STOP_ALL_REQ: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 use crate::clip_engine::{ClipEngine, ClipEvent};
 use crate::eq::{EqBank, EqParams};
 use crate::midi::{MidiMsg, MidiOut, MidiVoice};
@@ -267,8 +273,13 @@ impl Renderer {
                     }
                 } else { self.synth.all_off(t as u8); }
             }
-            self.engine.reset_transport();
-            self.caja_scheduler.reset();
+            // Pausa (⏸) NO resetea el reloj: al volver a Play retoma en el
+            // mismo compás, alineado al ciclo de Groove. Solo el stop global
+            // (⏹ Todo) vuelve todo a 1.1.
+            if STOP_ALL_REQ.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                self.engine.reset_transport();
+                self.caja_scheduler.reset();
+            }
         }
         self.was_playing = audio.playing;
 
@@ -586,6 +597,12 @@ impl Renderer {
             // Posición musical del launcher (fuente de verdad para toda la sesión).
             // Convierte ticks a beats: 1920 ticks = 4 beats = 1 compás 4/4.
             let song_beats = self.engine.global_ticks() as f64 * 4.0 / TICKS_PER_BAR as f64;
+            // Publicar el ciclo de Groove al motor de clips: así el
+            // scene barrier y effective_quantize_ticks alinean los
+            // lanzamientos al downbeat real de la batería.
+            let glt = self.caja_scheduler.groove_loop_ticks();
+            self.engine.set_groove_loop_ticks(glt);
+
             let sched_trigs = self.caja_scheduler.process(frames, audio.playing, audio.tempo as f64, song_beats);
             
             // Fusionar triggers manuales (pads físicos) + automáticos (scheduler)
