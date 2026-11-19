@@ -44,18 +44,18 @@ use caja_core::kit::{PadCfg, PadLive, ALL_LOCK, NUM_PADS};
 /// se trocean). Los plugins se activan con este max_frames_count.
 pub const MAX_BLOCK: usize = 4096;
 #[cfg(feature = "clap")]
-const MAX_EVENTS: usize = 512;
+const MAX_EVENTS: usize = crate::plugin_events::MAX_PLUGIN_EVENTS;
 
 #[cfg(feature = "clap")]
 use crate::clap_host::{self, Processor};
+#[cfg(feature = "vst3")]
+use crate::vst3_slot;
+#[cfg(feature = "vst3")]
+use vst3_host::midi::MidiEvent;
 #[cfg(feature = "clap")]
 use clack_host::prelude::*;
 #[cfg(feature = "clap")]
-use clack_host::events::event_types::{MidiEvent, NoteOffEvent, NoteOnEvent, ParamValueEvent};
-#[cfg(feature = "clap")]
 use clack_host::events::io::EventBuffer;
-#[cfg(feature = "clap")]
-use clack_host::events::{Match, Pckn};
 
 pub struct AudioHandle {
     /// Mantiene vivo el stream; con la feature clap el Drop lo suelta
@@ -66,7 +66,9 @@ pub struct AudioHandle {
     #[allow(dead_code)] // mantiene vivo el hilo del loader
     caja_loader: Option<CajaLoader>,
     #[cfg(feature = "clap")]
-    instances: Vec<clap_host::Instance>,
+    /// (indice de pista, instancia). El indice permite abrir la GUI de la
+    /// pista correcta: el orden de carga no es el orden de pista.
+    instances: Vec<(usize, clap_host::Instance)>,
     #[cfg(feature = "clap")]
     retire_rx: Option<std::sync::mpsc::Receiver<clap_host::Stopped>>,
     #[allow(dead_code)] // mantiene vivo el stream de entrada
@@ -74,14 +76,45 @@ pub struct AudioHandle {
 }
 
 #[cfg(feature = "clap")]
+impl AudioHandle {
+    /// Atiende la peticion de abrir/cerrar la interfaz de un plugin.
+    /// Se llama desde el hilo principal (App::update), nunca desde RT.
+    pub fn poll_gui_requests(&mut self) {
+        // Ventanas que el usuario cerro desde su propio boton: hay que acusar
+        // recibo con destroy mientras la instancia sigue viva.
+        for (t, destroyed) in crate::clap_gui::take_closed() {
+            if let Some((_, inst)) = self.instances.iter_mut().find(|(i, _)| *i == t) {
+                crate::clap_gui::ack_closed(inst, t, destroyed);
+            }
+        }
+        let Some(t) = crate::clap_gui::take_request() else { return };
+        let Some((_, inst)) = self.instances.iter_mut().find(|(i, _)| *i == t) else {
+            eprintln!("[gui] pista {} no tiene plugin cargado", t + 1);
+            return;
+        };
+        let title = format!("Lanzadera · pista {}", t + 1);
+        match crate::clap_gui::toggle(inst, t, &title) {
+            Ok(()) => {
+                let (_, open) = crate::clap_gui::state(t);
+                println!("[gui] pista {}: {}", t + 1, if open { "abierta" } else { "cerrada" });
+            }
+            Err(e) => eprintln!("[gui] pista {}: {}", t + 1, e),
+        }
+    }
+}
+
+#[cfg(feature = "clap")]
 impl Drop for AudioHandle {
     fn drop(&mut self) {
+        // 0) Cerrar las GUI abiertas ANTES de soltar nada: la ventana del
+        //    plugin debe destruirse mientras la instancia sigue viva.
+        crate::clap_gui::close_all(&mut self.instances);
         // 1) Soltar el stream dropea el Renderer, que devuelve los procesadores.
         self.stream.take();
         // 2) Desactivar cada procesador con su instancia (hilo principal).
         if let Some(rx) = &self.retire_rx {
             while let Ok(p) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
-                if let Some(inst) = self.instances.iter_mut().find(|i| p.matches(i)) {
+                if let Some((_, inst)) = self.instances.iter_mut().find(|(_, i)| p.matches(i)) {
                     inst.deactivate(p);
                 }
             }
@@ -115,8 +148,14 @@ struct Renderer {
     bufs: Box<[[[f32; MAX_BLOCK]; 2]; MAX_TRACKS]>,
     #[cfg(feature = "clap")]
     plugins: [Option<Processor>; MAX_TRACKS],
+    #[cfg(feature = "vst3")]
+    vst3_plugins: [Option<vst3_slot::Vst3Slot>; MAX_TRACKS],
     #[cfg(feature = "clap")]
     ev: [EventBuffer; MAX_TRACKS],
+    /// Cola neutral donde escriben los sitios de eventos. Solo flush_clap()
+    /// la traduce al formato del plugin, justo antes de process().
+    #[cfg(feature = "clap")]
+    pev: Box<[crate::plugin_events::PluginEvents; MAX_TRACKS]>,
     #[cfg(feature = "clap")]
     pbuf: Box<[[f32; MAX_BLOCK]; 2]>,
     #[cfg(feature = "clap")]
@@ -158,9 +197,12 @@ impl Renderer {
     #[inline]
     fn has_plugin(&self, t: usize) -> bool {
         #[cfg(feature = "clap")]
-        { self.plugins[t].is_some() }
-        #[cfg(not(feature = "clap"))]
-        { let _ = t; false }
+        if self.plugins[t].is_some() { return true; }
+        #[cfg(feature = "vst3")]
+        if self.vst3_plugins[t].is_some() { return true; }
+        #[cfg(not(any(feature = "clap", feature = "vst3")))]
+        let _ = t;
+        false
     }
 
     /// Nota hacia el plugin (evento time-stamped) o hacia el sinte interno.
@@ -168,16 +210,11 @@ impl Renderer {
         let _ = frame; // solo se usa con la feature clap
         #[cfg(feature = "clap")]
         if self.plugins[t].is_some() {
-            if self.ev[t].len() as usize >= MAX_EVENTS { return; }
+            // Cola neutral: aqui ya no hay tipos de clack. El tope de eventos
+            // lo aplica PluginEvents internamente.
             match msg {
-                MidiMsg::On { note, vel, ch } => {
-                    let p = Pckn::new(0u16, ch as u16, note as u16, note as u32);
-                    self.ev[t].push(&NoteOnEvent::new(frame, p, vel as f64 / 127.0));
-                }
-                MidiMsg::Off { note, ch } => {
-                    let p = Pckn::new(0u16, ch as u16, note as u16, note as u32);
-                    self.ev[t].push(&NoteOffEvent::new(frame, p, 0.0));
-                }
+                MidiMsg::On { note, vel, ch } => self.pev[t].note_on(frame, note, vel, ch),
+                MidiMsg::Off { note, ch } => self.pev[t].note_off(frame, note, ch),
             }
             return;
         }
@@ -251,7 +288,7 @@ impl Renderer {
             buf[1][..frames].fill(0.0);
         }
         #[cfg(feature = "clap")]
-        for t in 0..n { self.ev[t].clear(); }
+        for t in 0..n { self.pev[t].clear(); }
 
         // ── Cambios de parámetros del plugin (Fase 3G) ──
         // TODO 3H: enviar cambios de parámetros al plugin. La API de
@@ -461,10 +498,8 @@ impl Renderer {
                             let t = (track as usize).min(n - 1);
                             if self.has_plugin(t) {
                                 #[cfg(feature = "clap")]
-                                if (self.ev[t].len() as usize) < MAX_EVENTS {
-                                    self.ev[t].push(&MidiEvent::new(f as u32, 0u16,
-                                        [0xE0, (value & 0x7F) as u8, ((value >> 7) & 0x7F) as u8]));
-                                }
+                                self.pev[t].midi3(f as u32, 0xE0,
+                                    (value & 0x7F) as u8, ((value >> 7) & 0x7F) as u8);
                             } else {
                                 self.synth.pitch_bend(t as u8, value);
                             }
@@ -473,9 +508,7 @@ impl Renderer {
                             let t = (track as usize).min(n - 1);
                             if self.has_plugin(t) {
                                 #[cfg(feature = "clap")]
-                                if (self.ev[t].len() as usize) < MAX_EVENTS {
-                                    self.ev[t].push(&MidiEvent::new(f as u32, 0u16, [0xB0, 1, value]));
-                                }
+                                self.pev[t].midi3(f as u32, 0xB0, 1, value);
                             } else {
                                 self.synth.mod_wheel(t as u8, value);
                             }
@@ -494,22 +527,10 @@ impl Renderer {
                                 let t = (track as usize).min(n.saturating_sub(1));
                                 if self.has_plugin(t) {
                                     if let Some((id, plain)) = crate::clap_params::param_plain(t, param_idx as usize, value) {
-                                        if (self.ev[t].len() as usize) < MAX_EVENTS {
-                                            if let Some(pid) = ClapId::from_raw(id) {
-                                                // ParamValueEvent viaja en el EventBuffer del plugin.
-                                                // No hay alloc: el buffer ya está reservado.
-                                                //
-                                                // El Pckn neutro indica que no estamos usando
-                                                // automatización por puerto/canal/tecla/nota.
-                                                // API: clack-common / clack-host (MIT/Apache).
-                                                self.ev[t].push(&ParamValueEvent::new(
-                                                    f as u32,
-                                                    pid,
-                                                    Pckn::new(Match::All, Match::All, Match::All, Match::All),
-                                                    plain,
-                                                ));
-                                            }
-                                        }
+                                        // La cola guarda (id, plain). El Pckn neutro y el
+                                        // ParamValueEvent se construyen al traducir, en
+                                        // plugin_events::flush_clap.
+                                        self.pev[t].param(f as u32, id, plain);
                                     }
                                 }
                             }
@@ -555,6 +576,59 @@ impl Renderer {
             }
         }
 
+        // ── Plugins VST3: un process_bus_audio() por pista y bloque ──
+        // Flujo: clear buffers → enviar MIDI con sample_offset → process →
+        // sumar outputs a bufs[t]. API verificada en source de vst3-host 0.11.1.
+        #[cfg(feature = "vst3")]
+        for t in 0..n {
+            if self.vst3_plugins[t].is_none() { continue; }
+            let Some(slot) = self.vst3_plugins[t].as_mut() else { continue; };
+
+            // Limpiar los buffers reutilizables (silencio) en cada frame.
+            slot.buffers.clear();
+
+            // Enviar eventos MIDI de pev[t] (cola neutral de G5a).
+            for ev in self.pev[t].as_slice() {
+                let ch = vst3_slot::to_midi_channel(ev.c);
+                let event: Option<MidiEvent> = match ev.kind {
+                    crate::plugin_events::EvKind::NoteOn => {
+                        Some(MidiEvent::NoteOn { channel: ch, note: ev.a, velocity: ev.b })
+                    }
+                    crate::plugin_events::EvKind::NoteOff => {
+                        Some(MidiEvent::NoteOff { channel: ch, note: ev.a, velocity: 0 })
+                    }
+                    crate::plugin_events::EvKind::Midi3 => {
+                        // ControlChange: status byte 0xB0 + canal, controller, value
+                        if (ev.a & 0xF0) == 0xB0 {
+                            Some(MidiEvent::ControlChange {
+                                channel: ch, controller: ev.b, value: ev.c,
+                            })
+                        } else { None }
+                    }
+                    _ => None,
+                };
+                if let Some(e) = event {
+                    vst3_slot::send_midi(slot, e, ev.frame as i32);
+                }
+            }
+
+            // Procesar audio a través del bus principal del plugin.
+            let _ = slot.plugin.process_bus_audio(&mut slot.buffers);
+
+            // Sumar las salidas del plugin al buffer de la pista.
+            // Si el plugin no tiene outputs (extraño pero posible), no suma nada.
+            if !slot.buffers.outputs.is_empty() {
+                let out_bus = &slot.buffers.outputs[0];
+                let buf = &mut self.bufs[t];
+                let ch_count = out_bus.channels.len().min(2);
+                for f in 0..frames {
+                    if ch_count >= 1 { buf[0][f] += out_bus.channels[0][f]; }
+                    if ch_count >= 2 { buf[1][f] += out_bus.channels[1][f]; }
+                    else             { buf[1][f] += out_bus.channels[0][f]; } // mono → stereo
+                }
+            }
+        }
+
         // ── Plugins CLAP: un process() por pista y bloque ──
         #[cfg(feature = "clap")]
         for t in 0..n {
@@ -571,6 +645,9 @@ impl Renderer {
                         [&mut pl[..frames], &mut pr[..frames]].into_iter()
                     ),
                 }]);
+                // Traduccion cola neutral -> CLAP. Sin alloc: EventBuffer ya
+                // tiene MAX_EVENTS reservado. Unico punto que conoce el formato.
+                crate::plugin_events::flush_clap(&self.pev[t], &mut self.ev[t]);
                 let input_events = self.ev[t].as_input();
                 let mut output_events = OutputEvents::void();
                 let _ = started.process(
@@ -821,8 +898,8 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
                 .collect()
         };
         for (t, path, id) in plugs {
-            match clap_host::load(&path, id.as_deref(), sample_rate, MAX_BLOCK as u32) {
-                Ok((inst, proc, name, params)) => {
+            match clap_host::load(&path, id.as_deref(), sample_rate, MAX_BLOCK as u32, t) {
+                Ok((mut inst, proc, name, params)) => {
                     println!(
                         "[lanzadera] CLAP pista {}: {} · {} parámetros",
                         t + 1,
@@ -841,7 +918,8 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
                     shared.set_plugin_params(t, ui_params);
 
                     plugins[t] = Some(proc);
-                    instances.push(inst);
+                    crate::clap_gui::probe(&mut inst, t);
+                    instances.push((t, inst));
                 }
                 Err(e) => {
                     crate::clap_params::clear_track_params(t);
@@ -853,6 +931,44 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
     };
     #[cfg(feature = "clap")]
     let _ = &mut plugins;
+
+    #[cfg(feature = "vst3")]
+    let mut vst3_plugins: [Option<vst3_slot::Vst3Slot>; MAX_TRACKS] = std::array::from_fn(|_| None);
+    #[cfg(feature = "vst3")]
+    {
+        let plugs: Vec<(usize, String)> = {
+            let st = shared.state.lock().unwrap();
+            st.tracks.iter().enumerate()
+                .filter_map(|(i, tr)| tr.plugin_path.as_ref()
+                    .filter(|p| p.ends_with(".vst3"))
+                    .map(|p| (i, p.clone())))
+                .collect()
+        };
+        for (t, path) in plugs {
+            match vst3_slot::load(&path, sample_rate, MAX_BLOCK as u32) {
+                Ok(slot) => {
+                    println!(
+                        "[lanzadera] VST3 pista {}: {} · {} parámetros ({})",
+                        t + 1,
+                        slot.plugin.info().name,
+                        slot.params.len(),
+                        if slot.is_instrument { "instrumento" } else { "efecto" }
+                    );
+                    let ui_params: Vec<(String, String, f32)> = slot.params
+                        .iter()
+                        .map(|p| (p.id.to_string(), p.name.clone(), p.value))
+                        .collect();
+                    shared.set_plugin_params(t, ui_params);
+                    vst3_plugins[t] = Some(slot);
+                }
+                Err(e) => {
+                    eprintln!("[lanzadera] VST3 pista {}: {}", t + 1, e);
+                }
+            }
+        }
+    }
+    #[cfg(feature = "vst3")]
+    let _ = &mut vst3_plugins;
 
     // ── Motor de drums de Caja (Fase 4A) ──
     // El store vive en SessionShared: la UI lo necesita para saber qué
@@ -900,8 +1016,12 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
         bufs: Box::new([[[0.0; MAX_BLOCK]; 2]; MAX_TRACKS]),
         #[cfg(feature = "clap")]
         plugins,
+        #[cfg(feature = "vst3")]
+        vst3_plugins,
         #[cfg(feature = "clap")]
         ev: std::array::from_fn(|_| EventBuffer::with_capacity(MAX_EVENTS)),
+        #[cfg(feature = "clap")]
+        pev: Box::new(std::array::from_fn(|_| crate::plugin_events::PluginEvents::new())),
         #[cfg(feature = "clap")]
         pbuf: Box::new([[0.0; MAX_BLOCK]; 2]),
         #[cfg(feature = "clap")]

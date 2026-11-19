@@ -115,7 +115,19 @@ impl eframe::App for LanzaderaApp {
             self.shared.sync_midi(t, s);
             self.view.msg = format!("● {} notas grabadas en Pista {} · Escena {}", count, t + 1, s + 1);
         }
+        // GUI de plugins: la UI encola la pista y aqui se atiende, en el hilo
+        // principal y con las instancias vivas.
+        #[cfg(feature = "clap")]
+        if let Some(a) = &mut self._audio { a.poll_gui_requests(); }
+
         self.view.show(ctx, &self.shared, self._audio.is_some());
+
+        // ── GUI nativa de plugins CLAP (Fase 3H) ─────────────────────────
+        #[cfg(feature = "clap")]
+        for track in self.view.take_native_gui_requests() {
+            lanzadera_engine::clap_gui::request_toggle(track);
+        }
+
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

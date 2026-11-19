@@ -1,0 +1,111 @@
+//! Hosting de plugins VST3 (Fase 7) usando vst3-host 0.11 (MIT).
+//!
+//! # Atribución
+//!   - vst3-host: https://github.com/HelgeSverre/rust-vst3-host (MIT)
+//!   - VST3 SDK: Steinberg (MIT desde 2025, antes GPLv3/propietaria)
+//!
+//! # API verificada en docs.rs (vst3-host 0.11.1)
+//!   - Vst3Host::builder().sample_rate(sr).block_size(bs).build()
+//!   - host.load_plugin(path) -> Result<Plugin>
+//!   - plugin.update_parameters(|u| u.set(id, value))
+//!   - RealtimePluginRunner para procesamiento RT (la API simple no es lock-free)
+
+use std::path::PathBuf;
+use vst3_host::{Plugin, Vst3Host, parameters::Parameter};
+
+/// (ruta, nombre) de un plugin VST3 encontrado por `scan`.
+pub type Vst3Ref = (String, String);
+
+/// Información de un parámetro VST3 expuesto por el plugin.
+#[derive(Clone, Debug)]
+pub struct Vst3ParamInfo {
+    pub id: u32,
+    pub name: String,
+    pub value: f32,
+    pub min: f64,
+    pub max: f64,
+}
+
+/// Directorios estándar de VST3 en Linux.
+const VST3_PATHS: &[&str] = &[
+    "~/.vst3",
+    "/usr/lib/vst3",
+    "/usr/local/lib/vst3",
+];
+
+/// Escanea los directorios estándar y devuelve (ruta, nombre) de cada .vst3.
+pub fn scan() -> Vec<Vst3Ref> {
+    let mut out = Vec::new();
+    for path_str in VST3_PATHS {
+        let path = if path_str.starts_with('~') {
+            if let Some(home) = std::env::var("HOME").ok() {
+                PathBuf::from(path_str.replacen('~', &home, 1))
+            } else { continue; }
+        } else {
+            PathBuf::from(path_str)
+        };
+        
+        if !path.exists() { continue; }
+        if let Ok(entries) = std::fs::read_dir(&path) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.extension().and_then(|e| e.to_str()) == Some("vst3") {
+                    if let Some(name) = p.file_stem().and_then(|s| s.to_str()) {
+                        out.push((p.to_string_lossy().into_owned(), name.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| a.1.cmp(&b.1));
+    out
+}
+
+/// Carga y activa un plugin VST3.
+pub fn load(path: &str, sample_rate: u32, max_frames: u32)
+    -> Result<(Vst3Host, Plugin, String, Vec<Vst3ParamInfo>), String>
+{
+    let host = Vst3Host::builder()
+        .sample_rate(sample_rate as f64)
+        .block_size(max_frames)
+        .build()
+        .map_err(|e| format!("build host: {}", e))?;
+    
+    let mut plugin = host.load_plugin(path)
+        .map_err(|e| format!("load_plugin: {}", e))?;
+    
+    let name = plugin.info().name.clone();
+    let params = describe_params(&plugin);
+    
+    // Activar procesamiento (no-started).
+    plugin.start_processing()
+        .map_err(|e| format!("start_processing: {}", e))?;
+    
+    Ok((host, plugin, name, params))
+}
+
+/// Enumera los parámetros expuestos por el plugin.
+pub fn describe_params(plugin: &Plugin) -> Vec<Vst3ParamInfo> {
+    let mut out = Vec::new();
+    for param in plugin.parameters() {
+        let info = param.info();
+        let value = plugin.get_parameter_normalized(info.id)
+            .unwrap_or(info.default_value) as f32;
+        out.push(Vst3ParamInfo {
+            id: info.id,
+            name: info.title.clone(),
+            value,
+            min: info.min_value,
+            max: info.max_value,
+        });
+    }
+    out
+}
+
+/// Actualiza un parámetro en tiempo real.
+pub fn set_param(plugin: &mut Plugin, param_id: u32, value: f32) {
+    let _ = plugin.update_parameters(|u| {
+        u.set(param_id, value as f64);
+        Ok(())
+    });
+}

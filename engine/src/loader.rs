@@ -25,6 +25,22 @@ pub fn spawn(shared: Arc<SessionShared>, target_rate: u32) -> std::thread::JoinH
                 std::thread::sleep(Duration::from_millis(10));
                 continue;
             };
+            // .mid/.midi -> notas de clip. Audio -> SampleStore.
+            // Ambas rutas corren aqui, fuera del callback de audio.
+            if crate::midi_file::is_midi_file(&req.path) {
+                match crate::midi_file::install_midi(&shared, req.track, req.scene, &req.path) {
+                    Ok(n) => {
+                        println!("[midi] {} notas -> pista {} escena {}",
+                                 n, req.track + 1, req.scene + 1);
+                        *shared.status.lock().unwrap() = LoadStatus::Ready;
+                    }
+                    Err(e) => {
+                        *shared.status.lock().unwrap() =
+                            LoadStatus::Error(format!("{}: {}", req.path, e));
+                    }
+                }
+                continue;
+            }
             match decode_file(&req.path, target_rate) {
                 Ok(sd) => {
                     shared.samples.store(req.track, req.scene, Arc::new(sd));

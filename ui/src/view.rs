@@ -12,6 +12,10 @@ use lanzadera_engine::shared::{LoadStatus, SessionShared};
 use crate::theme::T;
 use crate::widgets;
 use crate::piano_roll::PianoRoll;
+use crate::plugin_window::PluginWindows;
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum BrowserMode { Clap, Vst3 }
 use crate::eq_view;
 
 const Q_LIST: [(Quantize, &str); 10] = [
@@ -151,6 +155,9 @@ pub struct SessionView {
     pub plugin_path_input: String,
     pub browser_open: bool,
     pub browser_list: Option<Vec<(String, String, String)>>,
+    pub browser_mode: BrowserMode,
+    pub plugin_windows: PluginWindows,
+    pub pending_native_gui: Vec<usize>,
     pub groove_sequencer_open: bool,
 }
 
@@ -202,12 +209,19 @@ impl Default for SessionView {
             plugin_path_input: String::new(),
             browser_open: false,
             browser_list: None,
+            browser_mode: BrowserMode::Clap,
+            plugin_windows: PluginWindows::default(),
+            pending_native_gui: Vec::new(),
             groove_sequencer_open: false,
         }
     }
 }
 
 impl SessionView {
+    pub fn take_native_gui_requests(&mut self) -> Vec<usize> {
+        std::mem::take(&mut self.pending_native_gui)
+    }
+
     pub fn show(&mut self, ctx: &egui::Context, shared: &Arc<SessionShared>, audio_on: bool) {
         // ── Fase 1.4C.2b: peticiones del MK3 físico ──────────────────
         // Pestaña de Groove Machine pedida por PAD_MODE/STEP/KEYBOARD/CHORDS
@@ -483,6 +497,9 @@ impl SessionView {
         }
 
         self.audio_modal_window(ctx, shared);
+        // ── Ventanas flotantes de plugins (Fase 3H) ──
+        let native_reqs = self.plugin_windows.show(ctx, shared);
+        self.pending_native_gui.extend(native_reqs);
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
 
@@ -551,9 +568,11 @@ impl SessionView {
                 }
                 ui.separator();
                 
-                let (mut tempo, playing, recording, q) = {
+                let (mut tempo, playing, recording, q, rec_armed) = {
                     let st = shared.state.lock().unwrap();
-                    (st.tempo, st.playing, st.recording, st.quantize)
+                    let (rt, _, _) = st.record_target();
+                    let armed = st.tracks.get(rt).map(|tr| tr.arm).unwrap_or(false);
+                    (st.tempo, st.playing, st.recording, st.quantize, armed)
                 };
                 ui.label("BPM");
                 if ui.add(egui::DragValue::new(&mut tempo).speed(0.1).range(20.0..=666.0)).changed() {
@@ -565,7 +584,9 @@ impl SessionView {
                     // a Play retoma en el mismo compás (no resetea el reloj).
                     cmds.push(if playing { ControlCmd::Stop } else { ControlCmd::Play });
                 }
-                if ui.add(egui::Button::new("⏺ Rec")
+                // Rec atenuado si la pista destino no esta armada. Desarmar
+                // sigue permitido aunque la pista haya quedado desarmada.
+                if ui.add_enabled(rec_armed || recording, egui::Button::new("⏺ Rec")
                     .fill(if recording { T.clip_rec.gamma_multiply(0.6) } else { T.panel })).clicked() {
                     cmds.push(ControlCmd::Record);
                 }
@@ -908,6 +929,23 @@ impl SessionView {
             if clip.is_some() && ui.button("🗑 Borrar").clicked() { deletes.push((t, s)); ui.close_menu(); }
         });
 
+        // Arrastre interno desde el browser (Fase G3). Se resuelve antes que
+        // el drop de archivos del SO para que ambos caminos convivan.
+        // Mismo destino: la cola `loads`, que el loader reparte segun la
+        // extension (.mid -> notas, audio -> SampleStore).
+        if egui::DragAndDrop::has_payload_of_type::<BrowserFile>(ctx) {
+            // rect_contains_pointer respeta clip_rect y layer: si el grid esta
+            // scrolleado o tapado por otra ventana, no da falso positivo.
+            if ui.rect_contains_pointer(rect) {
+                p.rect_stroke(rect, Rounding::same(4.0), Stroke::new(2.0, T.accent));
+                if ctx.input(|i| i.pointer.any_released()) {
+                    if let Some(dropped) = egui::DragAndDrop::take_payload::<BrowserFile>(ctx) {
+                        loads.push((t, s, dropped.0.clone()));
+                    }
+                }
+            }
+        }
+
         // Drag & drop de archivos sobre la celda.
         if has_drop {
             if let Some(pos) = ctx.input(|i| i.pointer.hover_pos()) {
@@ -1101,7 +1139,24 @@ impl SessionView {
             ui.horizontal(|ui| {
                 if ui.button("Cargar").clicked() { plugin_load = Some((t, self.plugin_path_input.clone())); }
                 if ui.button("Quitar").clicked() { plugin_clear = Some(t); }
-                if lanzadera_engine::CLAP_ENABLED && ui.button("🔍 Explorar").clicked() { self.browser_open = true; }
+            if ui.button("⚙ Parámetros").on_hover_text("Ventana flotante con todos los parámetros del plugin").clicked() {
+                self.plugin_windows.open(t);
+            }
+            // Interfaz propia del plugin (Fase G6a). Atenuado si el plugin no
+            // expone la extension GUI: mismo criterio que Rec sin arm.
+            let (has_gui, gui_open) = lanzadera_engine::clap_gui::state(t);
+            let label = if gui_open { "🖥 Cerrar interfaz" } else { "🖥 Interfaz" };
+            if ui.add_enabled(has_gui, egui::Button::new(label)).clicked() {
+                lanzadera_engine::clap_gui::request_toggle(t);
+            }
+                if lanzadera_engine::CLAP_ENABLED && ui.button("🔍 CLAP").on_hover_text("Explorar plugins CLAP").clicked() { 
+                self.browser_open = true; 
+                self.browser_mode = BrowserMode::Clap;
+            }
+            if lanzadera_engine::VST3_ENABLED && ui.button("🔍 VST3").on_hover_text("Explorar plugins VST3").clicked() { 
+                self.browser_open = true; 
+                self.browser_mode = BrowserMode::Vst3;
+            }
             });
             ui.separator();
             ui.label(egui::RichText::new(format!("EQ · Pista {}", t + 1)).size(12.0));
@@ -1176,7 +1231,21 @@ impl SessionView {
     // ── Browser de plugins CLAP (Fase 3E) ─────────────────────────────────
     fn browser_window(&mut self, ctx: &egui::Context, shared: &SessionShared) {
         if !self.browser_open { return; }
-        if self.browser_list.is_none() { self.browser_list = Some(lanzadera_engine::clap_scan()); }
+        match self.browser_mode {
+            BrowserMode::Clap => {
+                if self.browser_list.is_none() { 
+                    self.browser_list = Some(lanzadera_engine::clap_scan()); 
+                }
+            }
+            BrowserMode::Vst3 => {
+                // Para VST3 usamos el mismo browser_list pero con (path, name, "")
+                if self.browser_list.is_none() {
+                    self.browser_list = Some(
+                        lanzadera_engine::vst3_scan().into_iter().map(|(p, n)| (p, n, String::new())).collect()
+                    );
+                }
+            }
+        }
         let t = { shared.state.lock().unwrap().selected_track };
         let mut open = self.browser_open;
         let mut chosen: Option<(String, String)> = None;
@@ -1200,7 +1269,14 @@ impl SessionView {
                         });
                     }
                 }
-                if ui.button("⟳ Re-escanear").clicked() { self.browser_list = Some(lanzadera_engine::clap_scan()); }
+                if ui.button("⟳ Re-escanear").clicked() { 
+                    match self.browser_mode {
+                        BrowserMode::Clap => self.browser_list = Some(lanzadera_engine::clap_scan()),
+                        BrowserMode::Vst3 => self.browser_list = Some(
+                            lanzadera_engine::vst3_scan().into_iter().map(|(p, n)| (p, n, String::new())).collect()
+                        ),
+                    }
+                }
             });
         self.browser_open = open;
         if let Some((path, id)) = chosen {
@@ -2319,8 +2395,38 @@ impl SessionView {
                             if ui.button(format!("📁 {}", name)).clicked() {
                                 self.browser_path = path;
                             }
+                        } else if is_midi_file(&path) {
+                            // Un .mid se carga por la misma cola que el audio;
+                            // el loader decide segun la extension.
+                            let label = format!("🎼 {}", name);
+                            let resp = ui.dnd_drag_source(
+                                egui::Id::new(("browser_midi", &path)),
+                                BrowserFile(path.to_string_lossy().into_owned()),
+                                move |ui| ui.button(label),
+                            ).inner;
+                            if resp.clicked() {
+                                let (track, scene) = {
+                                    let st = shared.state.lock().unwrap();
+                                    (st.selected_track, st.selected_scene)
+                                };
+                                if let Ok(mut q) = shared.load_queue.lock() {
+                                    q.push_back(lanzadera_engine::shared::LoadRequest {
+                                        track,
+                                        scene,
+                                        path: path.to_string_lossy().to_string(),
+                                    });
+                                }
+                            }
                         } else if is_audio_file(&path) {
-                            let resp = ui.button(format!("🎵 {}", name));
+                            // Fuente de arrastre: el boton sigue funcionando con
+                            // click (carga en la celda seleccionada) y ademas se
+                            // puede arrastrar a cualquier celda del grid.
+                            let label = format!("🎵 {}", name);
+                            let resp = ui.dnd_drag_source(
+                                egui::Id::new(("browser_audio", &path)),
+                                BrowserFile(path.to_string_lossy().into_owned()),
+                                move |ui| ui.button(label),
+                            ).inner;
                             if resp.clicked() {
                                 let (track, scene) = {
                                     let st = shared.state.lock().unwrap();
@@ -2436,6 +2542,21 @@ fn is_audio_file(path: &std::path::Path) -> bool {
         None => false,
     }
 }
+
+fn is_midi_file(path: &std::path::Path) -> bool {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => matches!(ext.to_ascii_lowercase().as_str(), "mid" | "midi"),
+        None => false,
+    }
+}
+
+/// Payload del arrastre browser -> celda (Fase G3).
+///
+/// Newtype sobre String a proposito: si el payload fuera un String pelado,
+/// cualquier otro arrastre de texto de la app podria colisionar con este.
+/// egui exige `Any + Send + Sync`; String lo cumple.
+#[derive(Clone)]
+struct BrowserFile(String);
 
 // ════════════════════════════════════════════════════════════════════════
 //  Fase 4B.2 — Inspector de Groove Machine conectado al modelo real

@@ -319,7 +319,16 @@ impl SessionState {
             ControlCmd::Play => self.playing = true,
             ControlCmd::Stop => self.playing = false,
             ControlCmd::Record => {
-                self.recording = !self.recording;
+                // Arm obligatorio para ARMAR la grabacion; desarmar siempre se
+                // permite. Conducta de Session View: Rec solo actua si la pista
+                // destino esta armada. Referencia de comportamiento: SceneStack
+                // ("Record only enabled when the selected track is armed");
+                // concepto reimplementado, no codigo copiado.
+                let (rt, _, _) = self.record_target();
+                let armed = self.tracks.get(rt).map(|tr| tr.arm).unwrap_or(false);
+                if armed || self.recording {
+                    self.recording = !self.recording;
+                }
                 let (t, s, _) = self.record_target();
                 if self.recording {
                     // Al armar: crea el clip si el slot está vacío y arranca el

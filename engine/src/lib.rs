@@ -4,6 +4,9 @@ pub mod shared;
 pub mod clip_engine;
 pub mod rt;
 pub mod loader;
+pub mod midi_file;
+pub mod plugin_events;
+pub mod clap_gui;
 pub mod audio_io;
 pub mod audio_input;
 pub mod audio_record;
@@ -18,6 +21,14 @@ pub mod clap_params;
 
 /// true si el binario se compiló con hosting CLAP (--features clap).
 pub const CLAP_ENABLED: bool = cfg!(feature = "clap");
+/// true si el binario se compiló con hosting VST3 (--features vst3).
+pub const VST3_ENABLED: bool = cfg!(feature = "vst3");
+#[cfg(feature = "vst3")]
+pub mod vst3_slot;
+#[cfg(feature = "vst3")]
+pub fn vst3_scan() -> Vec<vst3_slot::Vst3Ref> { vst3_slot::scan() }
+#[cfg(not(feature = "vst3"))]
+pub fn vst3_scan() -> Vec<(String, String)> { Vec::new() }
 
 /// Escaneo de plugins CLAP accesible desde la GUI sin importar la feature.
 /// Devuelve (ruta, id, nombre). Vacío si el binario no tiene --features clap.

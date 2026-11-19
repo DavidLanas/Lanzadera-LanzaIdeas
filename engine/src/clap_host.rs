@@ -7,12 +7,45 @@ use std::sync::{Mutex, OnceLock};
 
 use clack_host::prelude::*;
 use clack_extensions::params::{ParamInfoBuffer, ParamInfoFlags, PluginParams};
+use clack_extensions::gui::{GuiSize, HostGuiImpl};
 
-pub struct LanzaderaShared;
+/// Datos compartidos del host. Lleva el indice de pista para poder avisar
+/// al hilo principal cuando el usuario cierra la ventana del plugin.
+pub struct LanzaderaShared { pub track: usize }
 impl<'a> SharedHandler<'a> for LanzaderaShared {
     fn request_restart(&self) {}
     fn request_process(&self) {}
     fn request_callback(&self) {}
+}
+
+/// Extension GUI del lado del host (Fase G6b).
+///
+/// Sin este impl, clack no registra `clap_host_gui` y los plugins responden
+/// `false` a `is_api_supported`. Bound verificado en docs.rs:
+///   impl<H> ExtensionImplementation<H> for HostGui
+///   where for<'a> H: HostHandlers<Shared<'a>: HostGuiImpl>
+///
+/// Va en el Shared, no en el MainThread: no toca HostHandlers ni los params.
+///
+/// Ventana flotante: el plugin gestiona su propio tamaño y visibilidad, asi que
+/// resize/show/hide se aceptan sin mas. `closed` si importa: hay que acusar
+/// recibo con `destroy` desde el hilo principal.
+impl HostGuiImpl for LanzaderaShared {
+    fn resize_hints_changed(&self) {}
+
+    fn request_resize(&self, _new_size: GuiSize) -> Result<(), HostError> {
+        // Flotante: la ventana la dimensiona el plugin, no el host.
+        Ok(())
+    }
+
+    fn request_show(&self) -> Result<(), HostError> { Ok(()) }
+
+    fn request_hide(&self) -> Result<(), HostError> { Ok(()) }
+
+    fn closed(&self, was_destroyed: bool) {
+        // Puede llegar fuera del hilo principal: try_lock para no bloquear.
+        crate::clap_gui::note_closed(self.track, was_destroyed);
+    }
 }
 
 pub struct LanzaderaHost;
@@ -98,7 +131,7 @@ pub fn scan() -> Vec<ClapRef> {
 }
 
 /// Carga y activa un plugin. `want_id = None` → el primero del bundle.
-pub fn load(path: &str, want_id: Option<&str>, sample_rate: u32, max_frames: u32)
+pub fn load(path: &str, want_id: Option<&str>, sample_rate: u32, max_frames: u32, track: usize)
     -> Result<(Instance, Processor, String, Vec<PluginParamInfo>), String>
 {
     let entry = entry_for(path)?;
@@ -114,7 +147,7 @@ pub fn load(path: &str, want_id: Option<&str>, sample_rate: u32, max_frames: u32
     let host_info = HostInfo::new("lanzadera", "DavidLanas", "https://github.com/DavidLanas", "0.1.0")
         .map_err(|e| e.to_string())?;
     let mut instance = PluginInstance::<LanzaderaHost>::new(
-        |_| LanzaderaShared, |_| (), entry, &id, &host_info,
+        |_| LanzaderaShared { track }, |_| (), entry, &id, &host_info,
     ).map_err(|e| format!("no se pudo instanciar: {}", e))?;
 
     let cfg = PluginAudioConfiguration {
