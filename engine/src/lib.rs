@@ -15,6 +15,8 @@ pub mod synth;
 pub mod eq;
 pub mod rec;
 #[cfg(feature = "clap")]
+pub mod xwin;
+#[cfg(feature = "clap")]
 pub mod clap_host;
 #[cfg(feature = "clap")]
 pub mod clap_params;

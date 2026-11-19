@@ -50,8 +50,6 @@ const MAX_EVENTS: usize = crate::plugin_events::MAX_PLUGIN_EVENTS;
 use crate::clap_host::{self, Processor};
 #[cfg(feature = "vst3")]
 use crate::vst3_slot;
-#[cfg(feature = "vst3")]
-use vst3_host::midi::MidiEvent;
 #[cfg(feature = "clap")]
 use clack_host::prelude::*;
 #[cfg(feature = "clap")]
@@ -71,34 +69,67 @@ pub struct AudioHandle {
     instances: Vec<(usize, clap_host::Instance)>,
     #[cfg(feature = "clap")]
     retire_rx: Option<std::sync::mpsc::Receiver<clap_host::Stopped>>,
+    /// Ventanas X11 de las GUI CLAP embebidas (plugins sin GUI flotante).
+    #[cfg(feature = "clap")]
+    clap_embed: crate::clap_gui::EmbedHost,
+    /// Plugins VST3 vivos (pista, plugin compartido con el hilo de audio).
+    /// Esta copia del Arc se suelta la ULTIMA (Drop), en el hilo principal.
+    #[cfg(feature = "vst3")]
+    vst3_handles: Vec<(usize, std::sync::Arc<std::sync::Mutex<vst3_host::plugin::Plugin>>)>,
+    #[cfg(feature = "vst3")]
+    vst3_gui: crate::vst3_slot::Vst3Gui,
     #[allow(dead_code)] // mantiene vivo el stream de entrada
     in_stream: Option<crate::audio_input::AudioInputStream>,
 }
 
 #[cfg(feature = "clap")]
 impl AudioHandle {
-    /// Atiende la peticion de abrir/cerrar la interfaz de un plugin.
-    /// Se llama desde el hilo principal (App::update), nunca desde RT.
+    /// Atiende la peticion de abrir/cerrar la interfaz de un plugin (CLAP o
+    /// VST3) y mantiene vivas las GUI abiertas. Se llama CADA frame desde el
+    /// hilo principal (App::update), nunca desde RT.
     pub fn poll_gui_requests(&mut self) {
-        // Ventanas que el usuario cerro desde su propio boton: hay que acusar
-        // recibo con destroy mientras la instancia sigue viva.
+        // Ventanas flotantes que el usuario cerro desde su propio boton: hay
+        // que acusar recibo con destroy mientras la instancia sigue viva.
         for (t, destroyed) in crate::clap_gui::take_closed() {
             if let Some((_, inst)) = self.instances.iter_mut().find(|(i, _)| *i == t) {
                 crate::clap_gui::ack_closed(inst, t, destroyed);
             }
         }
+        // GUI CLAP embebidas: cierre por la X y resizes del plugin.
+        crate::clap_gui::poll_embedded(&mut self.instances, &mut self.clap_embed);
+
+        // GUI VST3: run loop del plugin + cierre por la X.
+        #[cfg(feature = "vst3")]
+        for t in self.vst3_gui.poll(&self.vst3_handles) {
+            crate::clap_gui::set_open(t, false);
+            println!("[gui] pista {}: el usuario cerro la ventana VST3", t + 1);
+        }
+
         let Some(t) = crate::clap_gui::take_request() else { return };
+        let title = format!("Lanzadera · pista {}", t + 1);
+
+        #[cfg(feature = "vst3")]
+        if let Some((_, plugin)) = self.vst3_handles.iter().find(|(i, _)| *i == t) {
+            match self.vst3_gui.toggle(t, plugin) {
+                Ok(open) => {
+                    crate::clap_gui::set_open(t, open);
+                    println!("[gui] pista {}: {}", t + 1, if open { "abierta (VST3)" } else { "cerrada (VST3)" });
+                }
+                Err(e) => crate::clap_gui::notify(format!("[gui] pista {}: {}", t + 1, e)),
+            }
+            return;
+        }
+
         let Some((_, inst)) = self.instances.iter_mut().find(|(i, _)| *i == t) else {
-            eprintln!("[gui] pista {} no tiene plugin cargado", t + 1);
+            crate::clap_gui::notify(format!("[gui] pista {} no tiene plugin cargado", t + 1));
             return;
         };
-        let title = format!("Lanzadera · pista {}", t + 1);
-        match crate::clap_gui::toggle(inst, t, &title) {
+        match crate::clap_gui::toggle(inst, t, &title, &mut self.clap_embed) {
             Ok(()) => {
                 let (_, open) = crate::clap_gui::state(t);
                 println!("[gui] pista {}: {}", t + 1, if open { "abierta" } else { "cerrada" });
             }
-            Err(e) => eprintln!("[gui] pista {}: {}", t + 1, e),
+            Err(e) => crate::clap_gui::notify(format!("[gui] pista {}: {}", t + 1, e)),
         }
     }
 }
@@ -108,9 +139,20 @@ impl Drop for AudioHandle {
     fn drop(&mut self) {
         // 0) Cerrar las GUI abiertas ANTES de soltar nada: la ventana del
         //    plugin debe destruirse mientras la instancia sigue viva.
-        crate::clap_gui::close_all(&mut self.instances);
+        crate::clap_gui::close_all(&mut self.instances, &mut self.clap_embed);
+        #[cfg(feature = "vst3")]
+        {
+            // El editor VST3 debe soltarse antes que el plugin (y su ventana
+            // padre despues de la vista).
+            self.vst3_gui.close_all();
+            for (t, _) in self.vst3_handles.iter() { crate::clap_gui::set_open(*t, false); }
+        }
         // 1) Soltar el stream dropea el Renderer, que devuelve los procesadores.
         self.stream.take();
+        // 1b) Con el Renderer ya muerto, esta es la ultima referencia a los
+        //     plugins VST3: se destruyen aqui, en el hilo principal.
+        #[cfg(feature = "vst3")]
+        self.vst3_handles.clear();
         // 2) Desactivar cada procesador con su instancia (hilo principal).
         if let Some(rx) = &self.retire_rx {
             while let Ok(p) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
@@ -180,6 +222,10 @@ struct Renderer {
     audio_in_cons: Option<ringbuf::HeapCons<f32>>,
     audio_in_ch: u16,
     audio_in_scratch: Vec<f32>,
+    /// Envelope residual del click del metrónomo (decay por sample).
+    metro_env: f32,
+    metro_freq: f32,
+    metro_phase: f32,
 }
 
 #[cfg(feature = "clap")]
@@ -208,8 +254,11 @@ impl Renderer {
     /// Nota hacia el plugin (evento time-stamped) o hacia el sinte interno.
     fn note(&mut self, t: usize, frame: u32, msg: MidiMsg) {
         let _ = frame; // solo se usa con la feature clap
+        // CLAP *o* VST3: ambos leen la misma cola neutral `pev[t]`.
+        // (Antes solo se miraba `plugins[t]` (CLAP): las notas de una pista
+        // VST3 caian al sinte interno y el plugin VST3 nunca sonaba.)
         #[cfg(feature = "clap")]
-        if self.plugins[t].is_some() {
+        if self.has_plugin(t) {
             // Cola neutral: aqui ya no hay tipos de clack. El tope de eventos
             // lo aplica PluginEvents internamente.
             match msg {
@@ -280,7 +329,9 @@ impl Renderer {
             let ang = (ta.pan.clamp(-1.0, 1.0) + 1.0) * std::f32::consts::FRAC_PI_4;
             self.gains[t] = (ang.cos() * ta.volume, ang.sin() * ta.volume, audible);
             self.eq.bands[t].update(EqParams {
-                sr: self.sample_rate as f32, low: ta.eq_low, mid: ta.eq_mid, high: ta.eq_high,
+                sr: self.sample_rate as f32,
+                low: ta.eq_low, mid: ta.eq_mid, high: ta.eq_high,
+                mid_f: ta.eq_mid_f, mid_q: ta.eq_mid_q,
                 hpf_on: ta.hpf_on, lpf_on: ta.lpf_on, hpf_hz: ta.hpf_hz, lpf_hz: ta.lpf_hz,
             });
             let buf = &mut self.bufs[t];
@@ -577,46 +628,16 @@ impl Renderer {
         }
 
         // ── Plugins VST3: un process_bus_audio() por pista y bloque ──
-        // Flujo: clear buffers → enviar MIDI con sample_offset → process →
-        // sumar outputs a bufs[t]. API verificada en source de vst3-host 0.11.1.
+        // Flujo: eventos de la cola neutral pev[t] (notas, CC, pitch bend,
+        // parametros) -> process -> sumar la salida a bufs[t]. Si la GUI tiene
+        // el lock en este bloque, `vst3_slot::process` devuelve false y aplaza
+        // los eventos (no bloquea nunca el hilo de audio).
         #[cfg(feature = "vst3")]
         for t in 0..n {
-            if self.vst3_plugins[t].is_none() { continue; }
             let Some(slot) = self.vst3_plugins[t].as_mut() else { continue; };
-
-            // Limpiar los buffers reutilizables (silencio) en cada frame.
-            slot.buffers.clear();
-
-            // Enviar eventos MIDI de pev[t] (cola neutral de G5a).
-            for ev in self.pev[t].as_slice() {
-                let ch = vst3_slot::to_midi_channel(ev.c);
-                let event: Option<MidiEvent> = match ev.kind {
-                    crate::plugin_events::EvKind::NoteOn => {
-                        Some(MidiEvent::NoteOn { channel: ch, note: ev.a, velocity: ev.b })
-                    }
-                    crate::plugin_events::EvKind::NoteOff => {
-                        Some(MidiEvent::NoteOff { channel: ch, note: ev.a, velocity: 0 })
-                    }
-                    crate::plugin_events::EvKind::Midi3 => {
-                        // ControlChange: status byte 0xB0 + canal, controller, value
-                        if (ev.a & 0xF0) == 0xB0 {
-                            Some(MidiEvent::ControlChange {
-                                channel: ch, controller: ev.b, value: ev.c,
-                            })
-                        } else { None }
-                    }
-                    _ => None,
-                };
-                if let Some(e) = event {
-                    vst3_slot::send_midi(slot, e, ev.frame as i32);
-                }
-            }
-
-            // Procesar audio a través del bus principal del plugin.
-            let _ = slot.plugin.process_bus_audio(&mut slot.buffers);
+            if !vst3_slot::process(slot, self.pev[t].as_slice(), frames) { continue; }
 
             // Sumar las salidas del plugin al buffer de la pista.
-            // Si el plugin no tiene outputs (extraño pero posible), no suma nada.
             if !slot.buffers.outputs.is_empty() {
                 let out_bus = &slot.buffers.outputs[0];
                 let buf = &mut self.bufs[t];
@@ -727,7 +748,17 @@ impl Renderer {
             self.caja_trig_count = 0;
         }
 
-        // ── EQ + mezcla final ──
+        // ── EQ + mezcla final + metrónomo ──
+        // ticks por sample: (BPM/60) * (PPQ) / sr  con PPQ = TICKS_PER_BAR/4
+        let ticks_per_sample = if audio.playing && self.sample_rate > 0 {
+            (audio.tempo / 60.0) * (TICKS_PER_BAR as f64 / 4.0) / self.sample_rate as f64
+        } else {
+            0.0
+        };
+        let beat_ticks = TICKS_PER_BAR as f64 / 4.0;
+        let mut tick_f = self.engine.global_ticks() as f64;
+        // Fase residual del click (decay en samples)
+        // Se genera un impulso corto en cada frontera de beat.
         for f in 0..frames {
             let mut ml = 0.0f32;
             let mut mr = 0.0f32;
@@ -743,6 +774,34 @@ impl Renderer {
             }
             ml += self.caja_buf[0][f];
             mr += self.caja_buf[1][f];
+
+            // Metrónomo: envelope + seno amortiguado en cada beat.
+            if audio.metronome && audio.playing && ticks_per_sample > 0.0 {
+                let prev = tick_f;
+                tick_f += ticks_per_sample;
+                let prev_beat = (prev / beat_ticks).floor();
+                let cur_beat = (tick_f / beat_ticks).floor();
+                if cur_beat > prev_beat {
+                    let is_bar = (cur_beat as u64) % 4 == 0;
+                    self.metro_env = if is_bar { 0.32 } else { 0.18 };
+                    self.metro_freq = if is_bar { 2000.0 } else { 1000.0 };
+                    self.metro_phase = 0.0;
+                }
+            } else if ticks_per_sample > 0.0 {
+                tick_f += ticks_per_sample;
+            }
+            if self.metro_env > 0.001 {
+                let s = self.metro_phase.sin() * self.metro_env;
+                ml += s;
+                mr += s;
+                self.metro_phase += self.metro_freq * std::f32::consts::TAU / self.sample_rate as f32;
+                if self.metro_phase > std::f32::consts::TAU { self.metro_phase -= std::f32::consts::TAU; }
+                // ~8 ms de decay
+                self.metro_env *= 0.92;
+            } else {
+                self.metro_env = 0.0;
+            }
+
             ml *= audio.master_volume;
             mr *= audio.master_volume;
             let mp = ml.abs().max(mr.abs());
@@ -886,6 +945,14 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
         buffer_size: cpal::BufferSize::Default,
     };
 
+    // Estado de GUI limpio en cada (re)arranque: si se quito un plugin, su
+    // boton "Interfaz" no debe quedar activo.
+    #[cfg(feature = "clap")]
+    for t in 0..MAX_TRACKS {
+        crate::clap_gui::set_avail(t, false);
+        crate::clap_gui::set_open(t, false);
+    }
+
     #[cfg(feature = "clap")]
     let (mut plugins, instances, retire_tx, retire_rx) = {
         let mut plugins: [Option<Processor>; MAX_TRACKS] = std::array::from_fn(|_| None);
@@ -898,6 +965,7 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
                 .collect()
         };
         for (t, path, id) in plugs {
+            if path.ends_with(".vst3") { continue; } // lo carga el bloque VST3
             match clap_host::load(&path, id.as_deref(), sample_rate, MAX_BLOCK as u32, t) {
                 Ok((mut inst, proc, name, params)) => {
                     println!(
@@ -923,7 +991,7 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
                 }
                 Err(e) => {
                     crate::clap_params::clear_track_params(t);
-                    eprintln!("[lanzadera] CLAP pista {}: {}", t + 1, e);
+                    crate::clap_gui::notify(format!("⚠ CLAP pista {}: {}", t + 1, e));
                 }
             }
         }
@@ -935,12 +1003,14 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
     #[cfg(feature = "vst3")]
     let mut vst3_plugins: [Option<vst3_slot::Vst3Slot>; MAX_TRACKS] = std::array::from_fn(|_| None);
     #[cfg(feature = "vst3")]
+    let mut vst3_handles = Vec::new();
+    #[cfg(feature = "vst3")]
     {
         let plugs: Vec<(usize, String)> = {
             let st = shared.state.lock().unwrap();
             st.tracks.iter().enumerate()
                 .filter_map(|(i, tr)| tr.plugin_path.as_ref()
-                    .filter(|p| p.ends_with(".vst3"))
+                    .filter(|p| p.trim_end_matches('/').ends_with(".vst3"))
                     .map(|p| (i, p.clone())))
                 .collect()
         };
@@ -948,21 +1018,33 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
             match vst3_slot::load(&path, sample_rate, MAX_BLOCK as u32) {
                 Ok(slot) => {
                     println!(
-                        "[lanzadera] VST3 pista {}: {} · {} parámetros ({})",
+                        "[lanzadera] VST3 pista {}: {} · {} parámetros ({}) · editor={}",
                         t + 1,
-                        slot.plugin.info().name,
+                        slot.name,
                         slot.params.len(),
-                        if slot.is_instrument { "instrumento" } else { "efecto" }
+                        if slot.is_instrument { "instrumento" } else { "efecto" },
+                        slot.has_editor
                     );
+                    // Tabla RT param_idx -> id (misma que CLAP). VST3 trabaja en
+                    // 0..1 normalizado, asi que min=0 y max=1: plain == normalizado.
+                    let infos: Vec<clap_host::PluginParamInfo> = slot.params.iter()
+                        .map(|p| clap_host::PluginParamInfo {
+                            id: p.id, name: p.name.clone(), value: p.value, min: 0.0, max: 1.0,
+                        }).collect();
+                    crate::clap_params::set_track_params(t, &infos);
                     let ui_params: Vec<(String, String, f32)> = slot.params
                         .iter()
                         .map(|p| (p.id.to_string(), p.name.clone(), p.value))
                         .collect();
                     shared.set_plugin_params(t, ui_params);
+                    crate::clap_gui::set_avail(t, slot.has_editor);
+                    crate::clap_gui::set_open(t, false);
+                    vst3_handles.push((t, slot.plugin.clone()));
                     vst3_plugins[t] = Some(slot);
                 }
                 Err(e) => {
-                    eprintln!("[lanzadera] VST3 pista {}: {}", t + 1, e);
+                    crate::clap_params::clear_track_params(t);
+                    crate::clap_gui::notify(format!("⚠ VST3 pista {}: {}", t + 1, e));
                 }
             }
         }
@@ -1042,6 +1124,9 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
         audio_in_cons,
         audio_in_ch,
         audio_in_scratch: Vec::with_capacity(MAX_BLOCK * (audio_in_ch.max(2) as usize)),
+        metro_env: 0.0,
+        metro_freq: 1000.0,
+        metro_phase: 0.0,
         record_engine: crate::audio_record::RecordEngine::new(sample_rate, 180),
         was_recording: false,
     };
@@ -1067,6 +1152,12 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
         instances,
         #[cfg(feature = "clap")]
         retire_rx,
+        #[cfg(feature = "clap")]
+        clap_embed: crate::clap_gui::EmbedHost::default(),
+        #[cfg(feature = "vst3")]
+        vst3_handles,
+        #[cfg(feature = "vst3")]
+        vst3_gui: crate::vst3_slot::Vst3Gui::default(),
         in_stream: audio_in_stream,
     })
 }

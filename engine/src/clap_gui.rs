@@ -16,6 +16,16 @@
 //! La conducta (plugin con UI propia -> ventana flotante; sin UI -> editor
 //! generico de sliders) sigue el modelo documentado de SceneStack; concepto
 //! reimplementado, no codigo copiado.
+//!
+//! # Embebida (X11) como alternativa
+//! Muchos plugins CLAP de Linux (nih-plug, baseview...) NO implementan la
+//! ventana flotante: solo la GUI embebida, que exige que el HOST cree una
+//! ventana y se la pase con `set_parent`. Si la flotante no esta soportada,
+//! `toggle` crea una ventana X11 propia (`xwin::XWindow`, patron de
+//! vst3-host/window.rs, MIT) y embebe ahi la GUI del plugin.
+//!
+//! Este modulo tambien reparte la peticion "abrir/cerrar interfaz" para
+//! plugins VST3 (la UI no distingue formato): ver `AudioHandle::poll_gui_requests`.
 
 use std::sync::Mutex;
 
@@ -41,6 +51,41 @@ pub static GUI_STATE: Mutex<GuiState> = Mutex::new(GuiState {
     open: [false; MAX_TRACKS],
 });
 
+/// Mensaje para mostrar en la barra de estado de la UI (errores de GUI /
+/// de carga de plugins). Antes solo iban a stderr y el usuario no los veia.
+static NOTICE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Publica un aviso para la UI y lo imprime en consola.
+pub fn notify(msg: impl Into<String>) {
+    let m = msg.into();
+    eprintln!("{}", m);
+    if let Ok(mut n) = NOTICE.lock() { *n = Some(m); }
+}
+
+/// Consume el ultimo aviso, si hay.
+pub fn take_notice() -> Option<String> {
+    NOTICE.lock().ok().and_then(|mut n| n.take())
+}
+
+/// Peticiones de cambio de tamano del plugin: (pista, ancho, alto).
+static RESIZES: Mutex<Vec<(usize, u32, u32)>> = Mutex::new(Vec::new());
+
+/// El plugin pide otro tamano (puede llegar fuera del hilo principal).
+pub fn note_resize(track: usize, w: u32, h: u32) {
+    if let Ok(mut q) = RESIZES.try_lock() { q.push((track, w, h)); }
+}
+
+pub fn take_resizes() -> Vec<(usize, u32, u32)> {
+    RESIZES.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+}
+
+/// true si alguna GUI de plugin esta abierta. main.rs lo usa para pedir
+/// repintado periodico: las GUI VST3 de Linux (VSTGUI) solo se dibujan si el
+/// host les da cuerda (`service_run_loop`) en cada frame.
+pub fn any_open() -> bool {
+    GUI_STATE.lock().map(|s| s.open.iter().any(|&o| o)).unwrap_or(false)
+}
+
 /// Estado para la UI: (tiene_gui, esta_abierta).
 pub fn state(track: usize) -> (bool, bool) {
     if track >= MAX_TRACKS { return (false, false); }
@@ -50,6 +95,11 @@ pub fn state(track: usize) -> (bool, bool) {
 /// Pide abrir/cerrar la GUI de una pista. Lo llama la UI.
 pub fn request_toggle(track: usize) {
     if let Ok(mut g) = GUI_TOGGLE.lock() { *g = Some(track); }
+}
+
+/// true si hay una peticion de abrir/cerrar sin atender (para pedir repintado).
+pub fn has_pending_request() -> bool {
+    GUI_TOGGLE.lock().map(|g| g.is_some()).unwrap_or(false)
 }
 
 /// Consume la peticion pendiente, si la hay.
@@ -87,15 +137,13 @@ pub fn ack_closed(instance: &mut crate::clap_host::Instance, track: usize, was_d
     println!("[gui] pista {}: el usuario cerro la ventana", track + 1);
 }
 
-#[cfg(feature = "clap")]
-fn set_avail(track: usize, v: bool) {
+pub fn set_avail(track: usize, v: bool) {
     if let Ok(mut s) = GUI_STATE.lock() {
         if track < MAX_TRACKS { s.avail[track] = v; }
     }
 }
 
-#[cfg(feature = "clap")]
-fn set_open(track: usize, v: bool) {
+pub fn set_open(track: usize, v: bool) {
     if let Ok(mut s) = GUI_STATE.lock() {
         if track < MAX_TRACKS { s.open[track] = v; }
     }
@@ -119,22 +167,36 @@ pub fn probe(instance: &mut crate::clap_host::Instance, track: usize) {
     set_open(track, false);
 }
 
-/// Abre o cierra la GUI flotante de una pista. Hilo principal.
+/// Ventanas X11 anfitrionas de las GUI CLAP embebidas, una por pista.
+/// Vive en `AudioHandle` (hilo principal).
 #[cfg(feature = "clap")]
-pub fn toggle(instance: &mut crate::clap_host::Instance, track: usize, title: &str)
-    -> Result<(), String>
+#[derive(Default)]
+pub struct EmbedHost {
+    wins: Vec<(usize, crate::xwin::XWindow)>,
+}
+
+#[cfg(feature = "clap")]
+impl EmbedHost {
+    fn remove(&mut self, track: usize) { self.wins.retain(|(t, _)| *t != track); }
+}
+
+/// Abre o cierra la GUI de una pista (flotante si el plugin la ofrece; si no,
+/// embebida en una ventana X11 del host). Hilo principal.
+#[cfg(feature = "clap")]
+pub fn toggle(instance: &mut crate::clap_host::Instance, track: usize, title: &str,
+              embed: &mut EmbedHost) -> Result<(), String>
 {
-    use clack_extensions::gui::{GuiConfiguration, PluginGui};
+    use clack_extensions::gui::{GuiApiType, GuiConfiguration, GuiSize, PluginGui, Window};
 
     let main = instance.plugin_handle();
     let Some(gui) = main.get_extension::<PluginGui>() else {
         return Err("el plugin no expone interfaz grafica".into());
     };
 
-    let was_open = state(track).1;
-    if was_open {
+    if state(track).1 {
         let _ = gui.hide(&main);
         gui.destroy(&main);
+        embed.remove(track); // la ventana host se destruye DESPUES de destroy()
         set_open(track, false);
         return Ok(());
     }
@@ -146,42 +208,102 @@ pub fn toggle(instance: &mut crate::clap_host::Instance, track: usize, title: &s
         println!("[gui] pista {}: prefiere {:?} flotante={}", track + 1, p.api_type, p.is_floating);
     }
     let api = platform_api();
-    for (name, a) in [("x11", clack_extensions::gui::GuiApiType::X11),
-                      ("wayland", clack_extensions::gui::GuiApiType::WAYLAND)] {
-        let f = gui.is_api_supported(&main, GuiConfiguration { api_type: a, is_floating: true });
-        let e = gui.is_api_supported(&main, GuiConfiguration { api_type: a, is_floating: false });
-        println!("[gui] pista {}: {} flotante={} embebido={}", track + 1, name, f, e);
+    let floating = GuiConfiguration { api_type: api, is_floating: true };
+    let embedded = GuiConfiguration { api_type: api, is_floating: false };
+    let f_ok = gui.is_api_supported(&main, floating);
+    let e_ok = gui.is_api_supported(&main, embedded);
+    println!("[gui] pista {}: {:?} flotante={} embebido={}", track + 1, api, f_ok, e_ok);
+
+    // 1) Flotante en la API de la plataforma, o la flotante que prefiera el plugin.
+    let mut cfg = floating;
+    let mut use_float = f_ok;
+    if !use_float {
+        if let Some(p) = pref {
+            if p.is_floating && gui.is_api_supported(&main, p) { cfg = p; use_float = true; }
+        }
+    }
+    if use_float {
+        gui.create(&main, cfg).map_err(|e| format!("create: {:?}", e))?;
+        let ctitle = std::ffi::CString::new(title)
+            .unwrap_or_else(|_| std::ffi::CString::new("plugin").unwrap());
+        gui.suggest_title(&main, &ctitle);
+        if let Err(e) = gui.show(&main) {
+            gui.destroy(&main);
+            return Err(format!("show: {:?}", e));
+        }
+        set_open(track, true);
+        return Ok(());
     }
 
-    // Preferimos flotante en la API de la plataforma; si el plugin prefiere
-    // otra cosa flotante, se respeta.
-    let mut cfg = GuiConfiguration { api_type: api, is_floating: true };
-    if !gui.is_api_supported(&main, cfg) {
-        if let Some(p) = pref {
-            if p.is_floating && gui.is_api_supported(&main, p) {
-                cfg = p;
+    // 2) Embebida: el host aporta la ventana (solo X11 en Linux).
+    if !e_ok || api != GuiApiType::X11 {
+        return Err("el plugin no ofrece GUI flotante ni embebida en esta plataforma".into());
+    }
+    gui.create(&main, embedded).map_err(|e| format!("create(embebida): {:?}", e))?;
+    // Escala 1.0: sin esto algunos plugins (JUCE) asumen HiDPI inexistente.
+    let _ = gui.set_scale(&main, 1.0);
+    let size = gui.get_size(&main).unwrap_or(GuiSize { width: 800, height: 600 });
+    let win = match crate::xwin::XWindow::new(title, size.width, size.height) {
+        Ok(w) => w,
+        Err(e) => { gui.destroy(&main); return Err(e); }
+    };
+    // SAFETY: la ventana vive en `embed` hasta que se llama a destroy() arriba
+    // o en close_all/poll_embedded, siempre en ese orden.
+    let parent = unsafe { gui.set_parent(&main, Window::from_x11_handle(win.id() as std::ffi::c_ulong)) };
+    if let Err(e) = parent {
+        gui.destroy(&main);
+        return Err(format!("set_parent: {:?}", e));
+    }
+    // En GUI embebida `show` es opcional: nih-plug y otros devuelven false
+    // porque la vista ya es visible dentro de la ventana del host (que ya
+    // esta mapeada). Por eso aqui un fallo de `show` NO es fatal.
+    if let Err(e) = gui.show(&main) {
+        println!("[gui] pista {}: show() de GUI embebida devolvio {:?} (se ignora)", track + 1, e);
+    }
+    embed.wins.push((track, win));
+    set_open(track, true);
+    println!("[gui] pista {}: GUI embebida en ventana X11 del host", track + 1);
+    Ok(())
+}
+
+/// Atiende cierres por boton de ventana y peticiones de resize de las GUI
+/// embebidas. Llamar cada frame desde el hilo principal.
+#[cfg(feature = "clap")]
+pub fn poll_embedded(instances: &mut [(usize, crate::clap_host::Instance)], embed: &mut EmbedHost) {
+    use clack_extensions::gui::{GuiSize, PluginGui};
+
+    // Resize pedido por el plugin: primero la ventana, luego set_size.
+    for (t, w, h) in take_resizes() {
+        let Some((_, win)) = embed.wins.iter().find(|(i, _)| *i == t) else { continue };
+        win.resize(w, h);
+        if let Some((_, inst)) = instances.iter_mut().find(|(i, _)| *i == t) {
+            let main = inst.plugin_handle();
+            if let Some(gui) = main.get_extension::<PluginGui>() {
+                let _ = gui.set_size(&main, GuiSize { width: w, height: h });
             }
         }
     }
-    if !gui.is_api_supported(&main, cfg) {
-        return Err(format!("el plugin no soporta ventana flotante {:?}", cfg.api_type));
-    }
-    gui.create(&main, cfg).map_err(|e| format!("create: {:?}", e))?;
 
-    let ctitle = std::ffi::CString::new(title).unwrap_or_else(|_| std::ffi::CString::new("plugin").unwrap());
-    gui.suggest_title(&main, &ctitle);
-
-    if let Err(e) = gui.show(&main) {
-        gui.destroy(&main);
-        return Err(format!("show: {:?}", e));
+    // Cierre por la X de la ventana.
+    let closed: Vec<usize> = embed.wins.iter()
+        .filter(|(_, w)| w.poll_close()).map(|(t, _)| *t).collect();
+    for t in closed {
+        if let Some((_, inst)) = instances.iter_mut().find(|(i, _)| *i == t) {
+            let main = inst.plugin_handle();
+            if let Some(gui) = main.get_extension::<PluginGui>() {
+                let _ = gui.hide(&main);
+                gui.destroy(&main);
+            }
+        }
+        embed.remove(t);
+        set_open(t, false);
+        println!("[gui] pista {}: el usuario cerro la ventana", t + 1);
     }
-    set_open(track, true);
-    Ok(())
 }
 
 /// Cierra todas las GUI abiertas. Se llama antes de soltar las instancias.
 #[cfg(feature = "clap")]
-pub fn close_all(instances: &mut [(usize, crate::clap_host::Instance)]) {
+pub fn close_all(instances: &mut [(usize, crate::clap_host::Instance)], embed: &mut EmbedHost) {
     use clack_extensions::gui::PluginGui;
     for (t, inst) in instances.iter_mut() {
         if !state(*t).1 { continue; }
@@ -192,4 +314,5 @@ pub fn close_all(instances: &mut [(usize, crate::clap_host::Instance)]) {
         }
         set_open(*t, false);
     }
+    embed.wins.clear(); // despues de destroy(): la ventana padre sobrevive al plugin
 }

@@ -503,53 +503,119 @@ impl SessionView {
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
 
-    // ── TOP BAR ────────────────────────────────────────────────────────────
+    // ── TOP BAR (estilo DAW: transporte | vistas | quantize | proyecto) ────
     fn top_bar(&mut self, ctx: &egui::Context, shared: &SessionShared, audio_on: bool) {
         let mut cmds: Vec<ControlCmd> = Vec::new();
         let mut new_q: Option<Quantize> = None;
         let mut save = false;
         let mut load = false;
-        egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.heading("lanzadera");
+        egui::TopBottomPanel::top("top_bar")
+            .frame(egui::Frame::none()
+                .fill(T.transport_bg)
+                .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+                .stroke(egui::Stroke::new(1.0, T.strip_border)))
+            .show(ctx, |ui| {
+            // Fila 1: identidad + transporte + metronomo + vistas
+            ui.horizontal(|ui| {
+                // Identidad
+                ui.label(egui::RichText::new("LANZADERA")
+                    .size(14.0).strong().color(T.accent_gold));
+                ui.add_space(6.0);
                 ui.separator();
-                
-                // ── Botones de visibilidad de ventanas (estilo FL Studio/LMMS) ──
-                let vis_btn = |ui: &mut egui::Ui, label: &str, visible: bool| -> bool {
-                    let fill = if visible { T.clip_playing.gamma_multiply(0.4) } else { T.panel };
-                    ui.add(egui::Button::new(label).fill(fill)).clicked()
+
+                // ── Transporte compacto (estilo Bitwig / Ableton) ──
+                let (mut tempo, playing, recording, q, rec_armed, metronome) = {
+                    let st = shared.state.lock().unwrap();
+                    let (rt, _, _) = st.record_target();
+                    let armed = st.tracks.get(rt).map(|tr| tr.arm).unwrap_or(false);
+                    (st.tempo, st.playing, st.recording, st.quantize, armed, st.metronome)
                 };
-                
-                if vis_btn(ui, "🎹 Clip Launch", self.windows.clip_launch_visible) {
+
+                let transport_btn = |ui: &mut egui::Ui, label: &str, active: bool, col: Color32| -> bool {
+                    let fill = if active { col.gamma_multiply(0.55) } else { T.panel_raised };
+                    ui.add(egui::Button::new(egui::RichText::new(label).size(13.0)).fill(fill).min_size(vec2(36.0, 26.0))).clicked()
+                };
+
+                if transport_btn(ui, if playing { "⏸" } else { "▶" }, playing, T.clip_playing) {
+                    cmds.push(if playing { ControlCmd::Stop } else { ControlCmd::Play });
+                }
+                if transport_btn(ui, "⏹", false, T.text_dim) {
+                    lanzadera_engine::audio_io::STOP_ALL_REQ.store(true, std::sync::atomic::Ordering::Relaxed);
+                    cmds.push(ControlCmd::StopAll);
+                }
+                if ui.add_enabled(rec_armed || recording,
+                    egui::Button::new(egui::RichText::new("⏺").size(13.0))
+                        .fill(if recording { T.clip_rec.gamma_multiply(0.65) } else { T.panel_raised })
+                        .min_size(vec2(36.0, 26.0))
+                ).clicked() {
+                    cmds.push(ControlCmd::Record);
+                }
+
+                // Metrónomo
+                if transport_btn(ui, "⏱", metronome, T.accent_gold) {
+                    cmds.push(ControlCmd::ToggleMetronome);
+                }
+                if metronome {
+                    ui.label(egui::RichText::new("MET").size(9.0).color(T.accent_gold));
+                }
+
+                ui.separator();
+
+                // Tempo
+                ui.label(egui::RichText::new("BPM").size(10.0).color(T.text_dim));
+                if ui.add(egui::DragValue::new(&mut tempo).speed(0.15).range(20.0..=666.0)
+                    .custom_formatter(|v, _| format!("{:.1}", v))
+                ).changed() {
+                    cmds.push(ControlCmd::SetTempo { bpm: tempo as f32 });
+                }
+
+                ui.separator();
+
+                // Quantize global
+                ui.label(egui::RichText::new("Q").size(10.0).color(T.text_dim));
+                let mut q_mut = q;
+                egui::ComboBox::from_id_source("quantize_global")
+                    .width(90.0)
+                    .selected_text(q_label(q))
+                    .show_ui(ui, |ui| {
+                        for (qq, lbl) in Q_LIST {
+                            ui.selectable_value(&mut q_mut, qq, lbl);
+                        }
+                    });
+                if q_mut != q { new_q = Some(q_mut); }
+
+                ui.separator();
+
+                // ── Vistas (toggle de paneles) ──
+                let vis_btn = |ui: &mut egui::Ui, label: &str, visible: bool| -> bool {
+                    let fill = if visible { T.accent.gamma_multiply(0.35) } else { T.panel_raised };
+                    ui.add(egui::Button::new(egui::RichText::new(label).size(11.0)).fill(fill)).clicked()
+                };
+
+                if vis_btn(ui, "Clip Launch", self.windows.clip_launch_visible) {
                     self.windows.clip_launch_visible = !self.windows.clip_launch_visible;
                 }
                 let groove_on = shared.caja_sched.enabled.load(std::sync::atomic::Ordering::Relaxed);
                 let groove_step = groove_head(shared);
                 let groove_label = if groove_on && groove_step != 255 {
-                    format!("🥁 GM {}/16", groove_step + 1)
+                    format!("GM {}/16", groove_step + 1)
                 } else if groove_on {
-                    "🥁 GM ON".to_string()
+                    "GM ON".to_string()
                 } else {
-                    "🥁 Groove Machine".to_string()
+                    "Groove".to_string()
                 };
                 if vis_btn(ui, &groove_label, self.windows.groove_machine_visible) {
                     let v = !self.windows.groove_machine_visible;
                     self.windows.groove_machine_visible = v;
-                    // GM gobierna SOLO ventana + integración MK3. Abrir arma la
-                    // batería; ocultar NO la apaga: el patrón sigue hasta Stop.
-                    // Separación de paneles vs transporte, como en el session
-                    // view de MAGDA (GPL-3) — concepto, no código.
                     if v {
                         shared.caja_sched.enabled.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
                     shared.groove_machine_visible.store(v, std::sync::atomic::Ordering::Relaxed);
                 }
-                // Armado independiente de la batería: silenciar sin detener el
-                // transporte ni cerrar la ventana.
                 if vis_btn(ui, "🥁", groove_on) {
                     shared.caja_sched.enabled.store(!groove_on, std::sync::atomic::Ordering::Relaxed);
                 }
-                if vis_btn(ui, "🎲 Chords", self.groove_chords) {
+                if vis_btn(ui, "Chords", self.groove_chords) {
                     self.groove_chords = !self.groove_chords;
                     if self.groove_chords {
                         self.windows.groove_machine_visible = true;
@@ -557,68 +623,37 @@ impl SessionView {
                         shared.groove_machine_visible.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
-                if vis_btn(ui, "🔍 Inspector", self.windows.inspector_visible) {
+                if vis_btn(ui, "Inspector", self.windows.inspector_visible) {
                     self.windows.inspector_visible = !self.windows.inspector_visible;
                 }
-                if vis_btn(ui, "📁 Browser", self.windows.browser_visible) {
+                if vis_btn(ui, "Browser", self.windows.browser_visible) {
                     self.windows.browser_visible = !self.windows.browser_visible;
                 }
-                if vis_btn(ui, "🎚 Mixer", self.windows.mixer_visible) {
+                if vis_btn(ui, "Mixer", self.windows.mixer_visible) {
                     self.windows.mixer_visible = !self.windows.mixer_visible;
                 }
-                ui.separator();
-                
-                let (mut tempo, playing, recording, q, rec_armed) = {
-                    let st = shared.state.lock().unwrap();
-                    let (rt, _, _) = st.record_target();
-                    let armed = st.tracks.get(rt).map(|tr| tr.arm).unwrap_or(false);
-                    (st.tempo, st.playing, st.recording, st.quantize, armed)
-                };
-                ui.label("BPM");
-                if ui.add(egui::DragValue::new(&mut tempo).speed(0.1).range(20.0..=666.0)).changed() {
-                    cmds.push(ControlCmd::SetTempo { bpm: tempo as f32 });
-                }
-                if ui.add(egui::Button::new(if playing { "⏸ Pause" } else { "▶ Play" })
-                    .fill(if playing { T.clip_playing.gamma_multiply(0.5) } else { T.panel })).clicked() {
-                    // Segundo press = pausa: el transporte se congela y al volver
-                    // a Play retoma en el mismo compás (no resetea el reloj).
-                    cmds.push(if playing { ControlCmd::Stop } else { ControlCmd::Play });
-                }
-                // Rec atenuado si la pista destino no esta armada. Desarmar
-                // sigue permitido aunque la pista haya quedado desarmada.
-                if ui.add_enabled(rec_armed || recording, egui::Button::new("⏺ Rec")
-                    .fill(if recording { T.clip_rec.gamma_multiply(0.6) } else { T.panel })).clicked() {
-                    cmds.push(ControlCmd::Record);
-                }
-                if ui.button("⏹ Todo").clicked() {
-                    // Stop global único: para todo y vuelve al compás 1.1.
-                    lanzadera_engine::audio_io::STOP_ALL_REQ.store(true, std::sync::atomic::Ordering::Relaxed);
-                    cmds.push(ControlCmd::StopAll);
-                }
-                ui.separator();
-                ui.separator();
-                ui.label("Quantize");
-                let mut q_mut = q;
-                egui::ComboBox::from_id_source("quantize_global")
-                    .selected_text(q_label(q)).show_ui(ui, |ui| {
-                        for (qq, lbl) in Q_LIST {
-                            ui.selectable_value(&mut q_mut, qq, lbl);
-                        }
-                    });
-                if q_mut != q { new_q = Some(q_mut); }
-                ui.separator();
-                ui.label(if audio_on { "🔊 audio" } else { "🔇 sin audio" });
-                let status = match &*shared.status.lock().unwrap() {
-                    LoadStatus::Idle => String::new(),
-                    LoadStatus::Loading { .. } => "Cargando audio…".into(),
-                    LoadStatus::Ready => "Audio listo".into(),
-                    LoadStatus::Error(e) => format!("⚠ {}", e),
-                };
-                if !status.is_empty() { ui.label(egui::RichText::new(status).color(T.text_dim).size(11.0)); }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(egui::RichText::new(
+                        if audio_on { "● AUDIO" } else { "○ SIN AUDIO" }
+                    ).size(10.0).color(if audio_on { T.accent_green } else { T.text_dim }));
+                    let status = match &*shared.status.lock().unwrap() {
+                        LoadStatus::Idle => String::new(),
+                        LoadStatus::Loading { .. } => "Cargando…".into(),
+                        LoadStatus::Ready => String::new(),
+                        LoadStatus::Error(e) => format!("⚠ {}", e),
+                    };
+                    if !status.is_empty() {
+                        ui.label(egui::RichText::new(status).color(T.clip_rec).size(10.0));
+                    }
+                });
             });
-            ui.horizontal_wrapped(|ui| {
-                ui.label("Proyecto");
-                ui.add(egui::TextEdit::singleline(&mut self.project_path).desired_width(260.0));
+
+            // Fila 2: proyecto
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Proyecto").size(10.0).color(T.text_dim));
+                ui.add(egui::TextEdit::singleline(&mut self.project_path).desired_width(280.0)
+                    .text_color(T.text_bright));
                 if ui.button("💾 Guardar").clicked() { save = true; }
                 if ui.button("📂 Cargar").clicked() { load = true; }
                 if !self.msg.is_empty() {
@@ -958,10 +993,31 @@ impl SessionView {
         }
     }
 
-    // ── MIXER (strips estilo Vibez) ────────────────────────────────────────
+    // ── MIXER (strips estilo consola analógica) ────────────────────────────
     fn mixer(&mut self, ui: &mut egui::Ui, shared: &SessionShared, audio_on: bool) {
         let n = { shared.state.lock().unwrap().tracks.len() };
         let mut cmds = Vec::new();
+        let mut add_track = false;
+        let mut remove_track: Option<usize> = None;
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("MIXER").size(11.0).strong().color(T.accent_gold));
+            ui.separator();
+            if ui.button("+ Pista").on_hover_text("Añadir pista de audio/instrumento").clicked() {
+                add_track = true;
+            }
+            if n > 1 {
+                if ui.button("− Pista").on_hover_text("Eliminar la pista seleccionada").clicked() {
+                    let sel = shared.state.lock().unwrap().selected_track;
+                    remove_track = Some(sel.min(n.saturating_sub(1)));
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new(format!("{} pistas", n)).size(10.0).color(T.text_dim));
+            });
+        });
+        ui.add_space(4.0);
+
         egui::ScrollArea::horizontal().id_source("mixer_scroll").show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 for t in 0..n { self.strip(ui, shared, Some(t), audio_on, &mut cmds); }
@@ -969,28 +1025,57 @@ impl SessionView {
             });
         });
         for c in cmds { shared.apply_control(c); }
+        if add_track {
+            shared.edit(|st| {
+                let mut tr = lanzadera_core::Track::default();
+                tr.name = format!("Pista {}", st.tracks.len() + 1);
+                tr.kind = lanzadera_core::TrackKind::Audio;
+                let _ = st.push_track(tr);
+            });
+        }
+        if let Some(idx) = remove_track {
+            shared.edit(|st| {
+                if st.tracks.len() > 1 && idx < st.tracks.len() {
+                    st.tracks.remove(idx);
+                    if st.selected_track >= st.tracks.len() {
+                        st.selected_track = st.tracks.len().saturating_sub(1);
+                    }
+                }
+            });
+        }
     }
 
     fn strip(&mut self, ui: &mut egui::Ui, shared: &SessionShared, track: Option<usize>,
              audio_on: bool, cmds: &mut Vec<ControlCmd>) {
-        let (name, mut vol, mut pan, mute, solo, arm) = match track {
+        let (name, mut vol, mut pan, mute, solo, arm, selected) = match track {
             Some(t) => {
                 let st = shared.state.lock().unwrap();
                 let tr = &st.tracks[t];
-                (tr.name.clone(), tr.volume, tr.pan, tr.mute, tr.solo, tr.arm)
+                (tr.name.clone(), tr.volume, tr.pan, tr.mute, tr.solo, tr.arm, st.selected_track == t)
             }
             None => {
                 let st = shared.state.lock().unwrap();
-                ("MASTER".to_string(), st.master_volume, 0.0, false, false, false)
+                ("MASTER".to_string(), st.master_volume, 0.0, false, false, false, false)
             }
         };
         let level = if audio_on { shared.rt.peak(track.unwrap_or(MAX_TRACKS)) } else { 0.0 };
-        egui::Frame::none().fill(T.strip_bg).rounding(Rounding::same(6.0)).inner_margin(6.0).show(ui, |ui| {
+        let border = if selected {
+            egui::Stroke::new(1.5, T.accent_gold)
+        } else {
+            egui::Stroke::new(1.0, T.strip_border)
+        };
+        egui::Frame::none()
+            .fill(T.strip_bg)
+            .rounding(Rounding::same(5.0))
+            .stroke(border)
+            .inner_margin(5.0)
+            .show(ui, |ui| {
             ui.vertical(|ui| {
-                ui.set_width(64.0);
-                // Clic en el nombre = foco de la pista (igual que en el grid).
+                ui.set_width(68.0);
+
+                let head_col = if selected { T.accent_gold } else { T.text_bright };
                 let head = ui.add(
-                    egui::Label::new(egui::RichText::new(trunc(&name, 8)).size(11.0))
+                    egui::Label::new(egui::RichText::new(trunc(&name, 9)).size(11.0).color(head_col).strong())
                         .sense(egui::Sense::click()),
                 );
                 if head.clicked() {
@@ -1001,34 +1086,76 @@ impl SessionView {
                         });
                     }
                 }
+
                 if let Some(t) = track {
                     if widgets::knob(ui, &mut pan, -1.0, 1.0, 0.0, "Pan") {
                         cmds.push(ControlCmd::SetPan { track: t as u8, value: pan });
                     }
-                } else { ui.add_space(50.0); }
-                if widgets::fader(ui, &mut vol, 110.0, level) {
+                } else {
+                    ui.add_space(50.0);
+                }
+
+                if widgets::fader(ui, &mut vol, 120.0, level) {
                     cmds.push(match track {
                         Some(t) => ControlCmd::SetVolume { track: t as u8, value: vol },
                         None => ControlCmd::SetMasterVol { value: vol },
                     });
                 }
-                let db = if vol <= 0.0001 { "-inf".to_string() } else { format!("{:.1} dB", 20.0 * vol.log10()) };
+                let db = if vol <= 0.0001 { "-inf".to_string() } else { format!("{:.1}", 20.0 * vol.log10()) };
                 ui.label(egui::RichText::new(db).size(9.0).color(T.text_dim));
+
                 if let Some(t) = track {
                     ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new("M").small()
-                            .fill(if mute { T.clip_stopping.gamma_multiply(0.7) } else { T.panel })).clicked() {
+                        ui.spacing_mut().item_spacing.x = 3.0;
+                        if ui.add(egui::Button::new(egui::RichText::new("M").size(11.0))
+                            .fill(if mute { T.clip_stopping.gamma_multiply(0.75) } else { T.panel_raised })
+                            .min_size(vec2(20.0, 18.0))).clicked()
+                        {
                             cmds.push(ControlCmd::ToggleMute { track: t as u8 });
                         }
-                        if ui.add(egui::Button::new("S").small()
-                            .fill(if solo { T.clip_triggered.gamma_multiply(0.6) } else { T.panel })).clicked() {
+                        if ui.add(egui::Button::new(egui::RichText::new("S").size(11.0))
+                            .fill(if solo { T.clip_triggered.gamma_multiply(0.7) } else { T.panel_raised })
+                            .min_size(vec2(20.0, 18.0))).clicked()
+                        {
                             cmds.push(ControlCmd::ToggleSolo { track: t as u8 });
                         }
+                        if ui.add(egui::Button::new(egui::RichText::new("R").size(11.0))
+                            .fill(if arm { T.clip_rec.gamma_multiply(0.7) } else { T.panel_raised })
+                            .min_size(vec2(20.0, 18.0)))
+                            .on_hover_text("Armar para grabar")
+                            .clicked()
+                        {
+                            cmds.push(ControlCmd::ToggleArm { track: t as u8 });
+                        }
                     });
-                    if ui.add(egui::Button::new("● Arm").small()
-                        .fill(if arm { T.clip_rec.gamma_multiply(0.6) } else { T.panel })).clicked() {
-                        cmds.push(ControlCmd::ToggleArm { track: t as u8 });
-                    }
+
+                    // Entrada de audio (preparar pista para loops analógicos)
+                    ui.add_space(2.0);
+                    ui.label(egui::RichText::new("IN").size(9.0).color(T.text_dim));
+                    let cur_in = {
+                        shared.state.lock().unwrap().tracks.get(t)
+                            .and_then(|tr| tr.input_device.clone())
+                    };
+                    let label = cur_in.as_deref().map(|s| trunc(s, 8)).unwrap_or_else(|| "Default".into());
+                    egui::ComboBox::from_id_source(format!("in_sel_{}", t))
+                        .width(58.0)
+                        .selected_text(egui::RichText::new(label).size(9.0))
+                        .show_ui(ui, |ui| {
+                            if ui.selectable_label(cur_in.is_none(), "Default").clicked() {
+                                shared.edit(|st| {
+                                    if let Some(tr) = st.tracks.get_mut(t) { tr.input_device = None; }
+                                });
+                            }
+                            for name in lanzadera_engine::audio_input::list_input_devices() {
+                                if ui.selectable_label(cur_in.as_deref() == Some(name.as_str()), &name).clicked() {
+                                    shared.edit(|st| {
+                                        if let Some(tr) = st.tracks.get_mut(t) {
+                                            tr.input_device = Some(name.clone());
+                                        }
+                                    });
+                                }
+                            }
+                        });
                 }
             });
         });
@@ -1043,7 +1170,9 @@ impl SessionView {
     /// el "context-sensitive editor" de MAGDA (GPL-3) — concepto, no código.
     fn inspector_clip_body(&mut self, ui: &mut egui::Ui, shared: &SessionShared) {
         let mut clip_edit: Option<(usize, usize, Clip)> = None;
-        let mut eq_edit: Option<(usize, f32, f32, f32, bool, bool, f32, f32)> = None;
+        // t, lo, mid, hi, mid_f, mid_q, hpf_on, lpf_on, hpf_hz, lpf_hz
+        let mut eq_edit: Option<(usize, f32, f32, f32, f32, f32, bool, bool, f32, f32)> = None;
+        let mut input_edit: Option<(usize, Option<String>)> = None;
         let mut open_modal = None;
         let mut open_roll = None;
         let mut plugin_load: Option<(usize, String)> = None;
@@ -1152,25 +1281,36 @@ impl SessionView {
                 if lanzadera_engine::CLAP_ENABLED && ui.button("🔍 CLAP").on_hover_text("Explorar plugins CLAP").clicked() { 
                 self.browser_open = true; 
                 self.browser_mode = BrowserMode::Clap;
+                self.browser_list = None;
             }
             if lanzadera_engine::VST3_ENABLED && ui.button("🔍 VST3").on_hover_text("Explorar plugins VST3").clicked() { 
                 self.browser_open = true; 
                 self.browser_mode = BrowserMode::Vst3;
+                self.browser_list = None;
             }
             });
             ui.separator();
             ui.label(egui::RichText::new(format!("EQ · Pista {}", t + 1)).size(12.0));
-            let (mut lo, mut mid, mut hi, mut hpf_on, mut lpf_on, mut hpf_hz, mut lpf_hz) = {
+            ui.label(egui::RichText::new("Rueda sobre MID = Q (campana) · drag horizontal = freq")
+                .size(9.0).color(T.text_dim));
+            let (mut eq_p, mut hpf_on, mut lpf_on, mut hpf_hz, mut lpf_hz) = {
                 let st = shared.state.lock().unwrap();
                 let tr = &st.tracks[t.min(st.tracks.len() - 1)];
-                (tr.eq_low, tr.eq_mid, tr.eq_high, tr.hpf_on, tr.lpf_on, tr.hpf_hz, tr.lpf_hz)
+                (eq_view::EqParams {
+                    lo: tr.eq_low, mid: tr.eq_mid, hi: tr.eq_high,
+                    mid_f: tr.eq_mid_f, mid_q: tr.eq_mid_q,
+                }, tr.hpf_on, tr.lpf_on, tr.hpf_hz, tr.lpf_hz)
             };
             let mut eq_changed = false;
-            // Curva arrastrable (doble click = plano).
-            eq_changed |= eq_view::curve(ui, &mut lo, &mut mid, &mut hi);
-            eq_changed |= ui.add(egui::Slider::new(&mut lo, -15.0..=15.0).text("Low")).changed();
-            eq_changed |= ui.add(egui::Slider::new(&mut mid, -15.0..=15.0).text("Mid")).changed();
-            eq_changed |= ui.add(egui::Slider::new(&mut hi, -15.0..=15.0).text("High")).changed();
+            // Curva ProQ-style completa (Q + freq persistentes).
+            eq_changed |= eq_view::curve_full(ui, &mut eq_p);
+            eq_changed |= ui.add(egui::Slider::new(&mut eq_p.lo, -15.0..=15.0).text("Low")).changed();
+            eq_changed |= ui.add(egui::Slider::new(&mut eq_p.mid, -15.0..=15.0).text("Mid")).changed();
+            eq_changed |= ui.add(egui::Slider::new(&mut eq_p.hi, -15.0..=15.0).text("High")).changed();
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(format!("Mid {:.0} Hz  Q={:.2}", eq_p.mid_f, eq_p.mid_q))
+                    .size(10.0).color(T.text_dim));
+            });
             ui.horizontal(|ui| {
                 eq_changed |= ui.checkbox(&mut hpf_on, "HPF").changed();
                 eq_changed |= ui.add(egui::DragValue::new(&mut hpf_hz).range(20.0..=2000.0).suffix(" Hz")).changed();
@@ -1179,7 +1319,44 @@ impl SessionView {
                 eq_changed |= ui.checkbox(&mut lpf_on, "LPF").changed();
                 eq_changed |= ui.add(egui::DragValue::new(&mut lpf_hz).range(200.0..=20000.0).suffix(" Hz")).changed();
             });
-            if eq_changed { eq_edit = Some((t, lo, mid, hi, hpf_on, lpf_on, hpf_hz, lpf_hz)); }
+            if eq_changed {
+                eq_edit = Some((t, eq_p.lo, eq_p.mid, eq_p.hi, eq_p.mid_f, eq_p.mid_q,
+                                hpf_on, lpf_on, hpf_hz, lpf_hz));
+            }
+
+            // Entrada de audio para grabar loops analógicos
+            ui.separator();
+            ui.label(egui::RichText::new("Entrada de audio").size(12.0));
+            ui.label(egui::RichText::new("Dispositivo para grabar bajo / instrumentos analógicos")
+                .size(9.0).color(T.text_dim));
+            let devices = lanzadera_engine::audio_input::list_input_devices();
+            let current_in = {
+                shared.state.lock().unwrap().tracks.get(t)
+                    .and_then(|tr| tr.input_device.clone())
+            };
+            let display = current_in.as_deref().unwrap_or("Default In");
+            let mut chosen: Option<String> = current_in.clone();
+            egui::ComboBox::from_id_source(format!("insp_in_{}", t))
+                .selected_text(egui::RichText::new(trunc(display, 22)).size(11.0))
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(chosen.is_none(), "Default In").clicked() {
+                        chosen = None;
+                        input_edit = Some((t, None));
+                    }
+                    for name in &devices {
+                        if ui.selectable_label(chosen.as_deref() == Some(name.as_str()), name).clicked() {
+                            chosen = Some(name.clone());
+                            input_edit = Some((t, Some(name.clone())));
+                        }
+                    }
+                });
+            let arm = { shared.state.lock().unwrap().tracks.get(t).map(|tr| tr.arm).unwrap_or(false) };
+            if ui.add(egui::Button::new(if arm { "● Armado" } else { "○ Armar pista" })
+                .fill(if arm { T.clip_rec.gamma_multiply(0.55) } else { T.panel_raised }))
+                .clicked()
+            {
+                shared.apply_control(ControlCmd::ToggleArm { track: t as u8 });
+            }
 
             // ── Parámetros del plugin CLAP (Fase 3G) ──
             let params = { shared.state.lock().unwrap().tracks.get(t).map(|tr| tr.plugin_params.clone()).unwrap_or_default() };
@@ -1203,11 +1380,19 @@ impl SessionView {
             }
         }
         if let Some((t, s, c)) = clip_edit { shared.edit(|st| st.set_clip(t, s, c)); }
-        if let Some((t, lo, mid, hi, hpf_on, lpf_on, hpf_hz, lpf_hz)) = eq_edit {
+        if let Some((t, lo, mid, hi, mid_f, mid_q, hpf_on, lpf_on, hpf_hz, lpf_hz)) = eq_edit {
             shared.edit(|st| {
                 if let Some(tr) = st.tracks.get_mut(t) {
                     tr.eq_low = lo; tr.eq_mid = mid; tr.eq_high = hi;
+                    tr.eq_mid_f = mid_f; tr.eq_mid_q = mid_q;
                     tr.hpf_on = hpf_on; tr.lpf_on = lpf_on; tr.hpf_hz = hpf_hz; tr.lpf_hz = lpf_hz;
+                }
+            });
+        }
+        if let Some((t, dev)) = input_edit {
+            shared.edit(|st| {
+                if let Some(tr) = st.tracks.get_mut(t) {
+                    tr.input_device = dev;
                 }
             });
         }
@@ -1238,10 +1423,12 @@ impl SessionView {
                 }
             }
             BrowserMode::Vst3 => {
-                // Para VST3 usamos el mismo browser_list pero con (path, name, "")
+                // Para VST3 usamos el mismo browser_list con (path, "", name):
+                // el id de CLAP no aplica y el nombre va en su sitio (antes iba
+                // al reves y la lista mostraba nombres vacios).
                 if self.browser_list.is_none() {
                     self.browser_list = Some(
-                        lanzadera_engine::vst3_scan().into_iter().map(|(p, n)| (p, n, String::new())).collect()
+                        lanzadera_engine::vst3_scan().into_iter().map(|(p, n)| (p, String::new(), n)).collect()
                     );
                 }
             }
@@ -1249,12 +1436,19 @@ impl SessionView {
         let t = { shared.state.lock().unwrap().selected_track };
         let mut open = self.browser_open;
         let mut chosen: Option<(String, String)> = None;
-        egui::Window::new("Plugins CLAP").open(&mut open).default_size([460.0, 400.0])
+        let win_title = match self.browser_mode {
+            BrowserMode::Clap => "Plugins CLAP",
+            BrowserMode::Vst3 => "Plugins VST3",
+        };
+        egui::Window::new(win_title).open(&mut open).default_size([460.0, 400.0])
             .collapsible(false).show(ctx, |ui| {
                 ui.label(egui::RichText::new(format!("Destino: Pista {}", t + 1)).color(T.text_dim));
                 if let Some(list) = &self.browser_list {
                     if list.is_empty() {
-                        ui.label("Sin plugins en ~/.clap, ~/.local/lib/clap, /usr/lib/clap ni /usr/local/lib/clap");
+                        ui.label(match self.browser_mode {
+                            BrowserMode::Clap => "Sin plugins en ~/.clap, ~/.local/lib/clap, /usr/lib/clap ni /usr/local/lib/clap",
+                            BrowserMode::Vst3 => "Sin plugins en ~/.vst3, /usr/lib/vst3 ni /usr/local/lib/vst3 (o en $VST3_PATH)",
+                        });
                     } else {
                         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
                             for (path, id, name) in list {
@@ -1273,7 +1467,7 @@ impl SessionView {
                     match self.browser_mode {
                         BrowserMode::Clap => self.browser_list = Some(lanzadera_engine::clap_scan()),
                         BrowserMode::Vst3 => self.browser_list = Some(
-                            lanzadera_engine::vst3_scan().into_iter().map(|(p, n)| (p, n, String::new())).collect()
+                            lanzadera_engine::vst3_scan().into_iter().map(|(p, n)| (p, String::new(), n)).collect()
                         ),
                     }
                 }
@@ -1413,7 +1607,37 @@ impl SessionView {
             .resizable(true)
             .frame(Self::window_frame())
             .show(ctx, |ui| {
-                // El mixer ya es ventana aparte: el grid usa TODO el alto.
+                // Barra de herramientas del grid: +/− pistas
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("SESSION").size(11.0).strong().color(T.accent_gold));
+                    ui.separator();
+                    if ui.button("+ Pista").on_hover_text("Añadir pista").clicked() {
+                        shared.edit(|st| {
+                            let mut tr = lanzadera_core::Track::default();
+                            tr.name = format!("Pista {}", st.tracks.len() + 1);
+                            tr.kind = lanzadera_core::TrackKind::Audio;
+                            let _ = st.push_track(tr);
+                        });
+                    }
+                    let n = shared.state.lock().unwrap().tracks.len();
+                    if n > 1 {
+                        if ui.button("− Pista").on_hover_text("Eliminar pista seleccionada").clicked() {
+                            shared.edit(|st| {
+                                let idx = st.selected_track.min(st.tracks.len().saturating_sub(1));
+                                if st.tracks.len() > 1 {
+                                    st.tracks.remove(idx);
+                                    if st.selected_track >= st.tracks.len() {
+                                        st.selected_track = st.tracks.len().saturating_sub(1);
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new(format!("{} × scenes", n)).size(10.0).color(T.text_dim));
+                    });
+                });
+                ui.add_space(2.0);
                 let sz = ui.available_size();
                 ui.allocate_ui_with_layout(
                     sz, egui::Layout::top_down(egui::Align::LEFT),
@@ -1963,74 +2187,104 @@ impl SessionView {
     fn groove_mixer_tab(&mut self, ui: &mut egui::Ui, shared: &Arc<SessionShared>) {
         use caja_core::pieces::{PAD_ORDER, PIECES};
 
-        // Una sola fuente de verdad: el mismo GrooveKit que usan el MK3 y
-        // el hilo de audio. Se lee cada frame, así que el encoder y la cinta
-        // del hardware se reflejan aquí al instante.
+        // Misma fuente de verdad que el MK3 y el hilo de audio.
         let kit = shared.kit.clone();
         let cfg = kit.snapshot_cfg();
 
-        ui.label(egui::RichText::new("Mixer de celdas · Groove Machine")
-            .color(T.accent).size(12.0));
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("GROOVE MIXER")
+                .color(T.accent_gold).size(12.0).strong());
+            ui.label(egui::RichText::new("· estilo consola analógica")
+                .color(T.text_dim).size(10.0));
+        });
         ui.label(egui::RichText::new(
-            "MK3: pad selecciona · ENCODER = pan · touchstrip = volumen. Todo se ve y se edita aquí."
+            "MK3: pad selecciona · ENCODER = pan · touchstrip = volumen"
         ).color(T.text_dim).size(10.0));
-        ui.add_space(4.0);
+        ui.add_space(6.0);
 
-        egui::ScrollArea::vertical().id_source("gm_mixer_scroll")
+        // Strips verticales (mismo lenguaje visual que el mixer principal)
+        egui::ScrollArea::horizontal().id_source("gm_mixer_scroll")
             .auto_shrink([false, false]).show(ui, |ui| {
-            egui::Grid::new("groove_mixer_grid")
-                .num_columns(7)
-                .spacing(vec2(8.0, 6.0))
-                .show(ui, |ui| {
-                    for h in ["Celda", "Gain", "dB", "Pan", "Mute", "Solo", "Nota"] {
-                        ui.label(egui::RichText::new(h).color(T.text_dim).size(10.0));
-                    }
-                    ui.end_row();
+            ui.horizontal_top(|ui| {
+                for i in 0..cfg.len() {
+                    let pc = PAD_ORDER[i.min(PAD_ORDER.len() - 1)];
+                    let sel = self.groove_sel_pad == i;
+                    let border = if sel {
+                        egui::Stroke::new(1.5, T.accent_gold)
+                    } else {
+                        egui::Stroke::new(1.0, T.strip_border)
+                    };
 
-                    for i in 0..cfg.len() {
-                        let pc = PAD_ORDER[i.min(PAD_ORDER.len() - 1)];
-                        let sel = self.groove_sel_pad == i;
-                        let label = format!("{} {}", i + 1, trunc(PIECES[pc].name, 12));
-                        if ui.selectable_label(sel, label).clicked() {
-                            self.groove_sel_pad = i;
-                            self.inspector_focus = InspectorFocus::GrooveMixer;
-                        }
+                    egui::Frame::none()
+                        .fill(T.strip_bg)
+                        .rounding(Rounding::same(5.0))
+                        .stroke(border)
+                        .inner_margin(4.0)
+                        .show(ui, |ui| {
+                        ui.vertical(|ui| {
+                            ui.set_width(56.0);
 
-                        let mut gain = cfg[i].gain_linear();
-                        if ui.add(egui::Slider::new(&mut gain, 0.0..=2.0)
-                            .show_value(false).text("")).changed()
-                        {
-                            self.groove_sel_pad = i;
-                            kit.set_gain(i, (gain.clamp(0.0, 2.0) * 1000.0).round() as u16);
-                        }
-                        let db = if gain <= 0.0001 { "-inf".to_string() }
-                                 else { format!("{:+.1}", 20.0 * gain.log10()) };
-                        ui.label(egui::RichText::new(db).size(10.0).color(T.text_dim));
+                            // Nombre de la celda (click = seleccionar)
+                            let name = trunc(PIECES[pc].name, 7);
+                            let col = if sel { T.accent_gold } else { T.text_bright };
+                            let head = ui.add(
+                                egui::Label::new(egui::RichText::new(format!("{} {}", i + 1, name))
+                                    .size(10.0).color(col).strong())
+                                    .sense(egui::Sense::click()),
+                            );
+                            if head.clicked() {
+                                self.groove_sel_pad = i;
+                                self.inspector_focus = InspectorFocus::GrooveMixer;
+                            }
 
-                        let mut pan = cfg[i].pan_norm();
-                        if ui.add(egui::Slider::new(&mut pan, -1.0..=1.0)
-                            .show_value(true).text("")).changed()
-                        {
-                            self.groove_sel_pad = i;
-                            kit.set_pan(i, (pan.clamp(-1.0, 1.0) * 1000.0).round() as i16);
-                        }
+                            // Pan knob
+                            let mut pan = cfg[i].pan_norm();
+                            if widgets::knob(ui, &mut pan, -1.0, 1.0, 0.0, "Pan") {
+                                self.groove_sel_pad = i;
+                                kit.set_pan(i, (pan.clamp(-1.0, 1.0) * 1000.0).round() as i16);
+                            }
 
-                        let mut mute = cfg[i].mute;
-                        if ui.checkbox(&mut mute, "").changed() {
-                            self.groove_sel_pad = i;
-                            kit.set_mute(i, mute);
-                        }
-                        let mut solo = cfg[i].solo;
-                        if ui.checkbox(&mut solo, "").changed() {
-                            self.groove_sel_pad = i;
-                            kit.set_solo(i, solo);
-                        }
+                            // Gain como fader (0..2 → normalizado visual 0..1)
+                            let mut gain = cfg[i].gain_linear();
+                            let mut gain_norm = (gain / 2.0).clamp(0.0, 1.0);
+                            if widgets::fader(ui, &mut gain_norm, 90.0, 0.0) {
+                                gain = gain_norm * 2.0;
+                                self.groove_sel_pad = i;
+                                kit.set_gain(i, (gain.clamp(0.0, 2.0) * 1000.0).round() as u16);
+                            }
+                            let db = if gain <= 0.0001 { "-inf".into() }
+                                     else { format!("{:+.1}", 20.0 * gain.log10()) };
+                            ui.label(egui::RichText::new(db).size(9.0).color(T.text_dim));
 
-                        ui.label(egui::RichText::new(format!("{}", 36 + i))
-                            .size(10.0).color(T.text_dim));
-                        ui.end_row();
-                    }
-                });
+                            // M / S
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 2.0;
+                                let mut mute = cfg[i].mute;
+                                if ui.add(egui::Button::new(egui::RichText::new("M").size(10.0))
+                                    .fill(if mute { T.clip_stopping.gamma_multiply(0.75) } else { T.panel_raised })
+                                    .min_size(vec2(18.0, 16.0))).clicked()
+                                {
+                                    mute = !mute;
+                                    self.groove_sel_pad = i;
+                                    kit.set_mute(i, mute);
+                                }
+                                let mut solo = cfg[i].solo;
+                                if ui.add(egui::Button::new(egui::RichText::new("S").size(10.0))
+                                    .fill(if solo { T.clip_triggered.gamma_multiply(0.7) } else { T.panel_raised })
+                                    .min_size(vec2(18.0, 16.0))).clicked()
+                                {
+                                    solo = !solo;
+                                    self.groove_sel_pad = i;
+                                    kit.set_solo(i, solo);
+                                }
+                            });
+
+                            ui.label(egui::RichText::new(format!("n{}", 36 + i))
+                                .size(9.0).color(T.text_dim));
+                        });
+                    });
+                }
+            });
         });
     }
     fn groove_step_tab(&mut self, ui: &mut egui::Ui, shared: &Arc<SessionShared>) {

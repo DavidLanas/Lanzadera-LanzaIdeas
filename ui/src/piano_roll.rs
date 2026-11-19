@@ -19,8 +19,9 @@ use lanzadera_core::{MidiNote, TICKS_PER_BAR};
 use lanzadera_engine::shared::SessionShared;
 use crate::theme::T;
 
-const QUANTS: [(u32, &str); 6] = [
-    (60, "1/32"), (120, "1/16"), (240, "1/8"), (480, "1/4"), (960, "1/2"), (1920, "1/1"),
+const QUANTS: [(u32, &str); 8] = [
+    (30, "1/64"), (60, "1/32"), (120, "1/16"), (240, "1/8"),
+    (480, "1/4"), (960, "1/2"), (1920, "1/1"), (3840, "2/1"),
 ];
 const KEY_NAMES: [&str; 12] = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 const KEY_W: f32 = 48.0;
@@ -147,24 +148,26 @@ impl PianoRoll {
     fn show_toolbar(&mut self, ui: &mut egui::Ui, clip: &lanzadera_core::Clip,
         notes: &mut Vec<MidiNote>, t: usize, s: usize,
         changed: &mut bool, close: &mut bool) {
+        // Barra estilo DAW: título · modos · grid · herramientas · zoom · info
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new(
-                format!("🎹 {} · Pista {} · Escena {}", clip.name, t+1, s+1)).strong());
+                format!("🎹 {} · P{} · S{}", clip.name, t+1, s+1))
+                .strong().color(T.accent_gold));
             ui.separator();
             for (m, lbl, tip) in [(RollMode::Draw, "✏ D", "Dibujar (D)"),
                                    (RollMode::Select, "⬚ S", "Seleccionar (S)"),
                                    (RollMode::Cut, "✂ C", "Cortar (C)")] {
                 let active = self.mode == m;
-                if ui.add(egui::Button::new(lbl).small()
-                    .fill(if active { T.accent.gamma_multiply(0.5) } else { T.panel }))
+                if ui.add(egui::Button::new(egui::RichText::new(lbl).size(11.0)).small()
+                    .fill(if active { T.accent.gamma_multiply(0.45) } else { T.panel_raised }))
                     .on_hover_text(tip).clicked() { self.mode = m; }
             }
             ui.separator();
-            ui.label("Grid:");
+            ui.label(egui::RichText::new("Grid").size(10.0).color(T.text_dim));
             let qname = QUANTS.iter().find(|(q,_)| *q == self.quant).map(|(_, n)| *n).unwrap_or("1/16");
-            egui::ComboBox::from_id_source("roll_quant").selected_text(qname).width(52.0)
+            egui::ComboBox::from_id_source("roll_quant").selected_text(qname).width(56.0)
                 .show_ui(ui, |ui| { for (q, n) in QUANTS { ui.selectable_value(&mut self.quant, q, n); } });
-            if ui.small_button("Cuantizar").clicked() {
+            if ui.small_button("Cuantizar").on_hover_text("Ajustar inicio de notas a la rejilla").clicked() {
                 let q = self.quant.max(1);
                 let targets: Vec<usize> = if self.sel.is_empty() { (0..notes.len()).collect() } else { self.sel.clone() };
                 for i in targets {
@@ -174,13 +177,33 @@ impl PianoRoll {
                 }
                 *changed = true;
             }
+            if ui.small_button("Vel 100").on_hover_text("Fijar velocity de selección a 100").clicked() {
+                let targets: Vec<usize> = if self.sel.is_empty() { (0..notes.len()).collect() } else { self.sel.clone() };
+                for i in targets {
+                    if let Some(n) = notes.get_mut(i) { n.vel = 100; }
+                }
+                *changed = true;
+            }
+            if ui.small_button("Humanize").on_hover_text("Micro-desplazamiento aleatorio de inicio (±grid/4)").clicked() {
+                let q = self.quant.max(4) / 4;
+                let targets: Vec<usize> = if self.sel.is_empty() { (0..notes.len()).collect() } else { self.sel.clone() };
+                for i in targets {
+                    if let Some(n) = notes.get_mut(i) {
+                        // LCG simple sin rand crate
+                        let seed = (n.tick_start.wrapping_mul(1103515245).wrapping_add(12345)) as i32;
+                        let delta = (seed % (q as i32 * 2 + 1)) - q as i32;
+                        n.tick_start = n.tick_start.saturating_add_signed(delta).max(0);
+                    }
+                }
+                *changed = true;
+            }
             ui.separator();
-            ui.label("Zoom");
+            ui.label(egui::RichText::new("Zoom").size(10.0).color(T.text_dim));
             ui.add(egui::Slider::new(&mut self.px_per_tick, 0.03..=0.9).show_value(false));
-            ui.toggle_value(&mut self.follow_head, "👁 Seguir")
-                .on_hover_text("Desplazar con el playhead");
+            ui.toggle_value(&mut self.follow_head, "👁")
+                .on_hover_text("Seguir playhead");
             ui.separator();
-            ui.label(egui::RichText::new(format!("{} notas · {} compases", notes.len(), clip.loop_bars))
+            ui.label(egui::RichText::new(format!("{} notas · {} comp", notes.len(), clip.loop_bars))
                 .size(10.0).color(T.text_dim));
             if ui.button("✖").on_hover_text("Cerrar").clicked() { *close = true; }
         });
@@ -225,10 +248,15 @@ impl PianoRoll {
             let w = (n.tick_dur as f32 * px).max(3.0);
             let r = Rect::from_min_size(pos2(x, y + 1.0), vec2(w, self.row_h - 2.0));
             let v = n.vel as f32 / 127.0;
-            let col = Color32::from_rgb((60.0 + 160.0*v) as u8, (110.0 + 70.0*v) as u8, 235);
+            // Velocity → luminosidad del accent (look DAW)
+            let col = Color32::from_rgb(
+                (40.0 + 50.0 * v) as u8,
+                (90.0 + 80.0 * v) as u8,
+                (160.0 + 75.0 * v) as u8,
+            );
             p.rect_filled(r, Rounding::same(2.0), col);
             if self.sel.contains(&i) {
-                p.rect_stroke(r, Rounding::same(2.0), Stroke::new(1.5, Color32::WHITE));
+                p.rect_stroke(r, Rounding::same(2.0), Stroke::new(1.5, T.accent_gold));
             }
             if self.px_per_tick >= LABEL_ZOOM_THRESHOLD && w > 18.0 {
                 p.text(pos2(x + 2.0, y + self.row_h * 0.5), Align2::LEFT_CENTER,

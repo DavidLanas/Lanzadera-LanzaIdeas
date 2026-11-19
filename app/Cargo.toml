@@ -14,3 +14,4 @@ eframe = { version = "0.28", default-features = false, features = ["default_font
 [features]
 jack = ["lanzadera-engine/jack"]
 clap = ["lanzadera-engine/clap"]
+vst3 = ["clap", "lanzadera-engine/vst3"]

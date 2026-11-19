@@ -21,14 +21,21 @@ serde_json = "1.0.154"
 # Sin default-features para no arrastrar rayon al engine.
 midly = { version = "0.5", default-features = false, features = ["std", "alloc"] }
 
+# Ventana X11 anfitriona para GUIs de plugins embebidas (CLAP X11 embebido).
+# Mismo crate que ya usa vst3-host en Linux (MIT/Apache-2.0).
+[target.'cfg(target_os = "linux")'.dependencies]
+xcb = { version = "1.7", optional = true }
+
 [features]
 default = []
 # JACK opcional (requiere libjack-jackd2-dev); si no, ALSA/PipeWire
 jack = ["cpal/jack"]
 # Hosting de plugins CLAP
-clap = ["dep:clack-host", "dep:clack-extensions", "clack-extensions/params", "clack-extensions/clack-host", "clack-extensions/gui"]
+clap = ["dep:clack-host", "dep:clack-extensions", "clack-extensions/params", "clack-extensions/clack-host", "clack-extensions/gui", "dep:xcb"]
 # Hosting de plugins VST3
-vst3 = ["dep:vst3-host"]
+# vst3 implica clap: el motor reutiliza la cola de eventos, la tabla de
+# parametros y el sistema de GUI que hoy viven bajo la feature clap.
+vst3 = ["dep:vst3-host", "clap"]
 
 # ── Fase 4: motor de drums de Caja ──
 # caja-core = { path = "../../caja/core" }

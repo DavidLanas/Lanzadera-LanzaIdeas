@@ -42,10 +42,11 @@ impl Biquad {
 #[derive(Clone, Copy, PartialEq)]
 pub struct EqParams {
     pub sr: f32, pub low: f32, pub mid: f32, pub high: f32,
+    pub mid_f: f32, pub mid_q: f32,
     pub hpf_on: bool, pub lpf_on: bool, pub hpf_hz: f32, pub lpf_hz: f32,
 }
 
-/// Orden de bandas: 0 HPF · 1 low 120 Hz · 2 mid 1 kHz · 3 high 6 kHz · 4 LPF.
+/// Orden de bandas: 0 HPF · 1 low 120 Hz · 2 mid (freq/Q variables) · 3 high 6 kHz · 4 LPF.
 pub struct TrackEq { ch: [[Biquad; 5]; 2], on: [bool; 5], cache: Option<EqParams> }
 
 impl TrackEq {
@@ -55,10 +56,12 @@ impl TrackEq {
         if self.cache == Some(p) { return; }
         self.cache = Some(p);
         self.on = [p.hpf_on, p.low.abs() > 0.01, p.mid.abs() > 0.01, p.high.abs() > 0.01, p.lpf_on];
+        let mid_f = p.mid_f.clamp(80.0, 12000.0);
+        let mid_q = p.mid_q.clamp(0.15, 8.0);
         for c in 0..2 {
             self.ch[c][0].highpass(p.sr, p.hpf_hz.clamp(20.0, 2000.0), 0.707);
             self.ch[c][1].peaking(p.sr, 120.0, 0.7, p.low.clamp(-15.0, 15.0));
-            self.ch[c][2].peaking(p.sr, 1000.0, 0.9, p.mid.clamp(-15.0, 15.0));
+            self.ch[c][2].peaking(p.sr, mid_f, mid_q, p.mid.clamp(-15.0, 15.0));
             self.ch[c][3].peaking(p.sr, 6000.0, 0.7, p.high.clamp(-15.0, 15.0));
             self.ch[c][4].lowpass(p.sr, p.lpf_hz.clamp(200.0, 20000.0), 0.707);
         }

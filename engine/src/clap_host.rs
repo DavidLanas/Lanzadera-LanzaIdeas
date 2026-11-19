@@ -33,8 +33,11 @@ impl<'a> SharedHandler<'a> for LanzaderaShared {
 impl HostGuiImpl for LanzaderaShared {
     fn resize_hints_changed(&self) {}
 
-    fn request_resize(&self, _new_size: GuiSize) -> Result<(), HostError> {
-        // Flotante: la ventana la dimensiona el plugin, no el host.
+    fn request_resize(&self, new_size: GuiSize) -> Result<(), HostError> {
+        // Flotante: la ventana la dimensiona el plugin y esto se ignora.
+        // Embebida: el hilo principal redimensiona la ventana X11 del host
+        // y llama a set_size (clap_gui::poll_embedded).
+        crate::clap_gui::note_resize(self.track, new_size.width, new_size.height);
         Ok(())
     }
 

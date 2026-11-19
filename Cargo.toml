@@ -11,3 +11,8 @@ strip = "symbols"
 inherits = "release"
 debug = true
 strip = "none"
+
+# vst3-host 0.11.1 (MIT) con un parche: la "Plugin Compatibility Class" que
+# no se puede instanciar (yabridge) ya no aborta la carga. Ver vendor/vst3-host.
+[patch.crates-io]
+vst3-host = { path = "vendor/vst3-host" }

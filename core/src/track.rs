@@ -20,6 +20,12 @@ pub struct Track {
     pub eq_low: f32,  // -15..+15 dB
     pub eq_mid: f32,
     pub eq_high: f32,
+    /// Frecuencia central del mid (Hz). serde(default) = proyectos viejos.
+    #[serde(default = "def_eq_mid_f")]
+    pub eq_mid_f: f32,
+    /// Q de la campana del mid (ProQ-style). Más alto = más estrecho.
+    #[serde(default = "def_eq_mid_q")]
+    pub eq_mid_q: f32,
     pub hpf_on: bool,
     pub lpf_on: bool,
     /// Cortes del EQ gráfico (Fase 3). serde(default) = proyectos viejos siguen cargando.
@@ -28,6 +34,10 @@ pub struct Track {
     #[serde(default = "def_lpf_hz")]
     pub lpf_hz: f32,
     pub sends: [f32; 4],
+    /// Nombre del dispositivo de entrada de audio (None = default del sistema).
+    /// Usado al armar la pista para grabar loops de instrumentos analógicos.
+    #[serde(default)]
+    pub input_device: Option<String>,
     /// Ruta del plugin CLAP de la pista (Fase 3B). None = sinte interno.
     #[serde(default)]
     pub plugin_path: Option<String>,
@@ -42,6 +52,8 @@ pub struct Track {
 
 fn def_hpf_hz() -> f32 { 20.0 }
 fn def_lpf_hz() -> f32 { 20000.0 }
+fn def_eq_mid_f() -> f32 { 1000.0 }
+fn def_eq_mid_q() -> f32 { 0.7 }
 
 impl Default for Track {
     fn default() -> Self {
@@ -58,11 +70,14 @@ impl Default for Track {
             eq_low: 0.0,
             eq_mid: 0.0,
             eq_high: 0.0,
+            eq_mid_f: 1000.0,
+            eq_mid_q: 0.7,
             hpf_on: false,
             lpf_on: false,
             hpf_hz: 20.0,
             lpf_hz: 20000.0,
             sends: [0.0; 4],
+            input_device: None,
             plugin_path: None,
             plugin_id: None,
             plugin_params: Vec::new(),

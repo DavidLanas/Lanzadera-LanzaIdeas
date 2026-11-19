@@ -122,6 +122,19 @@ impl eframe::App for LanzaderaApp {
 
         self.view.show(ctx, &self.shared, self._audio.is_some());
 
+        // Errores de carga/GUI de plugins (antes solo salian por stderr).
+        #[cfg(feature = "clap")]
+        if let Some(m) = lanzadera_engine::clap_gui::take_notice() { self.view.msg = m; }
+        // Las GUI VST3 de Linux solo se dibujan si el host les da cuerda cada
+        // frame; sin esto egui duerme hasta el siguiente evento de raton.
+        #[cfg(feature = "clap")]
+        {
+            if lanzadera_engine::clap_gui::any_open() {
+                ctx.request_repaint_after(Duration::from_millis(16));
+            }
+            if lanzadera_engine::clap_gui::has_pending_request() { ctx.request_repaint(); }
+        }
+
         // ── GUI nativa de plugins CLAP (Fase 3H) ─────────────────────────
         #[cfg(feature = "clap")]
         for track in self.view.take_native_gui_requests() {

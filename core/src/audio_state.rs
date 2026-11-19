@@ -22,6 +22,8 @@ pub struct TrackAudio {
     pub eq_low: f32,
     pub eq_mid: f32,
     pub eq_high: f32,
+    pub eq_mid_f: f32,
+    pub eq_mid_q: f32,
     pub hpf_on: bool,
     pub lpf_on: bool,
     pub hpf_hz: f32,
@@ -33,7 +35,9 @@ pub struct TrackAudio {
 impl TrackAudio {
     pub const EMPTY: Self = TrackAudio {
         volume: 0.0, pan: 0.0, mute: false, solo: false,
-        eq_low: 0.0, eq_mid: 0.0, eq_high: 0.0, hpf_on: false, lpf_on: false,
+        eq_low: 0.0, eq_mid: 0.0, eq_high: 0.0,
+        eq_mid_f: 1000.0, eq_mid_q: 0.7,
+        hpf_on: false, lpf_on: false,
         hpf_hz: 20.0, lpf_hz: 20000.0, sends: [0.0; 4], active_clip: None,
     };
 }
@@ -71,6 +75,7 @@ pub struct SessionAudio {
     pub master_volume: f32,
     pub quantize: Quantize, // global (stops del launcher)
     pub fill_mode: bool,    // hook Fase 4 (occurrence de Caja)
+    pub metronome: bool,
     pub recording: bool,
     pub rec_track: u8,
     pub rec_scene: u8,
@@ -89,7 +94,7 @@ impl Default for SessionAudio {
         SessionAudio {
             tracks: [TrackAudio::EMPTY; MAX_TRACKS], track_count: 0, any_solo: false,
             tempo: 120.0, playing: false, master_volume: 0.8,
-            quantize: Quantize::One, fill_mode: false,
+            quantize: Quantize::One, fill_mode: false, metronome: false,
             recording: false, rec_track: 0, rec_scene: 0, rec_loop_ticks: 3840,
             rec_q_ticks: 0,
             groove_loop_ticks: 0,
@@ -106,7 +111,7 @@ impl SessionAudio {
             recording: s.recording, rec_track: rt as u8, rec_scene: rs as u8, rec_loop_ticks: rl,
             rec_q_ticks: s.quantize.ticks() as u32,
             tempo: s.tempo, playing: s.playing, master_volume: s.master_volume,
-            quantize: s.quantize, fill_mode: s.fill_mode,
+            quantize: s.quantize, fill_mode: s.fill_mode, metronome: s.metronome,
             ..Default::default()
         };
         for (ti, tr) in s.tracks.iter().enumerate().take(MAX_TRACKS) {
@@ -132,6 +137,7 @@ impl SessionAudio {
             out.tracks[ti] = TrackAudio {
                 volume: tr.volume, pan: tr.pan, mute: tr.mute, solo: tr.solo,
                 eq_low: tr.eq_low, eq_mid: tr.eq_mid, eq_high: tr.eq_high,
+                eq_mid_f: tr.eq_mid_f, eq_mid_q: tr.eq_mid_q,
                 hpf_on: tr.hpf_on, lpf_on: tr.lpf_on, hpf_hz: tr.hpf_hz, lpf_hz: tr.lpf_hz,
                 sends: tr.sends, active_clip: active,
             };
