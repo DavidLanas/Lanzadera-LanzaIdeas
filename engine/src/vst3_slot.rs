@@ -122,6 +122,19 @@ pub fn resolve_bundle(path: &str) -> PathBuf {
     p.to_path_buf()
 }
 
+
+/// Formatea un error con toda su cadena de causas (yabridge/wine anidan errores).
+fn err_chain(e: &dyn std::error::Error) -> String {
+    let mut s = e.to_string();
+    let mut src = e.source();
+    while let Some(c) = src {
+        s.push_str(" <- ");
+        s.push_str(&c.to_string());
+        src = c.source();
+    }
+    s
+}
+
 /// Carga y activa un plugin VST3. Hilo principal (los plugins VST3 exigen que
 /// la creacion/teardown ocurran fuera del hilo de audio).
 pub fn load(path: &str, sample_rate: u32, max_frames: u32)
@@ -131,8 +144,26 @@ pub fn load(path: &str, sample_rate: u32, max_frames: u32)
     if !bundle.exists() {
         return Err(format!("no existe: {}", bundle.display()));
     }
-    let mut plugin = simple::load_plugin_with_settings(&bundle, sample_rate as f64, max_frames as usize)
-        .map_err(|e| format!("load_plugin({}): {}", bundle.display(), e))?;
+    // Modo seguro opcional (como LYNX/Bitwig): hosting en proceso separado.
+    // Si el plugin o el proxy de yabridge hace SIGSEGV, muere el helper y
+    // Lanzadera sobrevive. Activar con: LANZADERA_VST3_ISOLATE=1
+    let isolate = std::env::var_os("LANZADERA_VST3_ISOLATE").is_some();
+    let mut plugin = if isolate {
+        println!("[vst3] cargando en proceso aislado (LANZADERA_VST3_ISOLATE=1)");
+        let mut host = vst3_host::Vst3Host::builder()
+            .sample_rate(sample_rate as f64)
+            .block_size(max_frames as usize)
+            .input_channels(2)
+            .output_channels(2)
+            .with_process_isolation(true)
+            .build()
+            .map_err(|e| format!("host builder: {}", err_chain(&e)))?;
+        host.load_plugin(&bundle)
+            .map_err(|e| format!("load_plugin aislado({}): {}", bundle.display(), err_chain(&e)))?
+    } else {
+        simple::load_plugin_with_settings(&bundle, sample_rate as f64, max_frames as usize)
+            .map_err(|e| format!("load_plugin({}): {}", bundle.display(), err_chain(&e)))?
+    };
 
     let info = plugin.info();
     let is_instrument = info.category.to_lowercase().contains("instrument");
@@ -140,13 +171,13 @@ pub fn load(path: &str, sample_rate: u32, max_frames: u32)
 
     // Crear buffers de audio reutilizables.
     let buffers = plugin.create_bus_audio_buffers(max_frames as usize)
-        .map_err(|e| format!("create_bus_audio_buffers: {}", e))?;
+        .map_err(|e| format!("create_bus_audio_buffers: {}", err_chain(&e)))?;
 
     let params = describe_params(&plugin);
     let has_editor = plugin.has_editor();
 
     plugin.start_processing()
-        .map_err(|e| format!("start_processing: {}", e))?;
+        .map_err(|e| format!("start_processing: {}", err_chain(&e)))?;
 
     Ok(Vst3Slot {
         plugin: Arc::new(Mutex::new(plugin)),
@@ -247,7 +278,7 @@ fn deliver(plugin: &mut Plugin, ev: &PluginEv) {
 /// alloc, sin bloqueo). Devuelve true si el plugin proceso y `slot.buffers`
 /// tiene la salida; false si la GUI tenia el lock (el bloque se omite y los
 /// eventos se aplazan).
-pub fn process(slot: &mut Vst3Slot, events: &[PluginEv], frames: usize) -> bool {
+pub fn process(slot: &mut Vst3Slot, events: &[PluginEv], frames: usize, in_l: &[f32], in_r: &[f32]) -> bool {
     let Some(mut plugin) = lock_for_audio(&slot.plugin) else {
         for e in events {
             if slot.pending.len() < slot.pending.capacity() {
@@ -258,17 +289,37 @@ pub fn process(slot: &mut Vst3Slot, events: &[PluginEv], frames: usize) -> bool 
         }
         return false;
     };
-    // El plugin procesa tantas muestras como midan los canales. Los buffers
-    // se crearon con MAX_BLOCK (4096): sin ajustarlos, cada callback de, p. ej.,
-    // 512 muestras hacia procesar 4096 -> sonido comprimido/saturado "como con
-    // poco buffer". resize dentro de la capacidad reservada no asigna memoria.
-    let n = frames.clamp(1, slot.buffers.block_size.max(1));
+    // El tamaño real lo fija el callback. Se acota por la CAPACIDAD reservada
+    // (no por block_size, que cambia cada bloque) para no reasignar en RT.
+    let cap = slot.buffers.outputs.iter().chain(slot.buffers.inputs.iter())
+        .flat_map(|b| b.channels.iter())
+        .map(|c| c.capacity())
+        .min()
+        .unwrap_or(frames);
+    let n = frames.min(cap).max(1);
     for bus in slot.buffers.inputs.iter_mut().chain(slot.buffers.outputs.iter_mut()) {
         for ch in bus.channels.iter_mut() {
             if ch.len() != n { ch.resize(n, 0.0); }
         }
     }
     slot.buffers.clear();
+    // CRÍTICO: el plugin toma numSamples de block_size. Si se queda en MAX_BLOCK
+    // (4096) y el callback entrega p.ej. 256, procesa 4096 sobre buffers de 256:
+    // sonido saturado/comprimido "como con poco buffer" y posible corrupción.
+    slot.buffers.block_size = n;
+
+    // Alimentar buses de entrada activos (efectos). Mono -> estéreo si hace falta.
+    if !in_l.is_empty() || !in_r.is_empty() {
+        for bus in slot.buffers.inputs.iter_mut() {
+            if !bus.active { continue; }
+            for (ci, ch) in bus.channels.iter_mut().enumerate() {
+                let src = if ci == 1 && !in_r.is_empty() { in_r } else { in_l };
+                let m = ch.len().min(src.len());
+                ch[..m].copy_from_slice(&src[..m]);
+            }
+        }
+    }
+
     for e in slot.pending.iter() { deliver(&mut plugin, e); }
     slot.pending.clear();
     for e in events { deliver(&mut plugin, e); }

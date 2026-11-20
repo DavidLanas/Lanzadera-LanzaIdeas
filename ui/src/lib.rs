@@ -9,3 +9,6 @@ pub use view::SessionView;
 pub use piano_roll::PianoRoll;
 /// Ventanas flotantes de parámetros de plugin (Fase 3H).
 pub mod plugin_window;
+
+// ── Patches Lanzadera ──
+pub mod patches;

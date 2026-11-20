@@ -676,148 +676,99 @@ impl SessionView {
     }
 
     // ── CLIP GRID ──────────────────────────────────────────────────────────
-    fn clip_grid(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, shared: &SessionShared, audio_on: bool) {
-        let (n_tracks, n_scenes) = {
-            let st = shared.state.lock().unwrap();
-            (st.tracks.len(), st.scenes.len().max(1))
+        fn clip_grid(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context, shared: &SessionShared, _audio_on: bool) {
+        let snapshot = {
+            let st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            crate::patches::build_snapshot::build_snapshot(&st)
         };
-        // ── Celdas elásticas: llenan la ventana en ancho y alto ──
-        let avail = ui.available_size();
-        let header_w = 120.0f32;
-        let sp = 4.0f32;
-        let cell_w = ((avail.x - header_w - sp * (n_scenes as f32 + 1.0))
-            / n_scenes as f32).max(64.0);
-        let _cell_h = ((avail.y - 28.0 - sp * (n_tracks as f32 + 1.0))
-            / n_tracks as f32).max(44.0);
 
-        let mut cmds = Vec::new();
-        let mut loads = Vec::new();
-        let mut deletes = Vec::new();
-        let mut creates = Vec::new();
-        let has_drop = ctx.input(|i| !i.raw.dropped_files.is_empty());
+        let mut actions = crate::patches::clip_grid::ClipGridActions::default();
+        crate::patches::clip_grid::render_session_matrix(ui, &snapshot, &mut actions);
 
-        egui::ScrollArea::both().id_source("clip_grid_scroll").auto_shrink([false, false]).show(ui, |ui| {
-            egui::Grid::new("clip_grid").spacing(vec2(4.0, 4.0)).show(ui, |ui| {
-                ui.label("");
-                for s in 0..n_scenes {
-                    let name = {
-                        let st = shared.state.lock().unwrap();
-                        st.scenes.get(s).map(|sc| sc.name.clone()).unwrap_or_default()
-                    };
-                    ui.vertical(|ui| {
-                        ui.set_width(cell_w);
-                        if ui.add(egui::Button::new(format!("▶ {}", trunc(&name, 9))).small()).clicked() {
-                            cmds.push(ControlCmd::LaunchScene { scene: s as u8 });
-                        }
-                    });
-                }
-                ui.end_row();
-                for t in 0..n_tracks {
-                    let (name, color, mute, solo) = {
-                        let st = shared.state.lock().unwrap();
-                        let tr = &st.tracks[t];
-                        (tr.name.clone(), tr.color, tr.mute, tr.solo)
-                    };
-                    ui.vertical(|ui| {
-                        ui.set_width(header_w);
-                        ui.horizontal(|ui| {
-                            let (r, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
-                            ui.painter().circle_filled(r.center(), 5.0, Color32::from_rgb(color[0], color[1], color[2]));
-                            // Clic en el nombre = foco de la pista. Antes era un
-                            // label pasivo y solo la celda de clip daba foco.
-                            let head = ui.add(
-                                egui::Label::new(egui::RichText::new(trunc(&name, 10)).size(12.0))
-                                    .sense(egui::Sense::click()),
-                            );
-                            if head.clicked() {
-                                let cur = shared.state.lock().unwrap().selected_track;
-                                cmds.push(ControlCmd::SelectTrack {
-                                    delta: (t as i32 - cur as i32) as i8,
-                                });
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            if ui.add(egui::Button::new("M").small()
-                                .fill(if mute { T.clip_stopping.gamma_multiply(0.7) } else { T.panel })).clicked() {
-                                cmds.push(ControlCmd::ToggleMute { track: t as u8 });
-                            }
-                            if ui.add(egui::Button::new("S").small()
-                                .fill(if solo { T.clip_triggered.gamma_multiply(0.6) } else { T.panel })).clicked() {
-                                cmds.push(ControlCmd::ToggleSolo { track: t as u8 });
-                            }
-                        });
-                    });
-                    for s in 0..n_scenes {
-                        self.clip_cell(ui, ctx, shared, t, s, audio_on, has_drop,
-                                       &mut cmds, &mut loads, &mut deletes, &mut creates);
-                    }
-                    ui.end_row();
-                }
-            });
-        });
+        use lanzadera_core::control::ControlCmd;
+        use lanzadera_core::clip::Quantize;
 
-        for c in cmds { shared.apply_control(c); }
-        for (t, s) in creates {
-            shared.edit(|st| {
-                let mut creado = false;
-                if let Some(tr) = st.tracks.get_mut(t) {
-                    if let Some(slot) = tr.clips.get_mut(s) {
-                        // Defaults para directo: 4 compases y lanzamiento
-                        // inmediato. Antes: 1 compás + quantize 1 compás, que
-                        // obligaba a editar el clip a mano antes de grabar.
-                        // Defaults para directo: 8 compases y quantize global
-                        // (no Immediate, para que el lanzamiento espere frontera).
-                        *slot = Some(Clip {
-                            name: format!("Clip {}", s + 1),
-                            loop_bars: 8,
-                            quantize: st.quantize,
-                            ..Default::default()
-                        });
-                        creado = true;
-                    }
-                }
-                // El clip recién creado toma el foco del Inspector, igual que
-                // CreateClip desde el KeyLab. Antes esta ruta escribía el slot
-                // sin mover la selección y el Inspector seguía en el vacío.
-                if creado {
-                    st.selected_track = t;
-                    st.selected_scene = s;
-                    st.selected_clip = Some((t, s));
-                }
-            });
+        if let Some(t) = actions.select_track {
+            shared.edit(|st| { st.selected_track = t; });
+            self.inspector_focus = InspectorFocus::Track;
         }
-        for (t, s) in deletes {
-            // ¿Estaba sonando/grabando? Entonces hay que matar la voz del motor,
-            // no solo borrar el slot: voices[t].midi sostiene un Arc que sigue
-            // emitiendo notas aunque el clip ya no exista en el estado.
-            let was_active = {
-                let st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
-                st.tracks.get(t)
-                    .and_then(|tr| tr.clips.get(s))
-                    .and_then(|c| c.as_ref())
-                    .map(|c| matches!(c.state,
-                        ClipState::Playing | ClipState::Triggered
-                        | ClipState::Recording | ClipState::Overdubbing
-                        | ClipState::Stopping | ClipState::RecQueued))
-                    .unwrap_or(false)
+        if let Some((t, s)) = actions.select_clip {
+            shared.apply_control(ControlCmd::SelectClip { track: t as u8, scene: s as u8 });
+            self.inspector_focus = InspectorFocus::Clip;
+        }
+        if let Some((t, s)) = actions.create_clip {
+            shared.apply_control(ControlCmd::CreateClip { track: t as u8, scene: s as u8, bars: 8 });
+            self.inspector_focus = InspectorFocus::Clip;
+        }
+        if let Some((t, s)) = actions.launch_clip {
+            shared.apply_control(ControlCmd::LaunchClip { track: t as u8, scene: s as u8 });
+        }
+        if let Some((t, s)) = actions.toggle_clip {
+            shared.apply_control(ControlCmd::LaunchClip { track: t as u8, scene: s as u8 });
+        }
+        if let Some(si) = actions.launch_scene {
+            shared.apply_control(ControlCmd::LaunchScene { scene: si as u8 });
+        }
+        if let Some(t) = actions.toggle_arm {
+            shared.apply_control(ControlCmd::ToggleArm { track: t as u8 });
+        }
+        if let Some(t) = actions.toggle_mute {
+            shared.apply_control(ControlCmd::ToggleMute { track: t as u8 });
+        }
+        if let Some(t) = actions.toggle_solo {
+            shared.apply_control(ControlCmd::ToggleSolo { track: t as u8 });
+        }
+        if let Some(t) = actions.stop_track {
+            shared.apply_control(ControlCmd::StopClip { track: t as u8 });
+        }
+        if actions.stop_all {
+            shared.apply_control(ControlCmd::StopAll);
+        }
+        if let Some(q) = actions.set_quantize {
+            let q_enum = match q {
+                1 => Quantize::One,
+                2 => Quantize::Two,
+                4 => Quantize::Four,
+                _ => Quantize::One,
             };
+            shared.edit(|st| st.quantize = q_enum);
+        }
+        if let Some((t, s)) = actions.delete_clip {
+            shared.apply_control(ControlCmd::StopClip { track: t as u8 });
             shared.edit(|st| {
                 if let Some(tr) = st.tracks.get_mut(t) {
                     if let Some(slot) = tr.clips.get_mut(s) { *slot = None; }
                 }
                 if st.selected_clip == Some((t, s)) { st.selected_clip = None; }
             });
-            shared.samples.clear(t, s);
-            // Faltaba esto: el NoteStore conservaba el Arc del clip borrado.
-            shared.notes.clear(t, s);
-            shared.rt.set_clip_state(t, s, ClipState::Empty);
-            if was_active {
-                if let Ok(mut q) = lanzadera_engine::audio_io::KILL_TRACKS.lock() {
-                    q.push(t);
-                }
-            }
+            shared.sync_midi(t, s);
         }
-        for (t, s, p) in loads { shared.request_load(t, s, p); }
+        if let Some((t, s)) = actions.duplicate_clip {
+            let target = shared.edit(|st| {
+                if let Some(tr) = st.tracks.get_mut(t) {
+                    let copy = tr.clips.get(s).and_then(|c| c.clone());
+                    if let Some(c) = copy {
+                        if let Some(empty) = tr.clips.iter_mut().position(|x| x.is_none()) {
+                            tr.clips[empty] = Some(c);
+                            return Some(empty);
+                        }
+                    }
+                }
+                None
+            });
+            if let Some(s2) = target { shared.sync_midi(t, s2); }
+        }
+        if let Some((t, s)) = actions.open_piano_roll {
+            shared.apply_control(ControlCmd::SelectClip { track: t as u8, scene: s as u8 });
+            self.inspector_focus = InspectorFocus::Clip;
+        }
+        if let Some((t, s)) = actions.open_audio_modal {
+            self.audio_modal = Some((t, s));
+            self.audio_path_input.clear();
+        }
+        if let Some((t, s, path)) = actions.load_file {
+            shared.request_load(t, s, path);
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

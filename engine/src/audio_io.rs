@@ -628,24 +628,31 @@ impl Renderer {
         }
 
         // ── Plugins VST3: un process_bus_audio() por pista y bloque ──
-        // Flujo: eventos de la cola neutral pev[t] (notas, CC, pitch bend,
-        // parametros) -> process -> sumar la salida a bufs[t]. Si la GUI tiene
-        // el lock en este bloque, `vst3_slot::process` devuelve false y aplaza
-        // los eventos (no bloquea nunca el hilo de audio).
+        // Efectos: la señal de la pista entra por los buses de audio del plugin
+        // y la salida sustituye al dry (no se suma dos veces). Instrumentos:
+        // generan desde MIDI y su salida se suma a la pista.
         #[cfg(feature = "vst3")]
         for t in 0..n {
             let Some(slot) = self.vst3_plugins[t].as_mut() else { continue; };
-            if !vst3_slot::process(slot, self.pev[t].as_slice(), frames) { continue; }
+            let is_fx = !slot.is_instrument;
+            let (in_l, in_r): (&[f32], &[f32]) = if is_fx {
+                (&self.bufs[t][0][..frames], &self.bufs[t][1][..frames])
+            } else {
+                (&[], &[])
+            };
+            if !vst3_slot::process(slot, self.pev[t].as_slice(), frames, in_l, in_r) { continue; }
 
-            // Sumar las salidas del plugin al buffer de la pista.
             if !slot.buffers.outputs.is_empty() {
                 let out_bus = &slot.buffers.outputs[0];
                 let buf = &mut self.bufs[t];
+                if is_fx {
+                    for f in 0..frames { buf[0][f] = 0.0; buf[1][f] = 0.0; }
+                }
                 let ch_count = out_bus.channels.len().min(2);
                 for f in 0..frames {
                     if ch_count >= 1 { buf[0][f] += out_bus.channels[0][f]; }
                     if ch_count >= 2 { buf[1][f] += out_bus.channels[1][f]; }
-                    else             { buf[1][f] += out_bus.channels[0][f]; } // mono → stereo
+                    else             { buf[1][f] += out_bus.channels[0][f]; }
                 }
             }
         }
