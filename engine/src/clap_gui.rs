@@ -180,6 +180,46 @@ impl EmbedHost {
     fn remove(&mut self, track: usize) { self.wins.retain(|(t, _)| *t != track); }
 }
 
+/// Guard de llamadas al plugin: SIGALRM si el plugin bloquea > TIMEOUT_SECS
+/// y catch_unwind para panics de Rust. No protege de SIGSEGV (eso requiere
+/// proceso separado, ver LANZADERA_VST3_ISOLATE), pero sí de deadlocks y panics.
+/// (Portado del análisis de LYNX-SHARE PluginSandbox; aquí alarm() de POSIX.)
+#[cfg(all(feature = "clap", target_os = "linux"))]
+mod crash_guard {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    /// Segundos máximos para gui.create()/gui.show().
+    const TIMEOUT_SECS: libc::c_uint = 6;
+    #[allow(dead_code)]
+    pub(super) static IN_PLUGIN_GUI_CALL: AtomicBool = AtomicBool::new(false);
+    /// Handler vacío: solo interrumpe la syscall bloqueada del plugin (EINTR).
+    pub fn install_alarm_handler() {
+        use std::sync::Once;
+        static INSTALLED: Once = Once::new();
+        INSTALLED.call_once(|| {
+            unsafe extern "C" fn alarm_noop(_sig: libc::c_int) {}
+            unsafe { libc::signal(libc::SIGALRM, alarm_noop as libc::sighandler_t); }
+        });
+    }
+    pub fn guarded<F, R>(f: F) -> Result<R, String>
+    where F: FnOnce() -> Result<R, String> + std::panic::UnwindSafe {
+        IN_PLUGIN_GUI_CALL.store(true, Ordering::Release);
+        unsafe { libc::alarm(TIMEOUT_SECS); }
+        let result = std::panic::catch_unwind(f);
+        unsafe { libc::alarm(0); }
+        IN_PLUGIN_GUI_CALL.store(false, Ordering::Release);
+        match result {
+            Ok(r) => r,
+            Err(_) => Err("el plugin sufrió un panic al abrir la GUI                  (bug del plugin; reinicia Lanzadera si hay audio corrupto)".to_string()),
+        }
+    }
+}
+
+/// Instala el watchdog SIGALRM para GUI de plugins CLAP. No-op fuera de Linux/clap.
+pub fn install_alarm_handler() {
+    #[cfg(all(feature = "clap", target_os = "linux"))]
+    crash_guard::install_alarm_handler();
+}
+
 /// Abre o cierra la GUI de una pista (flotante si el plugin la ofrece; si no,
 /// embebida en una ventana X11 del host). Hilo principal.
 #[cfg(feature = "clap")]
@@ -223,23 +263,42 @@ pub fn toggle(instance: &mut crate::clap_host::Instance, track: usize, title: &s
         }
     }
     if use_float {
-        gui.create(&main, cfg).map_err(|e| format!("create: {:?}", e))?;
-        let ctitle = std::ffi::CString::new(title)
-            .unwrap_or_else(|_| std::ffi::CString::new("plugin").unwrap());
-        gui.suggest_title(&main, &ctitle);
-        if let Err(e) = gui.show(&main) {
-            gui.destroy(&main);
-            return Err(format!("show: {:?}", e));
+        #[cfg(target_os = "linux")]
+        let result = crash_guard::guarded(std::panic::AssertUnwindSafe(|| {
+            gui.create(&main, cfg).map_err(|e| format!("create: {:?}", e))?;
+            let ctitle = std::ffi::CString::new(title)
+                .unwrap_or_else(|_| std::ffi::CString::new("plugin").unwrap());
+            gui.suggest_title(&main, &ctitle);
+            gui.show(&main).map_err(|e| format!("show: {:?}", e))
+        }));
+        #[cfg(not(target_os = "linux"))]
+        let result = {
+            gui.create(&main, cfg).map_err(|e| format!("create: {:?}", e))?;
+            let ctitle = std::ffi::CString::new(title)
+                .unwrap_or_else(|_| std::ffi::CString::new("plugin").unwrap());
+            gui.suggest_title(&main, &ctitle);
+            gui.show(&main).map_err(|e| format!("show: {:?}", e))
+        };
+        match result {
+            Ok(()) => { set_open(track, true); return Ok(()); }
+            Err(e) => {
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gui.destroy(&main)));
+                return Err(e);
+            }
         }
-        set_open(track, true);
-        return Ok(());
     }
 
     // 2) Embebida: el host aporta la ventana (solo X11 en Linux).
     if !e_ok || api != GuiApiType::X11 {
         return Err("el plugin no ofrece GUI flotante ni embebida en esta plataforma".into());
     }
-    gui.create(&main, embedded).map_err(|e| format!("create(embebida): {:?}", e))?;
+    #[cfg(target_os = "linux")]
+    let create_result = crash_guard::guarded(std::panic::AssertUnwindSafe(|| {
+        gui.create(&main, embedded).map_err(|e| format!("create(embebida): {:?}", e))
+    }));
+    #[cfg(not(target_os = "linux"))]
+    let create_result = gui.create(&main, embedded).map_err(|e| format!("create(embebida): {:?}", e));
+    create_result?;
     // Escala 1.0: sin esto algunos plugins (JUCE) asumen HiDPI inexistente.
     let _ = gui.set_scale(&main, 1.0);
     let size = gui.get_size(&main).unwrap_or(GuiSize { width: 800, height: 600 });

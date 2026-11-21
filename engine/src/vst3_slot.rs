@@ -135,6 +135,17 @@ fn err_chain(e: &dyn std::error::Error) -> String {
     s
 }
 
+/// Detecta si un bundle VST3 es un proxy yabridge leyendo
+/// `<bundle>/Contents/x86_64-linux/libyabridge*.so` (más fiable que el nombre).
+fn is_yabridge_bundle(bundle: &Path) -> bool {
+    let so_dir = bundle.join("Contents/x86_64-linux");
+    let Ok(rd) = std::fs::read_dir(&so_dir) else { return false };
+    rd.flatten().any(|e| {
+        let n = e.file_name().to_string_lossy().into_owned();
+        n.starts_with("libyabridge") && n.ends_with(".so")
+    })
+}
+
 /// Carga y activa un plugin VST3. Hilo principal (los plugins VST3 exigen que
 /// la creacion/teardown ocurran fuera del hilo de audio).
 pub fn load(path: &str, sample_rate: u32, max_frames: u32)
@@ -144,12 +155,42 @@ pub fn load(path: &str, sample_rate: u32, max_frames: u32)
     if !bundle.exists() {
         return Err(format!("no existe: {}", bundle.display()));
     }
+    let is_yabridge = is_yabridge_bundle(&bundle) || bundle.to_string_lossy().contains("yabridge");
+    if is_yabridge {
+        let wine_ok = std::process::Command::new("wine")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|st| st.success())
+            .unwrap_or(false);
+        if !wine_ok {
+            return Err(format!(
+                "plugin yabridge '{}': wine no encontrado en PATH. \
+                 Instala wine y ejecuta `yabridgectl sync`.",
+                bundle.file_stem().unwrap_or_default().to_string_lossy()
+            ));
+        }
+        println!("[vst3] yabridge detectado: {} — aislamiento automático", bundle.display());
+    }
     // Modo seguro opcional (como LYNX/Bitwig): hosting en proceso separado.
     // Si el plugin o el proxy de yabridge hace SIGSEGV, muere el helper y
     // Lanzadera sobrevive. Activar con: LANZADERA_VST3_ISOLATE=1
-    let isolate = std::env::var_os("LANZADERA_VST3_ISOLATE").is_some();
+    // Aislamiento SELECTIVO (estrategia LYNX: aislar solo lo problemático).
+    //   LANZADERA_VST3_ISOLATE=1|all  -> todo aislado
+    //   LANZADERA_VST3_ISOLATE=0|none -> nada aislado
+    //   sin variable (auto)           -> solo rutas yabridge (wine)
+    // Los VST3 nativos van in-process: su editor X11 funciona ahí. El helper
+    // todavía NO implementa CreateGui/CloseGui en Linux (solo macOS).
+    // Default: TODO in-process (GUI X11 disponible y sin retardo IPC, como en
+    // tus otros DAWs). El teardown cuelgue-privado vive en AudioHandle::drop
+    // (hilo aparte), así que in-process ya no congela la app al cambiar plugin.
+    // Válvula de escape: LANZADERA_VST3_ISOLATE=1 aísla todo (si un wine es
+    // inestable y prefieres perder su ventana a riesgo de crash).
+    let mode = std::env::var("LANZADERA_VST3_ISOLATE").unwrap_or_default();
+    let isolate = matches!(mode.as_str(), "1" | "all" | "yes");
     let mut plugin = if isolate {
-        println!("[vst3] cargando en proceso aislado (LANZADERA_VST3_ISOLATE=1)");
+        println!("[vst3] {} -> proceso aislado", bundle.display());
         let mut host = vst3_host::Vst3Host::builder()
             .sample_rate(sample_rate as f64)
             .block_size(max_frames as usize)

@@ -26,6 +26,8 @@ midly = { version = "0.5", default-features = false, features = ["std", "alloc"]
 [target.'cfg(target_os = "linux")'.dependencies]
 xcb = { version = "1.7", optional = true }
 
+libc = "0.2"
+
 [features]
 default = []
 # JACK opcional (requiere libjack-jackd2-dev); si no, ALSA/PipeWire

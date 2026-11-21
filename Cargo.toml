@@ -2,6 +2,7 @@
 [workspace]
 resolver = "2"
 members = ["core", "engine", "controller", "ui", "app"]
+exclude = ["vendor/vst3-host"]
 
 [profile.release]
 lto = "thin"

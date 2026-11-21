@@ -1578,6 +1578,7 @@ dependencies = [
  "cpal",
  "hound",
  "lanzadera-core",
+ "libc",
  "midly",
  "ringbuf",
  "serde_json",

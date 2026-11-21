@@ -142,17 +142,27 @@ impl Drop for AudioHandle {
         crate::clap_gui::close_all(&mut self.instances, &mut self.clap_embed);
         #[cfg(feature = "vst3")]
         {
-            // El editor VST3 debe soltarse antes que el plugin (y su ventana
-            // padre despues de la vista).
-            self.vst3_gui.close_all();
             for (t, _) in self.vst3_handles.iter() { crate::clap_gui::set_open(*t, false); }
         }
         // 1) Soltar el stream dropea el Renderer, que devuelve los procesadores.
         self.stream.take();
-        // 1b) Con el Renderer ya muerto, esta es la ultima referencia a los
-        //     plugins VST3: se destruyen aqui, en el hilo principal.
+        // 1b) Teardown VST3 en HILO APARTE: cerrar un editor o destruir un
+        //     plugin yabridge/wine puede bloquearse (teardown del bridge).
+        //     Hacerlo en el hilo principal congelaba la app al cambiar de
+        //     plugin. En un hilo suelto, un bloqueo se queda ahí: la app
+        //     sigue viva con el nuevo handle de audio.
         #[cfg(feature = "vst3")]
-        self.vst3_handles.clear();
+        {
+            let mut gui = std::mem::take(&mut self.vst3_gui);
+            let handles = std::mem::take(&mut self.vst3_handles);
+            std::thread::Builder::new()
+                .name("vst3-teardown".into())
+                .spawn(move || {
+                    gui.close_all();  // editores primero (la vista antes que el plugin)
+                    drop(handles);    // luego los plugins (teardown wine)
+                })
+                .ok();
+        }
         // 2) Desactivar cada procesador con su instancia (hilo principal).
         if let Some(rx) = &self.retire_rx {
             while let Ok(p) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
@@ -927,11 +937,23 @@ impl Renderer {
 }
 
 pub fn start(shared: Arc<SessionShared>) -> Result<AudioHandle, String> {
+    crate::clap_gui::install_alarm_handler();
+    // yabridge deduce el prefijo wine de la ruta de cada plugin. Un WINEPREFIX
+    // heredado del shell lo fuerza a uno equivocado (plugin en .wine-arturia pero
+    // wine en .wine) -> IComponent::initialize falla o crashea. Lo quitamos para
+    // que funcione igual desde terminal que desde el menú.
+    // Escape: LANZADERA_KEEP_WINEPREFIX=1 conserva la variable.
+    if std::env::var_os("LANZADERA_KEEP_WINEPREFIX").is_none() {
+        if let Some(v) = std::env::var_os("WINEPREFIX") {
+            println!("[lanzadera] quitando WINEPREFIX={:?} (yabridge auto-detecta por plugin)", v);
+            std::env::remove_var("WINEPREFIX");
+        }
+    }
     #[cfg(feature = "jack")]
     {
         if let Ok(h) = cpal::host_from_id(cpal::HostId::Jack) {
             if let Ok(a) = build_for_host(h, shared.clone()) {
-                println!("[lanzadera] audio: JACK");
+                println!("[lanzadera] audio: JACK (PipeWire si se lanzó con pw-jack)");
                 return Ok(a);
             }
         }
@@ -945,11 +967,57 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
     let device = host.default_output_device().ok_or("sin dispositivo de salida")?;
     let supported = device.default_output_config().map_err(|e| e.to_string())?;
     let channels = supported.channels() as usize;
-    let sample_rate = supported.sample_rate().0;
+    // Alinear la app a la tasa del grafo PipeWire (48000) para evitar remuestreo
+    // por bloque, que bajo pipewire-alsa es una fuente tipica de xruns.
+    // Override manual: LANZADERA_RATE=48000 (o la tasa que quieras forzar).
+    let sample_rate = {
+        let default_rate = supported.sample_rate().0;
+        match std::env::var("LANZADERA_RATE").ok().and_then(|v| v.parse::<u32>().ok()) {
+            Some(r) if (8000..=384000).contains(&r) => r,
+            _ => {
+                let has48 = device.supported_output_configs().ok()
+                    .map(|mut it| it.any(|c| c.min_sample_rate().0 <= 48000 && 48000 <= c.max_sample_rate().0))
+                    .unwrap_or(false);
+                if has48 && default_rate != 48000 {
+                    println!("[lanzadera] usando 48000 Hz (tasa del grafo) en vez de {} Hz", default_rate);
+                    48000
+                } else {
+                    default_rate
+                }
+            }
+        }
+    };
+    // El Default de ALSA suele ser grande y añade decenas de ms entre pulsar
+    // una tecla y oírla. LANZADERA_BUFFER=256 (frames); 0 = Default del driver.
+    let want = std::env::var("LANZADERA_BUFFER").ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(256);
+    // En JACK/PipeWire el buffer lo fija el servidor (PIPEWIRE_LATENCY).
+    // HostId::Jack solo existe con la feature "jack" de cpal.
+    #[cfg(feature = "jack")]
+    let is_jack = host.id() == cpal::HostId::Jack;
+    #[cfg(not(feature = "jack"))]
+    let is_jack = false;
+    let buffer_size = if want == 0 || is_jack {
+        cpal::BufferSize::Default
+    } else {
+        match supported.buffer_size() {
+            cpal::SupportedBufferSize::Range { min, max } => {
+                cpal::BufferSize::Fixed(want.clamp(*min, *max))
+            }
+            cpal::SupportedBufferSize::Unknown => cpal::BufferSize::Fixed(want),
+        }
+    };
+    if let cpal::BufferSize::Fixed(n) = buffer_size {
+        println!("[lanzadera] buffer: {} frames (~{:.1} ms)", n, n as f64 * 1000.0 / sample_rate as f64);
+    }
+    if is_jack {
+        println!("[lanzadera] JACK/PipeWire: quantum del servidor (PIPEWIRE_LATENCY)");
+    }
     let cfg = cpal::StreamConfig {
         channels: channels as u16,
         sample_rate: cpal::SampleRate(sample_rate),
-        buffer_size: cpal::BufferSize::Default,
+        buffer_size,
     };
 
     // Estado de GUI limpio en cada (re)arranque: si se quito un plugin, su
@@ -1070,18 +1138,23 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
     let caja_scheduler = CajaScheduler::new(shared.caja_sched.clone(), sample_rate as f64);
 
     // ── Input stream (Fase F2) ──
-    let audio_in = match crate::audio_input::open(&host, sample_rate as usize * 8) {
-        Ok((stream, cons)) => {
-            println!(
-                "[lanzadera] audio input: {} Hz · {} canales",
-                stream.sample_rate, stream.channels
-            );
-            let ch = stream.channels;
-            (Some(stream), Some(cons), ch)
-        }
-        Err(e) => {
-            eprintln!("[lanzadera] audio input: {}", e);
-            (None, None, 0)
+    let audio_in = if std::env::var_os("LANZADERA_NO_AUDIO_IN").is_some() {
+        println!("[lanzadera] audio input: desactivado (LANZADERA_NO_AUDIO_IN=1)");
+        (None, None, 0u16)
+    } else {
+        match crate::audio_input::open(&host, sample_rate as usize * 8) {
+            Ok((stream, cons)) => {
+                println!(
+                    "[lanzadera] audio input: {} Hz · {} canales",
+                    stream.sample_rate, stream.channels
+                );
+                let ch = stream.channels;
+                (Some(stream), Some(cons), ch)
+            }
+            Err(e) => {
+                eprintln!("[lanzadera] audio input: {}", e);
+                (None, None, 0u16)
+            }
         }
     };
     let (audio_in_stream, audio_in_cons, audio_in_ch) = audio_in;
