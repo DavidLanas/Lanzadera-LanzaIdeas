@@ -12,3 +12,11 @@ Cargo.lock.bak
 # Editor
 .vscode/
 .idea/
+
+# Backups generados por los scripts de parcheo
+*.bak_*
+# Volcados de core (segfaults de plugins)
+core
+core.*
+# Build propio del vendor (helper de aislamiento)
+vendor/vst3-host/target/
