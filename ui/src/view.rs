@@ -457,8 +457,8 @@ impl SessionView {
             .show(ctx, |_ui| {});
 
         // Clip Launch: grid + mixer + piano roll.
+        self.roll.show(ctx, shared);
         if self.windows.clip_launch_visible {
-            self.roll.show(ctx, shared);
             self.clip_launch_window(ctx, shared, audio_on);
         }
 
@@ -677,10 +677,35 @@ impl SessionView {
 
     // ── CLIP GRID ──────────────────────────────────────────────────────────
         fn clip_grid(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context, shared: &SessionShared, _audio_on: bool) {
-        let snapshot = {
+        let (mut snapshot, n_scenes) = {
             let st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
-            crate::patches::build_snapshot::build_snapshot(&st)
+            (crate::patches::build_snapshot::build_snapshot(&st), st.scenes.len())
         };
+        snapshot.scene_count = n_scenes.max(1);
+        // El estado REAL lo publica el ClipEngine via rt, no SessionState.
+        // Sin esto la celda se queda en Triggered y parpadea para siempre.
+        if _audio_on {
+            use crate::patches::session_snapshot::ClipStateView;
+            for (ti, tr) in snapshot.tracks.iter_mut().enumerate() {
+                let active = shared.rt.active_scene(ti);
+                for (si, slot) in tr.clips.iter_mut().enumerate() {
+                    let Some(c) = slot.as_mut() else { continue };
+                    c.state = match shared.rt.clip_state(ti, si) {
+                        ClipState::Empty => ClipStateView::Empty,
+                        ClipState::Triggered => ClipStateView::Triggered,
+                        ClipState::Playing => ClipStateView::Playing,
+                        ClipState::Stopping => ClipStateView::Stopping,
+                        ClipState::Recording => ClipStateView::Recording,
+                        ClipState::Overdubbing => ClipStateView::Overdubbing,
+                        ClipState::RecQueued => ClipStateView::RecQueued,
+                    };
+                    let lt = (c.loop_bars.max(1) as u32 * TICKS_PER_BAR as u32).max(1);
+                    c.progress = if active == Some(si as u8) {
+                        (shared.rt.playhead(ti) as f32 / lt as f32).clamp(0.0, 1.0)
+                    } else { 0.0 };
+                }
+            }
+        }
 
         let mut actions = crate::patches::clip_grid::ClipGridActions::default();
         crate::patches::clip_grid::render_session_matrix(ui, &snapshot, &mut actions);
@@ -759,6 +784,7 @@ impl SessionView {
             if let Some(s2) = target { shared.sync_midi(t, s2); }
         }
         if let Some((t, s)) = actions.open_piano_roll {
+            self.roll.open_for(t, s);
             shared.apply_control(ControlCmd::SelectClip { track: t as u8, scene: s as u8 });
             self.inspector_focus = InspectorFocus::Clip;
         }
@@ -768,6 +794,41 @@ impl SessionView {
         }
         if let Some((t, s, path)) = actions.load_file {
             shared.request_load(t, s, path);
+        }
+        if actions.add_scene {
+            let ok = shared.edit(|st| {
+                let n = st.scenes.len();
+                st.push_scene(lanzadera_core::Scene {
+                    name: format!("Escena {}", n + 1), ..Default::default()
+                })
+            });
+            self.msg = if ok { "Escena añadida".into() }
+                       else { format!("Máximo {} escenas", lanzadera_core::MAX_SCENES) };
+        }
+        if let Some(idx) = actions.remove_scene {
+            let n_tracks = { shared.state.lock().unwrap().tracks.len() };
+            let ok = shared.edit(|st| st.remove_scene(idx));
+            if ok {
+                // Reindexar los almacenes de audio (notas/muestras) por slot.
+                for t in 0..n_tracks {
+                    for s in idx..lanzadera_core::MAX_SCENES - 1 {
+                        match shared.notes.load(t, s + 1) {
+                            Some(a) => shared.notes.store(t, s, a),
+                            None => shared.notes.clear(t, s),
+                        }
+                        match shared.samples.load(t, s + 1) {
+                            Some(a) => shared.samples.store(t, s, a),
+                            None => shared.samples.clear(t, s),
+                        }
+                    }
+                    shared.notes.clear(t, lanzadera_core::MAX_SCENES - 1);
+                    shared.samples.clear(t, lanzadera_core::MAX_SCENES - 1);
+                }
+                shared.audio_restart.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.msg = format!("Escena {} eliminada", idx + 1);
+            } else {
+                self.msg = "No se puede eliminar: queda una sola escena".into();
+            }
         }
     }
 
@@ -1059,13 +1120,13 @@ impl SessionView {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 3.0;
                         if ui.add(egui::Button::new(egui::RichText::new("M").size(11.0))
-                            .fill(if mute { T.clip_stopping.gamma_multiply(0.75) } else { T.panel_raised })
+                            .fill(if mute { Color32::from_rgb(240, 200,  70).gamma_multiply(0.85) } else { T.panel_raised })
                             .min_size(vec2(20.0, 18.0))).clicked()
                         {
                             cmds.push(ControlCmd::ToggleMute { track: t as u8 });
                         }
                         if ui.add(egui::Button::new(egui::RichText::new("S").size(11.0))
-                            .fill(if solo { T.clip_triggered.gamma_multiply(0.7) } else { T.panel_raised })
+                            .fill(if solo { Color32::from_rgb(240, 152,  72).gamma_multiply(0.85) } else { T.panel_raised })
                             .min_size(vec2(20.0, 18.0))).clicked()
                         {
                             cmds.push(ControlCmd::ToggleSolo { track: t as u8 });
@@ -2212,7 +2273,7 @@ impl SessionView {
                                 ui.spacing_mut().item_spacing.x = 2.0;
                                 let mut mute = cfg[i].mute;
                                 if ui.add(egui::Button::new(egui::RichText::new("M").size(10.0))
-                                    .fill(if mute { T.clip_stopping.gamma_multiply(0.75) } else { T.panel_raised })
+                                    .fill(if mute { Color32::from_rgb(240, 200,  70).gamma_multiply(0.85) } else { T.panel_raised })
                                     .min_size(vec2(18.0, 16.0))).clicked()
                                 {
                                     mute = !mute;
@@ -2221,7 +2282,7 @@ impl SessionView {
                                 }
                                 let mut solo = cfg[i].solo;
                                 if ui.add(egui::Button::new(egui::RichText::new("S").size(10.0))
-                                    .fill(if solo { T.clip_triggered.gamma_multiply(0.7) } else { T.panel_raised })
+                                    .fill(if solo { Color32::from_rgb(240, 152,  72).gamma_multiply(0.85) } else { T.panel_raised })
                                     .min_size(vec2(18.0, 16.0))).clicked()
                                 {
                                     solo = !solo;

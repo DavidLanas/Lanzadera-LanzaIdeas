@@ -96,6 +96,7 @@ impl AudioHandle {
             }
         }
         // GUI CLAP embebidas: cierre por la X y resizes del plugin.
+        crate::clap_services::poll(&mut self.instances);
         crate::clap_gui::poll_embedded(&mut self.instances, &mut self.clap_embed);
 
         // GUI VST3: run loop del plugin + cierre por la X.
@@ -140,6 +141,7 @@ impl Drop for AudioHandle {
         // 0) Cerrar las GUI abiertas ANTES de soltar nada: la ventana del
         //    plugin debe destruirse mientras la instancia sigue viva.
         crate::clap_gui::close_all(&mut self.instances, &mut self.clap_embed);
+        for t in 0..MAX_TRACKS { crate::clap_services::clear_track(t); }
         #[cfg(feature = "vst3")]
         {
             for (t, _) in self.vst3_handles.iter() { crate::clap_gui::set_open(*t, false); }
@@ -1216,6 +1218,15 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
     let stream = device.build_output_stream(
         &cfg,
         move |out: &mut [f32], _info| {
+            // Paso 1 CLAP: marca este hilo como el de audio para
+            // clap_host_thread_check. Idempotente y RT-safe: es un único
+            // store en un thread-local (sin locks, sin alloc, ~1 ns).
+            // Además hace que clap_services::wake() NO toque egui desde
+            // aquí: un request_callback en RT solo setea el flag y lo
+            // atiende el hilo principal en el siguiente poll().
+            #[cfg(feature = "clap")]
+            crate::clap_services::mark_audio_thread();
+
             let chunk = MAX_BLOCK * channels.max(1);
             for piece in out.chunks_mut(chunk) { renderer.render(piece, &cb_shared); }
         },

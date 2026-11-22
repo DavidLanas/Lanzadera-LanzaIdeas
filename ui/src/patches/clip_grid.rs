@@ -21,6 +21,8 @@ pub struct ClipGridActions {
     pub stop_all: bool,
     pub set_quantize: Option<u8>,
     pub launch_scene: Option<usize>,
+    pub add_scene: bool,
+    pub remove_scene: Option<usize>,
 }
 
 pub fn render_session_matrix(ui: &mut Ui, s: &SessionSnapshot, a: &mut ClipGridActions) {
@@ -69,6 +71,7 @@ fn render_top_bar(ui: &mut Ui, t: &TransportSnapshot, a: &mut ClipGridActions) {
         ui.label(format!("Q {}", t.quantize_bars));
         if ui.small_button("Q4").clicked() { a.set_quantize = Some(4); }
         if ui.small_button("Q1").clicked() { a.set_quantize = Some(1); }
+        if ui.button("+ Escena").on_hover_text("Añadir escena al final").clicked() { a.add_scene = true; }
         if t.rec_queued {
             let c = 4_i32 - (t.beat_in_bar as i32 % 4);
             ui.label(RichText::new(format!("● REC {}", c)).color(theme::RED).strong());
@@ -105,6 +108,10 @@ fn scene_header(ui: &mut Ui, si: usize, w: f32, h: f32, a: &mut ClipGridActions)
     if resp.hovered() {
         ui.painter().rect_filled(rect, 4.0, Color32::from_rgba_unmultiplied(100, 180, 255, 30));
     }
+    resp.context_menu(|ui| {
+        if ui.button("🗑 Eliminar escena").clicked() { a.remove_scene = Some(si); ui.close_menu(); }
+        if ui.button("＋ Añadir escena").clicked() { a.add_scene = true; ui.close_menu(); }
+    });
 }
 
 fn track_header(ui: &mut Ui, t: &TrackSnapshot, track_idx: usize, w: f32, h: f32, a: &mut ClipGridActions) {
@@ -138,8 +145,12 @@ fn track_header(ui: &mut Ui, t: &TrackSnapshot, track_idx: usize, w: f32, h: f32
     let solo = mute.translate(Vec2::new(bw + 2.0, 0.0));
     let stop = solo.translate(Vec2::new(bw + 2.0, 0.0));
 
-    for (r, label, active) in [(arm, "●", t.armed), (mute, "M", t.muted), (solo, "S", t.soloed)] {
-        let fill = if active { theme::RED } else { Color32::from_gray(50) };
+    for (r, label, active, col) in [
+        (arm,  "●", t.armed,  Color32::from_rgb(232,  92,  92)),
+        (mute, "M", t.muted,  Color32::from_rgb(240, 200,  70)),
+        (solo, "S", t.soloed, Color32::from_rgb(240, 152,  72)),
+    ] {
+        let fill = if active { col } else { Color32::from_gray(50) };
         p.rect_filled(r, 2.0, fill);
         p.text(r.center(), Align2::CENTER_CENTER, label, FontId::proportional(10.0), theme::TEXT_COLOR);
     }
@@ -183,16 +194,16 @@ fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize
     } else {
         match st {
             ClipStateView::Empty => ("▶", theme::TEXT_COLOR),
-            ClipStateView::Playing => ("■", theme::TEXT_COLOR),
-            ClipStateView::Stopping => ("▶", Color32::from_rgb(255, 160, 60)),
-            ClipStateView::Recording | ClipStateView::Overdubbing => ("●", theme::RED),
+            ClipStateView::Playing => ("▶", Color32::from_rgb(140, 216, 108)),
+            ClipStateView::Stopping => ("■", Color32::from_rgb(240, 152,  72)),
+            ClipStateView::Recording | ClipStateView::Overdubbing => ("●", Color32::from_rgb(232,  92,  92)),
             ClipStateView::RecQueued => {
                 let time = ui.input(|i| i.time) as f32;
-                ("●", if (time * 4.0).sin() > 0.0 { theme::RED } else { theme::GRAY })
+                ("●", if (time * 4.0).sin() > 0.0 { Color32::from_rgb(240, 200,  70) } else { theme::GRAY })
             }
             ClipStateView::Triggered => {
                 let time = ui.input(|i| i.time) as f32;
-                ("▶", if (time * 6.0).sin() > 0.0 { theme::RED } else { theme::TEXT_COLOR })
+                ("▶", if (time * 6.0).sin() > 0.0 { Color32::from_rgb(240, 200,  70) } else { theme::GRAY })
             }
         }
     };
@@ -256,7 +267,7 @@ fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize
     }
 
     // ── Interacciones (lógica original reconectada) ──
-    if resp.double_clicked() {
+    if resp.double_clicked() && has_clip {
         a.open_piano_roll = Some((ti, si));
     } else if resp.clicked() {
         if let Some(pos) = resp.interact_pointer_pos() {
@@ -273,7 +284,7 @@ fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize
 
     // Menú contextual (click derecho)
     resp.context_menu(|ui| {
-        if ui.button("🎹 Piano Roll").clicked() { a.open_piano_roll = Some((ti, si)); ui.close_menu(); }
+        if has_clip && ui.button("🎹 Piano Roll").clicked() { a.open_piano_roll = Some((ti, si)); ui.close_menu(); }
         if ui.button("📂 Cargar audio/MIDI…").clicked() { a.open_audio_modal = Some((ti, si)); ui.close_menu(); }
         if has_clip {
             if ui.button("🗑 Borrar clip").clicked() { a.delete_clip = Some((ti, si)); ui.close_menu(); }

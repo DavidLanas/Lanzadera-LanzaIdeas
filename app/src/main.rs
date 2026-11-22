@@ -129,11 +129,23 @@ impl eframe::App for LanzaderaApp {
         // frame; sin esto egui duerme hasta el siguiente evento de raton.
         #[cfg(feature = "clap")]
         {
-            if lanzadera_engine::clap_gui::any_open() {
-                ctx.request_repaint_after(Duration::from_millis(16));
+            // Timers CLAP precisos, con el cadencia VST3 (16 ms) como techo.
+            let timer_delay = lanzadera_engine::clap_services::next_wakeup();
+            if lanzadera_engine::clap_gui::any_open() || timer_delay.is_some() {
+                let delay = timer_delay
+                    .unwrap_or(Duration::from_millis(16))
+                    .min(Duration::from_millis(16));
+                ctx.request_repaint_after(delay);
             }
-            if lanzadera_engine::clap_gui::has_pending_request() { ctx.request_repaint(); }
+    if lanzadera_engine::clap_gui::has_pending_request() { ctx.request_repaint(); }
+
+    // request_restart del plugin → tu mecanismo existente de reinicio.
+    for track in 0..lanzadera_core::MAX_TRACKS {
+        if lanzadera_engine::clap_services::take_restart(track) {
+            self.shared.audio_restart.store(true, std::sync::atomic::Ordering::Relaxed);
         }
+    }
+}
 
         // ── GUI nativa de plugins CLAP (Fase 3H) ─────────────────────────
         #[cfg(feature = "clap")]
@@ -219,7 +231,19 @@ fn main() {
     let app_shared = shared.clone();
     if let Err(e) = eframe::run_native("lanzadera", options, Box::new(move |cc| {
         lanzadera_ui::theme::apply(&cc.egui_ctx);
-        Ok(Box::new(LanzaderaApp { shared: app_shared, view, _audio: audio, _conns: conns, _leds: leds, _kl_leds: kl_leds,  taps: Vec::new() }))
+
+        // ── Paso 1 CLAP: wakeup de egui + identidad del hilo principal ──
+        #[cfg(feature = "clap")]
+        {
+            let wake_ctx = cc.egui_ctx.clone();
+            lanzadera_engine::clap_services::set_waker(move || wake_ctx.request_repaint());
+            lanzadera_engine::clap_services::mark_main_thread();
+        }
+
+        Ok(Box::new(LanzaderaApp {
+            shared: app_shared, view, _audio: audio, _conns: conns,
+            _leds: leds, _kl_leds: kl_leds, taps: Vec::new(),
+        }))
     })) {
         eprintln!("[lanzadera] error de GUI: {}", e);
         std::process::exit(1);

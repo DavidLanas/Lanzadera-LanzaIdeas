@@ -1,68 +1,103 @@
-//! Host CLAP (Fase 3B/3E) sobre clack-host 0.2.
-//! `load` ahora acepta un ID opcional para elegir un plugin concreto dentro
-//! de un bundle. `scan` recorre los directorios CLAP estándar y lista todos
-//! los plugins disponibles para el browser de la GUI.
+//! Host CLAP sobre clack-host 0.2 + servicios de main-thread (paso 1).
+
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use clack_host::prelude::*;
 use clack_extensions::params::{ParamInfoBuffer, ParamInfoFlags, PluginParams};
-use clack_extensions::gui::{GuiSize, HostGuiImpl};
+use clack_extensions::gui::{GuiSize, HostGui, HostGuiImpl};
+use clack_extensions::timer::{HostTimer, HostTimerImpl, TimerId};
+use clack_extensions::thread_check::{HostThreadCheck, HostThreadCheckImpl};
+use clack_extensions::state::{HostState, HostStateImpl};
+#[cfg(target_os = "linux")]
+use clack_extensions::posix_fd::{FdFlags, HostPosixFd, HostPosixFdImpl};
+#[cfg(target_os = "linux")]
+use std::os::unix::io::RawFd;
 
-/// Datos compartidos del host. Lleva el indice de pista para poder avisar
-/// al hilo principal cuando el usuario cierra la ventana del plugin.
 pub struct LanzaderaShared { pub track: usize }
+
 impl<'a> SharedHandler<'a> for LanzaderaShared {
-    fn request_restart(&self) {}
-    fn request_process(&self) {}
-    fn request_callback(&self) {}
+    fn request_restart(&self)  { crate::clap_services::request_restart(self.track); }
+    fn request_process(&self)  { crate::clap_services::request_process(self.track); }
+    fn request_callback(&self) { crate::clap_services::request_callback(self.track); }
 }
 
-/// Extension GUI del lado del host (Fase G6b).
-///
-/// Sin este impl, clack no registra `clap_host_gui` y los plugins responden
-/// `false` a `is_api_supported`. Bound verificado en docs.rs:
-///   impl<H> ExtensionImplementation<H> for HostGui
-///   where for<'a> H: HostHandlers<Shared<'a>: HostGuiImpl>
-///
-/// Va en el Shared, no en el MainThread: no toca HostHandlers ni los params.
-///
-/// Ventana flotante: el plugin gestiona su propio tamaño y visibilidad, asi que
-/// resize/show/hide se aceptan sin mas. `closed` si importa: hay que acusar
-/// recibo con `destroy` desde el hilo principal.
+impl HostThreadCheckImpl for LanzaderaShared {
+    fn is_main_thread(&self) -> bool { crate::clap_services::is_main_thread() }
+    fn is_audio_thread(&self) -> bool { crate::clap_services::is_audio_thread() }
+}
+
 impl HostGuiImpl for LanzaderaShared {
     fn resize_hints_changed(&self) {}
-
     fn request_resize(&self, new_size: GuiSize) -> Result<(), HostError> {
-        // Flotante: la ventana la dimensiona el plugin y esto se ignora.
-        // Embebida: el hilo principal redimensiona la ventana X11 del host
-        // y llama a set_size (clap_gui::poll_embedded).
         crate::clap_gui::note_resize(self.track, new_size.width, new_size.height);
         Ok(())
     }
-
     fn request_show(&self) -> Result<(), HostError> { Ok(()) }
-
     fn request_hide(&self) -> Result<(), HostError> { Ok(()) }
-
     fn closed(&self, was_destroyed: bool) {
-        // Puede llegar fuera del hilo principal: try_lock para no bloquear.
         crate::clap_gui::note_closed(self.track, was_destroyed);
     }
+}
+
+pub struct LanzaderaMainThread { pub track: usize }
+impl LanzaderaMainThread {
+    pub fn new(track: usize) -> Self {
+        crate::clap_services::mark_main_thread();
+        Self { track }
+    }
+}
+impl<'a> MainThreadHandler<'a> for LanzaderaMainThread {}
+
+impl HostTimerImpl for LanzaderaMainThread {
+    fn register_timer(&self, period_ms: u32) -> Result<TimerId, HostError> {
+        Ok(TimerId(crate::clap_services::register_timer(self.track, period_ms)))
+    }
+    fn unregister_timer(&self, timer_id: TimerId) -> Result<(), HostError> {
+        crate::clap_services::unregister_timer(self.track, timer_id.0);
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl HostPosixFdImpl for LanzaderaMainThread {
+    fn register_fd(&self, fd: RawFd, flags: FdFlags) -> Result<(), HostError> {
+        crate::clap_services::fds::register(self.track, fd, flags); Ok(())
+    }
+    fn modify_fd(&self, fd: RawFd, flags: FdFlags) -> Result<(), HostError> {
+        crate::clap_services::fds::register(self.track, fd, flags); Ok(())
+    }
+    fn unregister_fd(&self, fd: RawFd) -> Result<(), HostError> {
+        crate::clap_services::fds::unregister(self.track, fd); Ok(())
+    }
+}
+
+impl HostStateImpl for LanzaderaMainThread {
+    fn mark_dirty(&self) { crate::clap_services::mark_dirty(self.track); }
 }
 
 pub struct LanzaderaHost;
 impl HostHandlers for LanzaderaHost {
     type Shared<'a> = LanzaderaShared;
-    type MainThread<'a> = ();
+    type MainThread<'a> = LanzaderaMainThread;
     type AudioProcessor<'a> = ();
+
+    fn declare_extensions(builder: &mut HostExtensions<Self>, _shared: &Self::Shared<'_>) {
+        builder
+            .register::<HostGui>()
+            .register::<HostTimer>()
+            .register::<HostThreadCheck>()
+            .register::<HostState>();
+        #[cfg(target_os = "linux")]
+        builder.register::<HostPosixFd>();
+    }
 }
 
 pub type Instance = PluginInstance<LanzaderaHost>;
 pub type Processor = PluginAudioProcessor<LanzaderaHost>;
 pub type Stopped = clack_host::process::StoppedPluginAudioProcessor<LanzaderaHost>;
 
-/// (ruta, id, nombre) de un plugin encontrado por `scan`.
+/// (ruta, id, nombre) de un plugin encontrado por scan.
 pub type ClapRef = (String, String, String);
 
 /// Información de un parámetro CLAP expuesto por el plugin.
@@ -150,7 +185,7 @@ pub fn load(path: &str, want_id: Option<&str>, sample_rate: u32, max_frames: u32
     let host_info = HostInfo::new("lanzadera", "DavidLanas", "https://github.com/DavidLanas", "0.1.0")
         .map_err(|e| e.to_string())?;
     let mut instance = PluginInstance::<LanzaderaHost>::new(
-        |_| LanzaderaShared { track }, |_| (), entry, &id, &host_info,
+        |_| LanzaderaShared { track }, |shared| LanzaderaMainThread::new(shared.track), entry, &id, &host_info,
     ).map_err(|e| format!("no se pudo instanciar: {}", e))?;
 
     let cfg = PluginAudioConfiguration {

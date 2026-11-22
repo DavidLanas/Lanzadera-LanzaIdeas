@@ -429,6 +429,28 @@ impl SessionState {
         if self.scenes.len() >= MAX_SCENES { return false; }
         self.scenes.push(s); true
     }
+    /// Elimina una escena y desplaza a la izquierda los clips de todas las
+    /// pistas (clips es un array indexado por escena). false si es la ultima.
+    pub fn remove_scene(&mut self, idx: usize) -> bool {
+        if self.scenes.len() <= 1 || idx >= self.scenes.len() { return false; }
+        self.scenes.remove(idx);
+        for tr in self.tracks.iter_mut() {
+            for s in idx..MAX_SCENES - 1 {
+                tr.clips[s] = tr.clips[s + 1].take();
+            }
+            tr.clips[MAX_SCENES - 1] = None;
+        }
+        if self.selected_scene >= self.scenes.len() {
+            self.selected_scene = self.scenes.len() - 1;
+        }
+        self.selected_clip = match self.selected_clip {
+            Some((t, s)) if s == idx => None,
+            Some((t, s)) if s > idx => Some((t, s - 1)),
+            other => other,
+        };
+        true
+    }
+
     pub fn set_clip(&mut self, t: usize, s: usize, c: Clip) {
         if let Some(tr) = self.tracks.get_mut(t) {
             if let Some(slot) = tr.clips.get_mut(s) { *slot = Some(c); }

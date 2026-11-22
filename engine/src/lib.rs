@@ -20,6 +20,8 @@ pub mod xwin;
 pub mod clap_host;
 #[cfg(feature = "clap")]
 pub mod clap_params;
+#[cfg(feature = "clap")]
+pub mod clap_services;
 
 /// true si el binario se compiló con hosting CLAP (--features clap).
 pub const CLAP_ENABLED: bool = cfg!(feature = "clap");

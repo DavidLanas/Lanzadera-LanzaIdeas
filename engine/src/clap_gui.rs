@@ -44,11 +44,14 @@ pub struct GuiState {
     pub avail: [bool; MAX_TRACKS],
     /// La GUI de esa pista esta abierta ahora mismo.
     pub open: [bool; MAX_TRACKS],
+    /// La GUI de esta pista ya colgo una vez esta sesion: no reintentar.
+    pub broken: [bool; MAX_TRACKS],
 }
 
 pub static GUI_STATE: Mutex<GuiState> = Mutex::new(GuiState {
     avail: [false; MAX_TRACKS],
     open: [false; MAX_TRACKS],
+    broken: [false; MAX_TRACKS],
 });
 
 /// Mensaje para mostrar en la barra de estado de la UI (errores de GUI /
@@ -148,6 +151,14 @@ pub fn set_open(track: usize, v: bool) {
         if track < MAX_TRACKS { s.open[track] = v; }
     }
 }
+pub fn set_broken(track: usize, v: bool) {
+    if let Ok(mut s) = GUI_STATE.lock() {
+        if track < MAX_TRACKS { s.broken[track] = v; }
+    }
+}
+pub fn is_broken(track: usize) -> bool {
+    GUI_STATE.lock().map(|s| s.broken[track]).unwrap_or(false)
+}
 
 /// API de ventana preferida para esta plataforma.
 #[cfg(feature = "clap")]
@@ -191,12 +202,19 @@ mod crash_guard {
     const TIMEOUT_SECS: libc::c_uint = 6;
     #[allow(dead_code)]
     pub(super) static IN_PLUGIN_GUI_CALL: AtomicBool = AtomicBool::new(false);
+    /// true si el último watchdog disparó (la llamada excedió TIMEOUT_SECS).
+    static ALARM_FIRED: AtomicBool = AtomicBool::new(false);
+    /// Consume el flag de watchdog: true si la ultima llamada vigilada
+    /// excedio TIMEOUT_SECS (aunque finalmente retornara).
+    pub fn alarm_fired() -> bool { ALARM_FIRED.swap(false, Ordering::AcqRel) }
     /// Handler vacío: solo interrumpe la syscall bloqueada del plugin (EINTR).
     pub fn install_alarm_handler() {
         use std::sync::Once;
         static INSTALLED: Once = Once::new();
         INSTALLED.call_once(|| {
-            unsafe extern "C" fn alarm_noop(_sig: libc::c_int) {}
+            unsafe extern "C" fn alarm_noop(_sig: libc::c_int) {
+            ALARM_FIRED.store(true, Ordering::Release);
+        }
             unsafe { libc::signal(libc::SIGALRM, alarm_noop as libc::sighandler_t); }
         });
     }
@@ -220,6 +238,26 @@ pub fn install_alarm_handler() {
     crash_guard::install_alarm_handler();
 }
 
+/// Vigila una llamada de GUI en Linux (watchdog + catch_unwind); en otras
+/// plataformas llama directamente.
+#[cfg(feature = "clap")]
+fn guard_gui<F>(f: F) -> Result<(), String>
+where F: FnOnce() -> Result<(), String> + std::panic::UnwindSafe {
+    #[cfg(target_os = "linux")]
+    { crash_guard::guarded(f) }
+    #[cfg(not(target_os = "linux"))]
+    { f() }
+}
+
+/// true si el watchdog disparó durante la última llamada vigilada.
+#[cfg(feature = "clap")]
+fn gui_timed_out() -> bool {
+    #[cfg(target_os = "linux")]
+    { crash_guard::alarm_fired() }
+    #[cfg(not(target_os = "linux"))]
+    { false }
+}
+
 /// Abre o cierra la GUI de una pista (flotante si el plugin la ofrece; si no,
 /// embebida en una ventana X11 del host). Hilo principal.
 #[cfg(feature = "clap")]
@@ -234,13 +272,21 @@ pub fn toggle(instance: &mut crate::clap_host::Instance, track: usize, title: &s
     };
 
     if state(track).1 {
-        let _ = gui.hide(&main);
-        gui.destroy(&main);
+        let _ = guard_gui(std::panic::AssertUnwindSafe(|| {
+            let _ = gui.hide(&main);
+            gui.destroy(&main);
+            Ok(())
+        }));
         embed.remove(track); // la ventana host se destruye DESPUES de destroy()
         set_open(track, false);
         return Ok(());
     }
 
+    // Si este plugin ya colgó la GUI esta sesión, no reintentar: congelaría
+    // otra vez el hilo principal. Sugerir VST3 o reinicio.
+    if is_broken(track) {
+        return Err("la GUI de este plugin ya colgó esta sesión (marcada como                     insegura). Usa su versión VST3 —las ventanas funcionan— o                     reinicia Lanzadera para reintentar.".into());
+    }
     // Negociacion, como pide la secuencia documentada de CLAP: primero se
     // consulta la preferencia del plugin, luego se comprueba el soporte.
     let pref = gui.get_preferred_api(&main);
@@ -298,7 +344,10 @@ pub fn toggle(instance: &mut crate::clap_host::Instance, track: usize, title: &s
     }));
     #[cfg(not(target_os = "linux"))]
     let create_result = gui.create(&main, embedded).map_err(|e| format!("create(embebida): {:?}", e));
-    create_result?;
+    if let Err(e) = create_result {
+        if gui_timed_out() { set_broken(track, true); }
+        return Err(e);
+    }
     // Escala 1.0: sin esto algunos plugins (JUCE) asumen HiDPI inexistente.
     let _ = gui.set_scale(&main, 1.0);
     let size = gui.get_size(&main).unwrap_or(GuiSize { width: 800, height: 600 });
@@ -308,16 +357,20 @@ pub fn toggle(instance: &mut crate::clap_host::Instance, track: usize, title: &s
     };
     // SAFETY: la ventana vive en `embed` hasta que se llama a destroy() arriba
     // o en close_all/poll_embedded, siempre en ese orden.
-    let parent = unsafe { gui.set_parent(&main, Window::from_x11_handle(win.id() as std::ffi::c_ulong)) };
-    if let Err(e) = parent {
-        gui.destroy(&main);
-        return Err(format!("set_parent: {:?}", e));
-    }
-    // En GUI embebida `show` es opcional: nih-plug y otros devuelven false
-    // porque la vista ya es visible dentro de la ventana del host (que ya
-    // esta mapeada). Por eso aqui un fallo de `show` NO es fatal.
-    if let Err(e) = gui.show(&main) {
-        println!("[gui] pista {}: show() de GUI embebida devolvio {:?} (se ignora)", track + 1, e);
+    let parent_res = guard_gui(std::panic::AssertUnwindSafe(|| {
+        unsafe { gui.set_parent(&main, Window::from_x11_handle(win.id() as std::ffi::c_ulong)) }
+            .map_err(|e| format!("set_parent: {:?}", e))?;
+        // En GUI embebida `show` es opcional: un fallo NO es fatal.
+        if let Err(e) = gui.show(&main) {
+            println!("[gui] pista {}: show() embebida devolvio {:?} (se ignora)", track + 1, e);
+        }
+        Ok(())
+    }));
+    if let Err(e) = parent_res {
+        if gui_timed_out() { set_broken(track, true); }
+        let _ = guard_gui(std::panic::AssertUnwindSafe(|| { gui.destroy(&main); Ok(()) }));
+        embed.remove(track);
+        return Err(e);
     }
     embed.wins.push((track, win));
     set_open(track, true);
