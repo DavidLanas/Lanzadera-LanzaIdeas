@@ -28,6 +28,9 @@ pub struct ActiveClip {
     pub state: ClipState,
     pub launch_mode: LaunchMode, // Fase 2: Gate/Repeat lo leen del clip activo
     follow: FollowAction,
+    /// true durante el tick de arranque: el playhead no se incrementa
+    /// hasta el tick siguiente, así la primera pasada dispara el tick 0.
+    just_started: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -333,8 +336,9 @@ impl ClipEngine {
         }
         self.active[t] = Some(ActiveClip {
             track: t as u8, scene: s as u8, playhead, loop_ticks, repeat_left,
-            state: ClipState::Playing, launch_mode: meta.launch_mode, follow: meta.follow_action,
-        });
+            state: ClipState::Playing, launch_mode: meta.launch_mode, follow: meta.follow_action,,
+        just_started: true,
+});
         self.pending[t] = None;
         Self::emit(out, ClipEvent::StateChange { track: t as u8, scene: s as u8, new_state: ClipState::Playing });
     }
@@ -400,6 +404,13 @@ impl ClipEngine {
                         a.loop_ticks = nl;
                         a.playhead %= nl;
                     }
+                }
+                // El tick de arranque no incrementa el playhead: el MidiVoice se crea
+                // con playhead 0 y debe disparar el tick 0 en la primera pasada.
+                if a.just_started {
+                    a.just_started = false;
+                    self.active[t] = Some(a);
+                    continue;
                 }
                 a.playhead += 1;
                 if a.playhead >= a.loop_ticks {

@@ -43,6 +43,13 @@ impl MidiVoice {
     /// Avanza hasta `tick` emitiendo on/off. Normalmente 1 tick por frame.
     pub fn advance(&mut self, tick: u32, loop_ticks: u32, out: &mut MidiOut) {
         let lt = loop_ticks.max(1);
+        // Si el loop se acortó en vivo (reduciste los compases), last_tick puede
+        // quedar >= lt. Re-anclamos justo antes del tick actual para evitar el
+        // desborde de (lt - last_tick) y la ráfaga de notas que cuelga el plugin.
+        if self.last_tick >= lt {
+            self.last_tick = (tick + lt - 1) % lt;
+        }
+
         if tick == self.last_tick { return; }
         let steps = if tick > self.last_tick { tick - self.last_tick } else { (lt - self.last_tick) + tick };
         let mut t = self.last_tick;

@@ -176,17 +176,29 @@ impl SessionState {
         // una pista suelta.
         // Si en esta pista había un clip grabando/encolado, lanzar otro clip
         // debe desarmar el transporte de grabación: una pista, una voz.
-        let had_recording_on_track = self.tracks.get(t)
-            .map(|tr| {
-                tr.clips.iter().flatten().any(|c| matches!(
-                    c.state,
-                    ClipState::Recording | ClipState::RecQueued | ClipState::Overdubbing
-                ))
-            })
-            .unwrap_or(false);
-        if had_recording_on_track {
-            self.recording = false;
+        // Si en esta pista había un clip grabando/encolado, lanzar otro clip
+    // debe desarmar el transporte de grabación: una pista, una voz.
+    // Esto aplica SIEMPRE, no solo si el clip destino existe.
+    let had_recording_on_track = self.tracks.get(t)
+        .map(|tr| {
+            tr.clips.iter().flatten().any(|c| matches!(
+                c.state,
+                ClipState::Recording | ClipState::RecQueued | ClipState::Overdubbing
+            ))
+        })
+        .unwrap_or(false);
+    if had_recording_on_track {
+        self.recording = false;
+        // El clip que grababa no estaba activo en el motor, así que nadie
+        // lo para: lo pasamos a Empty aquí para que estado y GUI coincidan.
+        if let Some(tr) = self.tracks.get_mut(t) {
+            for c in tr.clips.iter_mut().flatten() {
+                if matches!(c.state, ClipState::Recording | ClipState::RecQueued | ClipState::Overdubbing) {
+                    c.state = ClipState::Empty;
+                }
+            }
         }
+    }
 
         let target_has_clip = self.tracks.get(t)
             .and_then(|tr| tr.clips.get(s))
@@ -267,9 +279,52 @@ impl SessionState {
         }
     }
 
+    /// Arma la grabación hacia (t, s) sin pasar por el toggle de Record.
+    /// Lo usa launch_scene para el flujo rápido "pulsa escena -> graba la
+    /// pista armada". Replica la mitad de armado del manejador de Record.
+    fn arm_record_to(&mut self, t: usize, s: usize) {
+        let q = self.quantize;
+        self.stop_track_now(t);
+        if let Some(tr) = self.tracks.get_mut(t) {
+            if let Some(slot) = tr.clips.get_mut(s) {
+                if slot.is_none() {
+                    *slot = Some(Clip {
+                        name: format!("Rec {}", s + 1), loop_bars: 8, quantize: q,
+                        ..Default::default()
+                    });
+                }
+                if let Some(c) = slot.as_mut() {
+                    c.state = if q == Quantize::Immediate {
+                        ClipState::Recording
+                    } else {
+                        ClipState::RecQueued
+                    };
+                }
+            }
+        }
+        self.recording = true;
+        self.playing = true;
+        self.selected_track = t;
+        self.selected_scene = s;
+        self.selected_clip = Some((t, s));
+    }
+
     pub fn launch_scene(&mut self, s: usize) {
         for t in 0..self.tracks.len() { self.launch_clip(t, s); }
         self.selected_scene = s;
+        // Flujo rapido: lanzar escena inicia la espera de grabacion en la
+        // pista armada (la seleccionada si esta armada, si no la primera
+        // armada). Solo dispara si hay alguna pista armada.
+        let armed = if self.tracks.get(self.selected_track).map(|tr| tr.arm).unwrap_or(false) {
+            Some(self.selected_track)
+        } else {
+            self.tracks.iter().position(|tr| tr.arm)
+        };
+        if let Some(t) = armed {
+            if !self.recording {
+                self.arm_record_to(t, s);
+            }
+        }
     }
 
     pub fn stop_all(&mut self) {
@@ -363,15 +418,18 @@ impl SessionState {
                     self.playing = true;
                     self.selected_clip = Some((t, s));
                 } else if let Some(tr) = self.tracks.get_mut(t) {
-                    // Al desarmar, el clip grabado pasa a reproducirse.
-                    if let Some(Some(c)) = tr.clips.get_mut(s) {
-                        if matches!(c.state,
-                            ClipState::Recording | ClipState::RecQueued | ClipState::Overdubbing)
-                        {
-                            c.state = ClipState::Playing;
-                        }
-                    }
+            // Al desarmar, el clip grabado pasa a reproducirse.
+            // Calcular la duración real de la grabación y ajustar loop_bars.
+            if let Some(Some(c)) = tr.clips.get_mut(s) {
+                if matches!(c.state,
+                    ClipState::Recording | ClipState::RecQueued | ClipState::Overdubbing)
+                {
+                    c.state = ClipState::Playing;
+                    // TODO: calcular duración real desde rec_origin_ticks hasta ahora
+                    // y actualizar c.loop_bars. Por ahora usa el valor por defecto.
                 }
+            }
+        }
             }
             ControlCmd::TapTempo => {} // los timestamps se miden en el hilo de UI (Fase 2)
             ControlCmd::SetTempo { bpm } => self.tempo = (bpm as f64).clamp(20.0, 666.0),
@@ -444,7 +502,7 @@ impl SessionState {
             self.selected_scene = self.scenes.len() - 1;
         }
         self.selected_clip = match self.selected_clip {
-            Some((t, s)) if s == idx => None,
+            Some((_t, s)) if s == idx => None,
             Some((t, s)) if s > idx => Some((t, s - 1)),
             other => other,
         };

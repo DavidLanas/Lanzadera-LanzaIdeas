@@ -483,8 +483,10 @@ impl SessionView {
         // Browser global.
         if self.windows.browser_visible {
             self.global_browser_window(ctx, shared);
-            self.browser_window(ctx, shared);
         }
+        // El browser de plugins se abre desde el Inspector: no debe
+        // depender de que la ventana Browser esté visible.
+        self.browser_window(ctx, shared);
 
         // Mixer como ventana independiente.
         if self.windows.mixer_visible {
@@ -1662,7 +1664,7 @@ impl SessionView {
     fn groove_machine_window(&mut self, ctx: &egui::Context, shared: &Arc<SessionShared>) {
         let mut open = self.windows.groove_machine_visible;
 
-        egui::Window::new("🥁 Groove Machine")
+        egui::Window::new("🥁 Groove Machine v2")
             .open(&mut open)
             .constrain(false)
             .max_size([8000.0, 8000.0])

@@ -52,7 +52,7 @@ impl Default for PianoRoll {
     fn default() -> Self {
         PianoRoll { open: false, target: None, mode: RollMode::Draw,
             px_per_tick: 0.12, row_h: 14.0, scroll_key: 36, n_rows: VISIBLE_ROWS,
-            quant: 120, sel: Vec::new(), follow_head: true,
+            quant: 120, sel: Vec::new(), follow_head: false,
             drag: None, band: None, h_scroll_offset: 0.0 }
     }
 }

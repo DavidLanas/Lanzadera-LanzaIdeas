@@ -231,6 +231,7 @@ struct Renderer {
     caja_scheduler: CajaScheduler,
     record_engine: crate::audio_record::RecordEngine,
     was_recording: bool,
+    was_audio_recording: bool,
     audio_in_cons: Option<ringbuf::HeapCons<f32>>,
     audio_in_ch: u16,
     audio_in_scratch: Vec<f32>,
@@ -289,11 +290,12 @@ impl Renderer {
     /// Tick relativo al origen de la grabación (o al playhead del clip activo).
     /// Así el primer ataque tras la frontera de quantize cae en 0.1 del clip,
     /// no en 2.1 del transporte global.
-    fn rec_tick(&self, audio: &SessionAudio, t: usize) -> u32 {
+    fn rec_tick(&self, audio: &SessionAudio, _t: usize) -> u32 {
         let lt = audio.rec_loop_ticks.max(1) as u64;
-        if let Some(a) = self.engine.active(t) {
-            return a.playhead % lt as u32;
-        }
+        // Siempre relativo al origen de la grabación (fijado al abrir la
+        // puerta). Antes se usaba el playhead de cualquier clip activo de
+        // la pista, y si quedaba una voz vieja viva las notas entraban
+        // desfasadas un compás.
         let abs = self.engine.global_ticks().saturating_sub(self.rec_origin_ticks);
         (abs % lt) as u32
     }
@@ -403,7 +405,7 @@ impl Renderer {
             let period = gcd(audio.rec_loop_ticks.max(1) as u64, groove_loop as u64);
             rec_q = (q / gcd(q, period) * period) as u32;
         }
-        let rec_live = rec_gate(
+        let mut rec_live = rec_gate(
             audio.recording,
             audio.playing,
             rec_q,
@@ -422,17 +424,45 @@ impl Renderer {
                 );
             }
         }
+        // Al desarmar la grabación (p. ej. lanzar otro clip), el clip que
+        // grababa deja de estar Recording. El motor no emite StateChange
+        // para un clip que grababa (nunca estuvo activo), así que lo
+        // pasamos a Empty aquí para que la GUI no se quede congelada.
+        if self.was_audio_recording && !audio.recording {
+            shared.rt.set_clip_state(audio.rec_track as usize, audio.rec_scene as usize, ClipState::Empty);
+        }
+        self.was_audio_recording = audio.recording;
         if self.rec_on && !rec_live {
-            let t = audio.rec_track as usize;
-            let now = self.rec_tick(audio, t);
-            for slot in self.rec_pending.iter_mut() {
-                if let Some((n, v, st)) = slot.take() {
-                    let dur = if now >= st { now - st }
-                              else { audio.rec_loop_ticks.saturating_sub(st) + now };
-                    let _ = shared.rec_rx.push(RecNote { track: t as u8, note: n, vel: v, tick: st, dur: dur.max(1) });
+        let t = audio.rec_track as usize;
+        let s = audio.rec_scene as usize;
+        let now = self.rec_tick(audio, t);
+        // Calcular duración total de la grabación (desde el origen)
+        let total_dur_ticks = if now >= self.rec_origin_ticks as u32 {
+            now - self.rec_origin_ticks as u32
+        } else {
+            // Wrap-around: calcular desde origen hasta el final del loop + now
+            let loop_ticks = audio.rec_loop_ticks.max(1) as u32;
+            loop_ticks.saturating_sub(self.rec_origin_ticks as u32) + now
+        };
+        // Convertir a compases (asumiendo 4/4, TICKS_PER_BAR = 1920)
+        let total_bars = (total_dur_ticks as u64 / lanzadera_core::TICKS_PER_BAR).max(1) as u8;
+        // Actualizar loop_bars del clip en SessionState
+        shared.edit(|st| {
+            if let Some(tr) = st.tracks.get_mut(t) {
+                if let Some(Some(c)) = tr.clips.get_mut(s) {
+                    c.loop_bars = total_bars;
                 }
             }
+        });
+        // Cerrar todas las notas pendientes
+        for slot in self.rec_pending.iter_mut() {
+            if let Some((n, v, st)) = slot.take() {
+                let dur = if now >= st { now - st }
+                          else { audio.rec_loop_ticks.saturating_sub(st) + now };
+                let _ = shared.rec_rx.push(RecNote { track: t as u8, note: n, vel: v, tick: st, dur: dur.max(1) });
+            }
         }
+    }
         let old_rec_on = self.rec_on;
         self.rec_on = rec_live;
 
@@ -1211,6 +1241,7 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
         metro_phase: 0.0,
         record_engine: crate::audio_record::RecordEngine::new(sample_rate, 180),
         was_recording: false,
+     was_audio_recording: false,
     };
     let _ = &mut renderer;
 
@@ -1276,9 +1307,19 @@ fn rec_gate(recording: bool, playing: bool, q_ticks: u32, now_tick: u64) -> bool
         return false;
     }
     if !REC_REQ_PREV.swap(true, Relaxed) {
-        REC_Q_BASE.store(now_tick, Relaxed);
         if q_ticks == 0 {
             REC_ARMED.store(true, Relaxed);
+        } else {
+            let q = q_ticks as u64;
+            let pos = now_tick % q;
+            // Cuenta atrás garantizada: si la petición llega en la segunda
+            // mitad del compás, el siguiente límite está a menos de medio
+            // compás y la grabación parecía arrancar "al instante". En ese
+            // caso la base salta al límite siguiente y la espera queda entre
+            // medio compás y compás y medio. Pulsar en la primera mitad
+            // sigue esperando al 1.1 inmediato.
+            let base = if pos > q / 2 { now_tick - pos + q } else { now_tick };
+            REC_Q_BASE.store(base, Relaxed);
         }
     }
     if !REC_ARMED.load(Relaxed) {
