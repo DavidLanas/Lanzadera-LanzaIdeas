@@ -150,6 +150,9 @@ pub struct SessionShared {
     pub kit: Arc<GrooveKit>,
 }
 
+/// JSON del patrón de Groove tal como queda al arrancar (para «Nuevo proyecto»).
+static GROOVE_DEFAULT_JSON: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 impl SessionShared {
     pub fn new() -> Arc<Self> {
         let state = SessionState::default();
@@ -158,6 +161,8 @@ impl SessionShared {
         let groove_kit = GrooveKit::new();
         let groove_sched = Arc::new(CajaSchedulerShared::default());
         let groove_model = Arc::new(GrooveModel::new(groove_sched.clone()));
+        // Patrón inicial del Groove: lo usa «Archivo → Nuevo» para volver a empezar limpio.
+        let _ = GROOVE_DEFAULT_JSON.set(groove_model.to_json());
         Arc::new(SessionShared {
             state: Mutex::new(state), audio,
             samples: SampleStore::new(), notes: NoteStore::new(),
@@ -279,6 +284,7 @@ impl SessionShared {
         }
         if matches!(resolved, ControlCmd::LiveNoteOn { .. } | ControlCmd::LiveNoteOff { .. } |
             ControlCmd::LivePitchBend { .. } | ControlCmd::LiveModWheel { .. } |
+            ControlCmd::LiveSustain { .. } |
             ControlCmd::LivePadOn { .. } | ControlCmd::LivePadOff { .. }) {
             let _ = self.live_rx.push(resolved.encode());
         }
@@ -313,6 +319,23 @@ impl SessionShared {
                 }
             }
         });
+    }
+
+    /// Asigna (o quita con None) el Note FX de la pista. Reinicia el audio para
+    /// cargarlo (igual que `set_plugin`).
+    pub fn set_note_fx(&self, t: usize, path: Option<String>, id: Option<String>) {
+        self.edit(|st| {
+            if let Some(tr) = st.tracks.get_mut(t) { tr.note_fx_path = path; tr.note_fx_id = id; }
+        });
+        self.audio_restart.store(true, Ordering::Relaxed);
+    }
+
+    /// Asigna (o quita con None) el FX de audio de la pista. Reinicia el audio.
+    pub fn set_fx(&self, t: usize, path: Option<String>, id: Option<String>) {
+        self.edit(|st| {
+            if let Some(tr) = st.tracks.get_mut(t) { tr.fx_path = path; tr.fx_id = id; }
+        });
+        self.audio_restart.store(true, Ordering::Relaxed);
     }
 
     pub fn set_plugin(&self, t: usize, path: Option<String>, id: Option<String>) {
@@ -627,6 +650,21 @@ impl SessionShared {
             *persist = json.clone();
         }
         std::fs::write(path, json).map_err(|e| e.to_string())
+    }
+
+    /// Proyecto nuevo: sesión por defecto y patrón de Groove inicial. No reinicia el
+    /// audio: quien llama activa `audio_restart` para que se descarguen los plugins.
+    pub fn new_project(&self) {
+        let s = SessionState::default();
+        if let Some(j) = GROOVE_DEFAULT_JSON.get() { let _ = self.groove.load_json(j); }
+        self.groove_view.store(s.groove_view.min(1), Ordering::Relaxed);
+        self.groove_bar.store(s.groove_bar, Ordering::Relaxed);
+        self.groove_page.store(s.groove_page, Ordering::Relaxed);
+        self.groove_sel_pad.store(s.groove_sel_pad.min(24), Ordering::Relaxed);
+        self.mk3_event_mode.store(s.groove_event_mode, Ordering::Relaxed);
+        self.mk3_follow_playhead.store(s.groove_follow_playhead, Ordering::Relaxed);
+        self.groove_follow_playhead.store(s.groove_follow_playhead, Ordering::Relaxed);
+        self.edit(|st| *st = s);
     }
 
     pub fn load_from_file(&self, path: &str) -> Result<(), String> {

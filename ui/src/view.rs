@@ -16,6 +16,12 @@ use crate::plugin_window::PluginWindows;
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum BrowserMode { Clap, Vst3 }
+/// A qué ranura de la pista va el plugin que se elige en el browser.
+#[derive(Clone, Copy, PartialEq)]
+pub enum BrowserTarget { Instrument, NoteFx, Fx }
+/// Qué se pidió en un diálogo de archivo / de ruta.
+#[derive(Clone, Copy, PartialEq)]
+pub enum DialogKind { Open, Save }
 use crate::eq_view;
 
 const Q_LIST: [(Quantize, &str); 10] = [
@@ -149,6 +155,15 @@ pub struct SessionView {
     pub browser_favorites_only: bool,
     pub msg: String,
     pub project_path: String,
+    /// Proyectos recientes (más nuevo primero, máx. 10). Se guardan en ~/.config/lanzadera/recent.txt
+    pub recent_projects: Vec<String>,
+    /// Diálogo de archivo nativo en curso (corre en un hilo aparte para no congelar la UI).
+    pub dialog_rx: Option<std::sync::mpsc::Receiver<(DialogKind, Option<std::path::PathBuf>)>>,
+    /// Alternativa por ruta escrita, por si el sistema no tiene diálogos nativos.
+    pub path_prompt: Option<(DialogKind, String)>,
+    pub show_shortcuts: bool,
+    pub show_about: bool,
+    pub last_title: String,
     pub audio_modal: Option<(usize, usize)>,
     pub audio_path_input: String,
     pub roll: PianoRoll,
@@ -156,6 +171,9 @@ pub struct SessionView {
     pub browser_open: bool,
     pub browser_list: Option<Vec<(String, String, String)>>,
     pub browser_mode: BrowserMode,
+    pub browser_target: BrowserTarget,
+    pub browser_kinds: std::collections::HashMap<(String, String), lanzadera_core::PluginKind>,
+    pub browser_show_all: bool,
     pub plugin_windows: PluginWindows,
     pub pending_native_gui: Vec<usize>,
     pub groove_sequencer_open: bool,
@@ -203,6 +221,12 @@ impl Default for SessionView {
             browser_favorites_only: false,
             msg: String::new(),
             project_path: "proyecto.lanzadera".into(),
+            recent_projects: Self::load_recent_projects(),
+            dialog_rx: None,
+            path_prompt: None,
+            show_shortcuts: false,
+            show_about: false,
+            last_title: String::new(),
             audio_modal: None,
             audio_path_input: String::new(),
             roll: PianoRoll::default(),
@@ -210,6 +234,9 @@ impl Default for SessionView {
             browser_open: false,
             browser_list: None,
             browser_mode: BrowserMode::Clap,
+            browser_target: BrowserTarget::Instrument,
+            browser_kinds: std::collections::HashMap::new(),
+            browser_show_all: false,
             plugin_windows: PluginWindows::default(),
             pending_native_gui: Vec::new(),
             groove_sequencer_open: false,
@@ -483,10 +510,8 @@ impl SessionView {
         // Browser global.
         if self.windows.browser_visible {
             self.global_browser_window(ctx, shared);
+            self.browser_window(ctx, shared);
         }
-        // El browser de plugins se abre desde el Inspector: no debe
-        // depender de que la ventana Browser esté visible.
-        self.browser_window(ctx, shared);
 
         // Mixer como ventana independiente.
         if self.windows.mixer_visible {
@@ -499,24 +524,319 @@ impl SessionView {
         }
 
         self.audio_modal_window(ctx, shared);
+        // ── Fase 1: menús, atajos y diálogos de proyecto ──
+        self.handle_shortcuts(ctx, shared);
+        self.poll_dialog(shared);
+        self.path_prompt_window(ctx, shared);
+        self.help_windows(ctx);
         // ── Ventanas flotantes de plugins (Fase 3H) ──
         let native_reqs = self.plugin_windows.show(ctx, shared);
         self.pending_native_gui.extend(native_reqs);
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
 
+    // ── Menús, proyectos y diálogos de archivo (Fase 1) ────────────────────
+    fn config_dir() -> Option<std::path::PathBuf> {
+        let base = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?;
+        Some(base.join("lanzadera"))
+    }
+
+    pub fn load_recent_projects() -> Vec<String> {
+        let Some(dir) = Self::config_dir() else { return Vec::new() };
+        std::fs::read_to_string(dir.join("recent.txt")).ok()
+            .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).take(10).collect())
+            .unwrap_or_default()
+    }
+
+    fn push_recent(&mut self, path: &str) {
+        self.recent_projects.retain(|p| p != path);
+        self.recent_projects.insert(0, path.to_string());
+        self.recent_projects.truncate(10);
+        if let Some(dir) = Self::config_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            let _ = std::fs::write(dir.join("recent.txt"), self.recent_projects.join("\n"));
+        }
+    }
+
+    fn project_name(&self) -> String {
+        std::path::Path::new(&self.project_path).file_stem()
+            .and_then(|s| s.to_str()).unwrap_or("sin título").to_string()
+    }
+
+    fn project_save(&mut self, shared: &SessionShared) {
+        let path = self.project_path.clone();
+        self.msg = match shared.save_to_file(&path) {
+            Ok(()) => { self.push_recent(&path); format!("Guardado {}", path) }
+            Err(e) => format!("⚠ No se pudo guardar: {}", e),
+        };
+    }
+
+    fn project_open(&mut self, shared: &SessionShared, path: String) {
+        self.msg = match shared.load_from_file(&path) {
+            Ok(()) => {
+                self.project_path = path.clone();
+                self.push_recent(&path);
+                // Reinicia el audio para cargar los plugins (instrumento, Note FX, FX) del proyecto.
+                shared.audio_restart.store(true, std::sync::atomic::Ordering::Relaxed);
+                format!("Abierto {}", path)
+            }
+            Err(e) => format!("⚠ No se pudo abrir: {}", e),
+        };
+    }
+
+    fn project_new(&mut self, shared: &SessionShared) {
+        shared.new_project();
+        shared.audio_restart.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.project_path = "sin_titulo.lanzadera".into();
+        self.msg = "Proyecto nuevo".into();
+    }
+
+    /// Abre el diálogo nativo de archivos en un hilo aparte; el resultado se recoge en `poll_dialog`.
+    fn spawn_file_dialog(&mut self, kind: DialogKind) {
+        if self.dialog_rx.is_some() { return; } // ya hay uno abierto
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.dialog_rx = Some(rx);
+        let start = std::path::Path::new(&self.project_path).parent()
+            .map(|p| p.to_path_buf()).filter(|p| p.is_dir());
+        let name = std::path::Path::new(&self.project_path).file_name()
+            .and_then(|n| n.to_str()).unwrap_or("proyecto.lanzadera").to_string();
+        std::thread::spawn(move || {
+            let mut d = rfd::FileDialog::new().add_filter("Proyecto Lanzadera", &["lanzadera"]);
+            if let Some(dir) = start { d = d.set_directory(dir); }
+            let res = match kind {
+                DialogKind::Open => d.pick_file(),
+                DialogKind::Save => d.set_file_name(name).save_file(),
+            };
+            let _ = tx.send((kind, res));
+        });
+    }
+
+    fn poll_dialog(&mut self, shared: &SessionShared) {
+        let Some(rx) = &self.dialog_rx else { return };
+        match rx.try_recv() {
+            Ok((kind, Some(mut path))) => {
+                self.dialog_rx = None;
+                match kind {
+                    DialogKind::Open => self.project_open(shared, path.to_string_lossy().into_owned()),
+                    DialogKind::Save => {
+                        if path.extension().is_none() { path.set_extension("lanzadera"); }
+                        self.project_path = path.to_string_lossy().into_owned();
+                        self.project_save(shared);
+                    }
+                }
+            }
+            // Cancelado, o el sistema no tiene portal de diálogos: queda la opción «por ruta».
+            Ok((_, None)) => { self.dialog_rx = None; }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => { self.dialog_rx = None; }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    fn path_prompt_window(&mut self, ctx: &egui::Context, shared: &SessionShared) {
+        let Some((kind, mut text)) = self.path_prompt.take() else { return };
+        let mut keep = true;
+        let mut done: Option<String> = None;
+        let title = if kind == DialogKind::Open { "Abrir proyecto por ruta" } else { "Guardar proyecto como (ruta)" };
+        egui::Window::new(title).collapsible(false).resizable(false).show(ctx, |ui| {
+            ui.add(egui::TextEdit::singleline(&mut text).desired_width(380.0));
+            ui.horizontal(|ui| {
+                if ui.button("Aceptar").clicked() { done = Some(text.clone()); }
+                if ui.button("Cancelar").clicked() { keep = false; }
+            });
+        });
+        if let Some(p) = done {
+            match kind {
+                DialogKind::Open => self.project_open(shared, p),
+                DialogKind::Save => { self.project_path = p; self.project_save(shared); }
+            }
+        } else if keep {
+            self.path_prompt = Some((kind, text));
+        }
+    }
+
+    /// Ctrl+N / Ctrl+O / Ctrl+S / Ctrl+Shift+S. El atajo con más modificadores se consulta primero.
+    fn handle_shortcuts(&mut self, ctx: &egui::Context, shared: &SessionShared) {
+        use egui::{Key, KeyboardShortcut, Modifiers};
+        let (save_as, save, open, new) = ctx.input_mut(|i| {
+            let sa = i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::S));
+            let s = i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::S));
+            let o = i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::O));
+            let n = i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::N));
+            (sa, s, o, n)
+        });
+        if new { self.project_new(shared); }
+        if open { self.spawn_file_dialog(DialogKind::Open); }
+        if save_as { self.spawn_file_dialog(DialogKind::Save); }
+        else if save { self.project_save(shared); }
+        // Título de la ventana = nombre del proyecto.
+        let title = format!("{} — Lanzadera", self.project_name());
+        if title != self.last_title {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            self.last_title = title;
+        }
+    }
+
+    fn menu_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, shared: &SessionShared) {
+        use lanzadera_core::control::TRACK_CURSOR;
+        egui::menu::bar(ui, |ui| {
+            ui.menu_button("Archivo", |ui| {
+                if ui.button("Nuevo                  Ctrl+N").clicked() { self.project_new(shared); ui.close_menu(); }
+                if ui.button("Abrir…                 Ctrl+O").clicked() { self.spawn_file_dialog(DialogKind::Open); ui.close_menu(); }
+                ui.menu_button("Abrir reciente", |ui| {
+                    if self.recent_projects.is_empty() {
+                        ui.add_enabled(false, egui::Button::new("(sin proyectos recientes)"));
+                    }
+                    let recents = self.recent_projects.clone();
+                    for p in recents {
+                        if ui.button(trunc(&p, 48)).on_hover_text(p.clone()).clicked() {
+                            self.project_open(shared, p);
+                            ui.close_menu();
+                        }
+                    }
+                });
+                ui.separator();
+                if ui.button("Guardar                Ctrl+S").clicked() { self.project_save(shared); ui.close_menu(); }
+                if ui.button("Guardar como…     Ctrl+Mayús+S").clicked() { self.spawn_file_dialog(DialogKind::Save); ui.close_menu(); }
+                ui.separator();
+                if ui.button("Abrir por ruta…").on_hover_text("Alternativa si no aparecen los diálogos de archivo del sistema").clicked() {
+                    self.path_prompt = Some((DialogKind::Open, self.project_path.clone()));
+                    ui.close_menu();
+                }
+                if ui.button("Guardar como por ruta…").clicked() {
+                    self.path_prompt = Some((DialogKind::Save, self.project_path.clone()));
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Exportar Groove a MIDI (.mid)").clicked() {
+                    self.msg = match shared.groove.export_midi(false, true) {
+                        Ok(p) => format!("Exportado {}", p.display()),
+                        Err(e) => format!("⚠ No se pudo exportar: {}", e),
+                    };
+                    ui.close_menu();
+                }
+                ui.add_enabled(false, egui::Button::new("Importar MIDI / audio…"))
+                    .on_disabled_hover_text("Llega en la Fase 9");
+                ui.add_enabled(false, egui::Button::new("Exportar audio (bounce)…"))
+                    .on_disabled_hover_text("Llega en la Fase 9");
+                ui.separator();
+                if ui.button("Salir").clicked() { ctx.send_viewport_cmd(egui::ViewportCommand::Close); ui.close_menu(); }
+            });
+
+            ui.menu_button("Edición", |ui| {
+                for (lbl, fase) in [
+                    ("Deshacer          Ctrl+Z", "Fase 7"),
+                    ("Rehacer            Ctrl+Y", "Fase 7"),
+                    ("Copiar clip       Ctrl+C", "Fase 7"),
+                    ("Pegar clip        Ctrl+V", "Fase 7"),
+                    ("Duplicar           Ctrl+D", "Fase 7"),
+                ] {
+                    ui.add_enabled(false, egui::Button::new(lbl))
+                        .on_disabled_hover_text(format!("Llega en la {}", fase));
+                }
+            });
+
+            ui.menu_button("Ver", |ui| {
+                ui.checkbox(&mut self.windows.clip_launch_visible, "Clip Launch");
+                let mut g = self.windows.groove_machine_visible;
+                if ui.checkbox(&mut g, "Groove Machine").changed() {
+                    self.windows.groove_machine_visible = g;
+                    if g { shared.caja_sched.enabled.store(true, std::sync::atomic::Ordering::Relaxed); }
+                    shared.groove_machine_visible.store(g, std::sync::atomic::Ordering::Relaxed);
+                }
+                ui.checkbox(&mut self.windows.inspector_visible, "Inspector");
+                ui.checkbox(&mut self.windows.browser_visible, "Browser");
+                ui.checkbox(&mut self.windows.mixer_visible, "Mixer");
+            });
+
+            ui.menu_button("Pista", |ui| {
+                if ui.button("Armar / desarmar pista seleccionada").clicked() {
+                    shared.apply_control(ControlCmd::ToggleArm { track: TRACK_CURSOR });
+                    ui.close_menu();
+                }
+                if ui.button("Silenciar (Mute)").clicked() {
+                    shared.apply_control(ControlCmd::ToggleMute { track: TRACK_CURSOR });
+                    ui.close_menu();
+                }
+                if ui.button("Solo").clicked() {
+                    shared.apply_control(ControlCmd::ToggleSolo { track: TRACK_CURSOR });
+                    ui.close_menu();
+                }
+                if ui.button("Detener pista seleccionada").clicked() {
+                    shared.apply_control(ControlCmd::StopClip { track: TRACK_CURSOR });
+                    ui.close_menu();
+                }
+                ui.separator();
+                ui.add_enabled(false, egui::Button::new("Nueva pista MIDI / de audio"))
+                    .on_disabled_hover_text("Llega en la Fase 8");
+            });
+
+            ui.menu_button("Opciones", |ui| {
+                for (lbl, fase) in [
+                    ("Preferencias…", "Fase 3"),
+                    ("Audio (dispositivo y entradas)…", "Fase 4"),
+                    ("Controladores MIDI — buscar…", "Fase 3"),
+                    ("Carpetas de plugins…", "Fase 3"),
+                    ("Atajos de teclado (editar)…", "Fase 3"),
+                ] {
+                    ui.add_enabled(false, egui::Button::new(lbl))
+                        .on_disabled_hover_text(format!("Llega en la {}", fase));
+                }
+            });
+
+            ui.menu_button("Ayuda", |ui| {
+                if ui.button("Atajos de teclado").clicked() { self.show_shortcuts = true; ui.close_menu(); }
+                if ui.button("Acerca de Lanzadera").clicked() { self.show_about = true; ui.close_menu(); }
+            });
+        });
+    }
+
+    fn help_windows(&mut self, ctx: &egui::Context) {
+        if self.show_shortcuts {
+            let mut open = true;
+            egui::Window::new("Atajos de teclado").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+                egui::Grid::new("atajos_grid").num_columns(2).spacing([24.0, 4.0]).show(ui, |ui| {
+                    for (k, d) in [
+                        ("Ctrl+N", "Proyecto nuevo"),
+                        ("Ctrl+O", "Abrir proyecto"),
+                        ("Ctrl+S", "Guardar"),
+                        ("Ctrl+Mayús+S", "Guardar como…"),
+                        ("D / S / C", "Piano roll: dibujar / seleccionar / cortar"),
+                        ("Ctrl+A", "Piano roll: seleccionar todo"),
+                        ("Supr", "Piano roll: borrar la selección"),
+                    ] {
+                        ui.label(egui::RichText::new(k).strong());
+                        ui.label(d);
+                        ui.end_row();
+                    }
+                });
+            });
+            self.show_shortcuts = open;
+        }
+        if self.show_about {
+            let mut open = true;
+            egui::Window::new("Acerca de Lanzadera").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+                ui.label(egui::RichText::new("LANZADERA").size(16.0).strong().color(T.accent_gold));
+                ui.label(format!("Versión {}", env!("CARGO_PKG_VERSION")));
+                ui.label("Estación de trabajo para improvisación musical (clip launch).");
+            });
+            self.show_about = open;
+        }
+    }
+
     // ── TOP BAR (estilo DAW: transporte | vistas | quantize | proyecto) ────
     fn top_bar(&mut self, ctx: &egui::Context, shared: &SessionShared, audio_on: bool) {
         let mut cmds: Vec<ControlCmd> = Vec::new();
         let mut new_q: Option<Quantize> = None;
-        let mut save = false;
-        let mut load = false;
         egui::TopBottomPanel::top("top_bar")
             .frame(egui::Frame::none()
                 .fill(T.transport_bg)
                 .inner_margin(egui::Margin::symmetric(8.0, 4.0))
                 .stroke(egui::Stroke::new(1.0, T.strip_border)))
             .show(ctx, |ui| {
+            // Fila 0: barra de menús (Archivo · Edición · Ver · Pista · Opciones · Ayuda)
+            self.menu_bar(ui, ctx, shared);
+            ui.add_space(2.0);
             // Fila 1: identidad + transporte + metronomo + vistas
             ui.horizontal(|ui| {
                 // Identidad
@@ -651,13 +971,11 @@ impl SessionView {
                 });
             });
 
-            // Fila 2: proyecto
+            // Fila 2: nombre del proyecto + último mensaje
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Proyecto").size(10.0).color(T.text_dim));
-                ui.add(egui::TextEdit::singleline(&mut self.project_path).desired_width(280.0)
-                    .text_color(T.text_bright));
-                if ui.button("💾 Guardar").clicked() { save = true; }
-                if ui.button("📂 Cargar").clicked() { load = true; }
+                ui.label(egui::RichText::new(self.project_name()).size(11.0).strong().color(T.text_bright))
+                    .on_hover_text(self.project_path.clone());
                 if !self.msg.is_empty() {
                     ui.label(egui::RichText::new(&self.msg).color(T.accent).size(11.0));
                 }
@@ -665,16 +983,6 @@ impl SessionView {
         });
         for c in cmds { shared.apply_control(c); }
         if let Some(q) = new_q { shared.edit(|st| st.quantize = q); }
-        if save {
-            self.msg = match shared.save_to_file(&self.project_path) {
-                Ok(()) => format!("Guardado {}", self.project_path), Err(e) => e,
-            };
-        }
-        if load {
-            self.msg = match shared.load_from_file(&self.project_path) {
-                Ok(()) => format!("Cargado {}", self.project_path), Err(e) => e,
-            };
-        }
     }
 
     // ── CLIP GRID ──────────────────────────────────────────────────────────
@@ -1189,7 +1497,7 @@ impl SessionView {
         let mut input_edit: Option<(usize, Option<String>)> = None;
         let mut open_modal = None;
         let mut open_roll = None;
-        let mut plugin_load: Option<(usize, String)> = None;
+        let plugin_load: Option<(usize, String)> = None; // el botón Cargar ya no existe
         let mut plugin_clear: Option<usize> = None;
         {
             ui.heading("Inspector");
@@ -1270,7 +1578,7 @@ impl SessionView {
                 ui.label("Selecciona un clip (click derecho o click en slot vacío).");
             }
             ui.separator();
-            ui.label(egui::RichText::new("Plugin CLAP").size(12.0));
+            ui.label(egui::RichText::new("Instrumento · Note FX · FX").size(12.0));
             if !lanzadera_engine::CLAP_ENABLED {
                 ui.label(egui::RichText::new("Compila con --features clap").size(10.0).color(T.text_dim));
             }
@@ -1278,30 +1586,67 @@ impl SessionView {
             if let Some(p) = &cur {
                 ui.label(egui::RichText::new(format!("🔌 {}", trunc(p, 24))).size(10.0).color(T.accent));
             }
-            ui.text_edit_singleline(&mut self.plugin_path_input);
+            // Instrumento: se elige con 🔍 CLAP / 🔍 VST3. Los antiguos botones
+            // Cargar / Quitar / Parámetros (ruta manual) ya no hacen falta.
+            ui.horizontal_wrapped(|ui| {
+                // Interfaz propia del plugin (Fase G6a). Atenuado si el plugin no
+                // expone la extension GUI: mismo criterio que Rec sin arm.
+                let (has_gui, gui_open) = lanzadera_engine::clap_gui::state(t);
+                let label = if gui_open { "🖥 Cerrar interfaz" } else { "🖥 Interfaz" };
+                if ui.add_enabled(has_gui, egui::Button::new(label)).clicked() {
+                    lanzadera_engine::clap_gui::request_toggle(t);
+                }
+                if lanzadera_engine::CLAP_ENABLED && ui.button("🔍 CLAP").on_hover_text("Elegir instrumento CLAP").clicked() {
+                    self.browser_open = true;
+                    self.browser_target = BrowserTarget::Instrument;
+                    self.browser_mode = BrowserMode::Clap;
+                    self.browser_show_all = false;
+                    self.browser_list = None;
+                }
+                if lanzadera_engine::VST3_ENABLED && ui.button("🔍 VST3").on_hover_text("Elegir instrumento VST3").clicked() {
+                    self.browser_open = true;
+                    self.browser_target = BrowserTarget::Instrument;
+                    self.browser_mode = BrowserMode::Vst3;
+                    self.browser_show_all = false;
+                    self.browser_list = None;
+                }
+                if cur.is_some() && ui.small_button("✕").on_hover_text("Quitar instrumento (vuelve al sinte interno)").clicked() {
+                    plugin_clear = Some(t);
+                }
+            });
+            // Note FX y FX de la pista seleccionada.
+            let (nfx_cur, fx_cur) = {
+                let st = shared.state.lock().unwrap();
+                st.tracks.get(t).map(|tr| (tr.note_fx_path.clone(), tr.fx_path.clone())).unwrap_or((None, None))
+            };
             ui.horizontal(|ui| {
-                if ui.button("Cargar").clicked() { plugin_load = Some((t, self.plugin_path_input.clone())); }
-                if ui.button("Quitar").clicked() { plugin_clear = Some(t); }
-            if ui.button("⚙ Parámetros").on_hover_text("Ventana flotante con todos los parámetros del plugin").clicked() {
-                self.plugin_windows.open(t);
-            }
-            // Interfaz propia del plugin (Fase G6a). Atenuado si el plugin no
-            // expone la extension GUI: mismo criterio que Rec sin arm.
-            let (has_gui, gui_open) = lanzadera_engine::clap_gui::state(t);
-            let label = if gui_open { "🖥 Cerrar interfaz" } else { "🖥 Interfaz" };
-            if ui.add_enabled(has_gui, egui::Button::new(label)).clicked() {
-                lanzadera_engine::clap_gui::request_toggle(t);
-            }
-                if lanzadera_engine::CLAP_ENABLED && ui.button("🔍 CLAP").on_hover_text("Explorar plugins CLAP").clicked() { 
-                self.browser_open = true; 
-                self.browser_mode = BrowserMode::Clap;
-                self.browser_list = None;
-            }
-            if lanzadera_engine::VST3_ENABLED && ui.button("🔍 VST3").on_hover_text("Explorar plugins VST3").clicked() { 
-                self.browser_open = true; 
-                self.browser_mode = BrowserMode::Vst3;
-                self.browser_list = None;
-            }
+                for (target, lbl, cur_path) in [
+                    (BrowserTarget::NoteFx, "Note FX", &nfx_cur),
+                    (BrowserTarget::Fx, "FX", &fx_cur),
+                ] {
+                    let text = match cur_path {
+                        Some(p) => {
+                            let stem = std::path::Path::new(p).file_stem().and_then(|x| x.to_str()).unwrap_or(p);
+                            format!("{}: {}", lbl, trunc(stem, 12))
+                        }
+                        None => format!("＋ {}", lbl),
+                    };
+                    let hover = match target {
+                        BrowserTarget::NoteFx => "Insertar un plugin Note FX en la pista seleccionada",
+                        _ => "Insertar un plugin de efecto (FX) en la pista seleccionada",
+                    };
+                    if ui.button(text).on_hover_text(hover).clicked() {
+                        self.browser_open = true;
+                        self.browser_target = target;
+                        self.browser_mode = if lanzadera_engine::CLAP_ENABLED { BrowserMode::Clap } else { BrowserMode::Vst3 };
+                        self.browser_show_all = false;
+                        self.browser_list = None;
+                    }
+                    if cur_path.is_some() && ui.small_button("✕").on_hover_text("Quitar").clicked() {
+                        if target == BrowserTarget::NoteFx { shared.set_note_fx(t, None, None); }
+                        else { shared.set_fx(t, None, None); }
+                    }
+                }
             });
             ui.separator();
             ui.label(egui::RichText::new(format!("EQ · Pista {}", t + 1)).size(12.0));
@@ -1428,35 +1773,52 @@ impl SessionView {
     }
 
     // ── Browser de plugins CLAP (Fase 3E) ─────────────────────────────────
+    /// Escanea los plugins del formato activo y guarda su rol (Instrumento / Note FX / FX).
+    fn browser_rescan(&mut self) {
+        let mut kinds = std::collections::HashMap::new();
+        let list: Vec<(String, String, String)> = match self.browser_mode {
+            BrowserMode::Clap => lanzadera_engine::clap_scan_kinds().into_iter()
+                .map(|(r, k)| { kinds.insert((r.0.clone(), r.1.clone()), k); r })
+                .collect(),
+            // VST3: el id de CLAP no aplica; (path, "", nombre).
+            BrowserMode::Vst3 => lanzadera_engine::vst3_scan_kinds().into_iter()
+                .map(|((p, n), k)| { kinds.insert((p.clone(), String::new()), k); (p, String::new(), n) })
+                .collect(),
+        };
+        self.browser_kinds = kinds;
+        self.browser_list = Some(list);
+    }
+
     fn browser_window(&mut self, ctx: &egui::Context, shared: &SessionShared) {
         if !self.browser_open { return; }
-        match self.browser_mode {
-            BrowserMode::Clap => {
-                if self.browser_list.is_none() { 
-                    self.browser_list = Some(lanzadera_engine::clap_scan()); 
-                }
-            }
-            BrowserMode::Vst3 => {
-                // Para VST3 usamos el mismo browser_list con (path, "", name):
-                // el id de CLAP no aplica y el nombre va en su sitio (antes iba
-                // al reves y la lista mostraba nombres vacios).
-                if self.browser_list.is_none() {
-                    self.browser_list = Some(
-                        lanzadera_engine::vst3_scan().into_iter().map(|(p, n)| (p, String::new(), n)).collect()
-                    );
-                }
-            }
-        }
+        if self.browser_list.is_none() { self.browser_rescan(); }
+        use lanzadera_core::PluginKind;
         let t = { shared.state.lock().unwrap().selected_track };
         let mut open = self.browser_open;
         let mut chosen: Option<(String, String)> = None;
-        let win_title = match self.browser_mode {
-            BrowserMode::Clap => "Plugins CLAP",
-            BrowserMode::Vst3 => "Plugins VST3",
+        let target = self.browser_target;
+        let (win_title, want) = match target {
+            BrowserTarget::Instrument => ("Instrumentos", PluginKind::Instrument),
+            BrowserTarget::NoteFx => ("Note FX", PluginKind::NoteFx),
+            BrowserTarget::Fx => ("FX", PluginKind::Fx),
         };
+        let mut switch_mode: Option<BrowserMode> = None;
+        let mut rescan = false;
         egui::Window::new(win_title).open(&mut open).default_size([460.0, 400.0])
             .collapsible(false).show(ctx, |ui| {
-                ui.label(egui::RichText::new(format!("Destino: Pista {}", t + 1)).color(T.text_dim));
+                ui.label(egui::RichText::new(format!("Destino: Pista {} · {}", t + 1, win_title)).color(T.text_dim));
+                ui.horizontal(|ui| {
+                    if lanzadera_engine::CLAP_ENABLED
+                        && ui.selectable_label(self.browser_mode == BrowserMode::Clap, "CLAP").clicked() {
+                        switch_mode = Some(BrowserMode::Clap);
+                    }
+                    if lanzadera_engine::VST3_ENABLED
+                        && ui.selectable_label(self.browser_mode == BrowserMode::Vst3, "VST3").clicked() {
+                        switch_mode = Some(BrowserMode::Vst3);
+                    }
+                    ui.checkbox(&mut self.browser_show_all, "Mostrar todos")
+                        .on_hover_text("Incluye plugins de otro tipo. Los que no declaran su tipo (?) siempre se muestran.");
+                });
                 if let Some(list) = &self.browser_list {
                     if list.is_empty() {
                         ui.label(match self.browser_mode {
@@ -1465,31 +1827,55 @@ impl SessionView {
                         });
                     } else {
                         egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                            let mut shown = 0usize;
                             for (path, id, name) in list {
+                                let kind = self.browser_kinds.get(&(path.clone(), id.clone()))
+                                    .copied().unwrap_or(PluginKind::Unknown);
+                                if !(self.browser_show_all || kind == want || kind == PluginKind::Unknown) { continue; }
+                                shown += 1;
                                 ui.horizontal(|ui| {
                                     if ui.button("➕").clicked() { chosen = Some((path.clone(), id.clone())); }
                                     ui.vertical(|ui| {
-                                        ui.label(egui::RichText::new(name).strong());
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new(name).strong());
+                                            ui.label(egui::RichText::new(kind.label()).size(9.0).color(T.accent_gold));
+                                        });
                                         ui.label(egui::RichText::new(trunc(path, 50)).size(9.0).color(T.text_dim));
                                     });
                                 });
                             }
+                            if shown == 0 {
+                                ui.label(egui::RichText::new("Ninguno de este tipo. Activa «Mostrar todos».").color(T.text_dim));
+                            }
                         });
                     }
                 }
-                if ui.button("⟳ Re-escanear").clicked() { 
-                    match self.browser_mode {
-                        BrowserMode::Clap => self.browser_list = Some(lanzadera_engine::clap_scan()),
-                        BrowserMode::Vst3 => self.browser_list = Some(
-                            lanzadera_engine::vst3_scan().into_iter().map(|(p, n)| (p, String::new(), n)).collect()
-                        ),
-                    }
-                }
+                if ui.button("⟳ Re-escanear").clicked() { rescan = true; }
             });
         self.browser_open = open;
+        if let Some(m) = switch_mode { self.browser_mode = m; self.browser_list = None; }
+        if rescan { self.browser_list = None; }
         if let Some((path, id)) = chosen {
-            shared.set_plugin(t, Some(path), Some(id));
-            self.msg = "Cargando plugin (reiniciando audio)…".into();
+            match target {
+                BrowserTarget::Instrument => {
+                    shared.set_plugin(t, Some(path), Some(id));
+                    self.msg = "Cargando plugin (reiniciando audio)…".into();
+                }
+                BrowserTarget::NoteFx => {
+                    let has_instr = shared.state.lock().unwrap().tracks.get(t)
+                        .map(|tr| tr.plugin_path.is_some()).unwrap_or(false);
+                    shared.set_note_fx(t, Some(path), Some(id));
+                    self.msg = if has_instr {
+                        format!("Cargando Note FX en Pista {} (reiniciando audio)…", t + 1)
+                    } else {
+                        format!("Pista {} no tiene instrumento plugin: el Note FX no se aplicará hasta que cargues uno", t + 1)
+                    };
+                }
+                BrowserTarget::Fx => {
+                    shared.set_fx(t, Some(path), Some(id));
+                    self.msg = format!("Cargando FX en Pista {} (reiniciando audio)…", t + 1);
+                }
+            }
             self.browser_open = false;
             self.browser_list = None;
         }
@@ -1664,7 +2050,7 @@ impl SessionView {
     fn groove_machine_window(&mut self, ctx: &egui::Context, shared: &Arc<SessionShared>) {
         let mut open = self.windows.groove_machine_visible;
 
-        egui::Window::new("🥁 Groove Machine v2")
+        egui::Window::new("🥁 Groove Machine")
             .open(&mut open)
             .constrain(false)
             .max_size([8000.0, 8000.0])

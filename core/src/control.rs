@@ -62,6 +62,8 @@ pub enum ControlCmd {
     /// Pitch bend (14 bits, 8192 = centro) y rueda de modulación (CC1).
     LivePitchBend { track: u8, value: u16 },
     LiveModWheel { track: u8, value: u8 },
+    /// Pedal de sustain (CC 64): value >= 64 = pisado, < 64 = suelto.
+    LiveSustain { track: u8, value: u8 },
     /// Fase 3G: setear valor de parámetro del plugin (0-1 normalizado).
     SetPluginParam { track: u8, param_idx: u8, value: f32 },
     /// Seleccionar parámetro activo del plugin (para el encoder).
@@ -110,6 +112,7 @@ const OP_LIVE_PAD_ON: u32 = 33;
 const OP_LIVE_PAD_OFF: u32 = 34;
 const OP_TOGGLE_METRONOME: u32 = 35;
 const OP_CREATE_CLIP: u32 = 36;
+const OP_LIVE_SUSTAIN: u32 = 37;
 
 #[inline] fn pack_unit(v: f32) -> u32 { (v.clamp(0.0, 1.0) * 16383.0).round() as u32 }
 #[inline] fn unpack_unit(v: u32) -> f32 { v as f32 / 16383.0 }
@@ -151,6 +154,7 @@ impl ControlCmd {
             ControlCmd::LiveNoteOff { track, note } => (OP_LIVE_OFF, track, 0, note as u32 & 0x7F, track == TRACK_CURSOR, false),
             ControlCmd::LivePitchBend { track, value } => (OP_LIVE_BEND, track, 0, value as u32 & 0x3FFF, track == TRACK_CURSOR, false),
             ControlCmd::LiveModWheel { track, value } => (OP_LIVE_MOD, track, 0, value as u32 & 0x7F, track == TRACK_CURSOR, false),
+            ControlCmd::LiveSustain { track, value } => (OP_LIVE_SUSTAIN, track, 0, value as u32 & 0x7F, track == TRACK_CURSOR, false),
             ControlCmd::SetPluginParam { track, param_idx, value } => (OP_SET_PARAM, track, param_idx, pack_unit(value), track == TRACK_CURSOR, false),
             ControlCmd::SelectPluginParam { track, param_idx } => (OP_SEL_PARAM, track, param_idx, 0, track == TRACK_CURSOR, false),
             ControlCmd::LivePadOn { pad, vel } => (OP_LIVE_PAD_ON, pad, 0, vel as u32 & 0x7F, false, false),
@@ -205,6 +209,7 @@ impl ControlCmd {
             OP_LIVE_OFF => ControlCmd::LiveNoteOff { track, note: (v & 0x7F) as u8 },
             OP_LIVE_BEND => ControlCmd::LivePitchBend { track, value: (v & 0x3FFF) as u16 },
             OP_LIVE_MOD => ControlCmd::LiveModWheel { track, value: (v & 0x7F) as u8 },
+            OP_LIVE_SUSTAIN => ControlCmd::LiveSustain { track, value: (v & 0x7F) as u8 },
             OP_SET_PARAM => ControlCmd::SetPluginParam { track, param_idx: b, value: unpack_unit(v) },
             OP_SEL_PARAM => ControlCmd::SelectPluginParam { track, param_idx: b },
             OP_LIVE_PAD_ON => ControlCmd::LivePadOn { pad: a, vel: (v & 0x7F) as u8 },
@@ -301,6 +306,10 @@ mod tests {
                    ControlCmd::LivePitchBend { track: 2, value: 16383 });
         assert_eq!(rt(ControlCmd::LiveModWheel { track: TRACK_CURSOR, value: 127 }),
                    ControlCmd::LiveModWheel { track: TRACK_CURSOR, value: 127 });
+        assert_eq!(rt(ControlCmd::LiveSustain { track: TRACK_CURSOR, value: 127 }),
+                   ControlCmd::LiveSustain { track: TRACK_CURSOR, value: 127 });
+        assert_eq!(rt(ControlCmd::LiveSustain { track: 1, value: 0 }),
+                   ControlCmd::LiveSustain { track: 1, value: 0 });
     }
 
     #[test]

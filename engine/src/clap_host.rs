@@ -152,6 +152,13 @@ fn walk_clap(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>, depth: us
 /// Escanea los directorios estándar y lista todos los plugins (ruta, id, nombre).
 /// Carga cada bundle una sola vez (queda cacheado para el activate posterior).
 pub fn scan() -> Vec<ClapRef> {
+    scan_kinds().into_iter().map(|(r, _)| r).collect()
+}
+
+/// Como `scan`, pero con el rol de cada plugin según sus `features` CLAP
+/// ("instrument", "note-effect", "audio-effect"). Sin features reconocibles → Unknown.
+pub fn scan_kinds() -> Vec<(ClapRef, lanzadera_core::PluginKind)> {
+    use lanzadera_core::PluginKind;
     let mut files = Vec::new();
     for d in default_dirs() { walk_clap(&d, &mut files, 0); }
     let mut out = Vec::new();
@@ -162,7 +169,20 @@ pub fn scan() -> Vec<ClapRef> {
         for d in factory.plugin_descriptors() {
             let Some(id) = d.id().map(|i| i.to_string_lossy().into_owned()) else { continue };
             let name = d.name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| id.clone());
-            out.push((path.clone(), id, name));
+            let (mut inst, mut note_fx, mut audio_fx) = (false, false, false);
+            for ft in d.features() {
+                match ft.to_bytes() {
+                    b"instrument" => inst = true,
+                    b"note-effect" => note_fx = true,
+                    b"audio-effect" => audio_fx = true,
+                    _ => {}
+                }
+            }
+            let kind = if inst { PluginKind::Instrument }
+                else if note_fx { PluginKind::NoteFx }
+                else if audio_fx { PluginKind::Fx }
+                else { PluginKind::Unknown };
+            out.push(((path.clone(), id, name), kind));
         }
     }
     out

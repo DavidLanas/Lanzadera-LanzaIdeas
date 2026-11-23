@@ -33,6 +33,11 @@ pub mod vst3_slot;
 pub fn vst3_scan() -> Vec<vst3_slot::Vst3Ref> { vst3_slot::scan() }
 #[cfg(not(feature = "vst3"))]
 pub fn vst3_scan() -> Vec<(String, String)> { Vec::new() }
+/// Igual que `vst3_scan`, con el rol de cada plugin (Instrumento / Note FX / FX).
+#[cfg(feature = "vst3")]
+pub fn vst3_scan_kinds() -> Vec<(vst3_slot::Vst3Ref, lanzadera_core::PluginKind)> { vst3_slot::scan_kinds() }
+#[cfg(not(feature = "vst3"))]
+pub fn vst3_scan_kinds() -> Vec<((String, String), lanzadera_core::PluginKind)> { Vec::new() }
 
 /// Escaneo de plugins CLAP accesible desde la GUI sin importar la feature.
 /// Devuelve (ruta, id, nombre). Vacío si el binario no tiene --features clap.
@@ -40,6 +45,11 @@ pub fn vst3_scan() -> Vec<(String, String)> { Vec::new() }
 pub fn clap_scan() -> Vec<clap_host::ClapRef> { clap_host::scan() }
 #[cfg(not(feature = "clap"))]
 pub fn clap_scan() -> Vec<(String, String, String)> { Vec::new() }
+/// Igual que `clap_scan`, con el rol de cada plugin (Instrumento / Note FX / FX).
+#[cfg(feature = "clap")]
+pub fn clap_scan_kinds() -> Vec<(clap_host::ClapRef, lanzadera_core::PluginKind)> { clap_host::scan_kinds() }
+#[cfg(not(feature = "clap"))]
+pub fn clap_scan_kinds() -> Vec<((String, String, String), lanzadera_core::PluginKind)> { Vec::new() }
 
 pub use shared::SessionShared;
 pub use clip_engine::{ClipEngine, ClipEvent};

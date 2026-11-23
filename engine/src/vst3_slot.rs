@@ -110,6 +110,32 @@ pub fn scan() -> Vec<Vst3Ref> {
     out
 }
 
+/// Como `scan`, con el rol de cada plugin leído de `moduleinfo.json` (sub-categorías
+/// "Instrument" / "Fx"). Sin ese archivo no se instancia nada: queda Unknown.
+pub fn scan_kinds() -> Vec<(Vst3Ref, lanzadera_core::PluginKind)> {
+    scan().into_iter().map(|r| { let k = kind_of(&r.0); (r, k) }).collect()
+}
+
+fn kind_of(path: &str) -> lanzadera_core::PluginKind {
+    use lanzadera_core::PluginKind;
+    let bundle = resolve_bundle(path);
+    let Ok(Some(info)) = vst3_host::discovery::read_module_info(&bundle) else { return PluginKind::Unknown };
+    let (mut inst, mut fx) = (false, false);
+    for c in &info.classes {
+        if !c.category.contains("Audio Module Class") { continue; }
+        for sc in &c.sub_categories {
+            for part in sc.split('|') {
+                match part.trim().to_lowercase().as_str() {
+                    "instrument" => inst = true,
+                    "fx" => fx = true,
+                    _ => {}
+                }
+            }
+        }
+    }
+    if inst { PluginKind::Instrument } else if fx { PluginKind::Fx } else { PluginKind::Unknown }
+}
+
 /// Acepta la ruta del bundle, o un archivo de dentro (`.../Foo.so`), o lo que
 /// el usuario haya escrito a mano, y devuelve el `.vst3` que hay que cargar.
 pub fn resolve_bundle(path: &str) -> PathBuf {

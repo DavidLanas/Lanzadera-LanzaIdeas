@@ -5,6 +5,22 @@ use crate::{Clip, MAX_SCENES};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrackKind { Instrument, Audio, Return, Master }
 
+/// Rol de un plugin según lo que declara (CLAP `features`, VST3 `sub_categories`).
+/// `Unknown` = no se pudo saber sin cargarlo; el browser lo muestra en todas las listas.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PluginKind { Instrument, NoteFx, Fx, #[default] Unknown }
+
+impl PluginKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            PluginKind::Instrument => "Instrumento",
+            PluginKind::NoteFx => "Note FX",
+            PluginKind::Fx => "FX",
+            PluginKind::Unknown => "?",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Track {
     pub kind: TrackKind,
@@ -48,6 +64,17 @@ pub struct Track {
     /// Se actualizan al cargar el plugin y al cambiar valores desde el KeyLab.
     #[serde(default)]
     pub plugin_params: Vec<(String, String, f32)>,
+    /// Note FX de la pista (plugin que transforma notas antes del instrumento).
+    /// Paso 1: se elige y se guarda en el proyecto; el procesado llega en el paso 2.
+    #[serde(default)]
+    pub note_fx_path: Option<String>,
+    #[serde(default)]
+    pub note_fx_id: Option<String>,
+    /// FX de audio de la pista (insert después del instrumento / entrada).
+    #[serde(default)]
+    pub fx_path: Option<String>,
+    #[serde(default)]
+    pub fx_id: Option<String>,
 }
 
 fn def_hpf_hz() -> f32 { 20.0 }
@@ -81,6 +108,10 @@ impl Default for Track {
             plugin_path: None,
             plugin_id: None,
             plugin_params: Vec::new(),
+            note_fx_path: None,
+            note_fx_id: None,
+            fx_path: None,
+            fx_id: None,
         }
     }
 }

@@ -49,6 +49,21 @@ impl PluginEvents {
     #[inline] pub fn is_empty(&self) -> bool { self.len == 0 }
     #[inline] pub fn as_slice(&self) -> &[PluginEv] { &self.evs[..self.len] }
 
+    /// Añade un evento ya construido (respeta el tope duro, sin alloc).
+    #[inline] pub fn push_ev(&mut self, e: PluginEv) { self.push(e); }
+
+    /// Ordena por frame de forma ESTABLE y sin alloc (inserción): los eventos del
+    /// mismo frame conservan su orden (NoteOff antes que NoteOn, etc.).
+    pub fn sort_by_frame(&mut self) {
+        for i in 1..self.len {
+            let mut j = i;
+            while j > 0 && self.evs[j - 1].frame > self.evs[j].frame {
+                self.evs.swap(j - 1, j);
+                j -= 1;
+            }
+        }
+    }
+
     #[inline]
     fn push(&mut self, e: PluginEv) {
         // Tope duro: nunca crece, nunca asigna. Igual que el criterio que ya
@@ -118,6 +133,32 @@ pub fn flush_clap(q: &PluginEvents, out: &mut clack_host::events::io::EventBuffe
                     ));
                 }
             }
+        }
+    }
+}
+
+/// Inverso de `flush_clap`: lee los eventos que un Note FX CLAP escribió en su cola
+/// de salida (notas y MIDI crudo) y los vuelca en la cola neutral. Sin alloc.
+#[cfg(feature = "clap")]
+pub fn read_clap(src: &clack_host::events::io::EventBuffer, dst: &mut PluginEvents) {
+    use clack_host::events::spaces::CoreEventSpace;
+    use clack_host::prelude::Event; // trae header() al scope
+    for ev in src.iter() {
+        match ev.as_core_event() {
+            Some(CoreEventSpace::NoteOn(n)) => {
+                let p = n.pckn();
+                let vel = ((n.velocity() * 127.0).round() as i32).clamp(1, 127) as u8;
+                dst.note_on(n.header().time(), p.raw_key().clamp(0, 127) as u8, vel, p.raw_channel().clamp(0, 15) as u8);
+            }
+            Some(CoreEventSpace::NoteOff(n)) => {
+                let p = n.pckn();
+                dst.note_off(n.header().time(), p.raw_key().clamp(0, 127) as u8, p.raw_channel().clamp(0, 15) as u8);
+            }
+            Some(CoreEventSpace::Midi(m)) => {
+                let d = m.data();
+                dst.midi3(m.header().time(), d[0], d[1], d[2]);
+            }
+            _ => {}
         }
     }
 }

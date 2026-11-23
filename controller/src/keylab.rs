@@ -246,6 +246,10 @@ impl KeyLabBridge {
                 // Rueda de modulación = CC 1.
                 emit(ControlCmd::LiveModWheel { track: TRACK_CURSOR, value: d2 });
             }
+            0xB0 if d1 == 64 => {
+                // Pedal de sustain = CC 64 (>= 64 pisado, < 64 suelto).
+                emit(ControlCmd::LiveSustain { track: TRACK_CURSOR, value: d2 });
+            }
             _ => {}
         }
     }

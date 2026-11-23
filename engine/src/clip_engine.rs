@@ -336,7 +336,7 @@ impl ClipEngine {
         }
         self.active[t] = Some(ActiveClip {
             track: t as u8, scene: s as u8, playhead, loop_ticks, repeat_left,
-            state: ClipState::Playing, launch_mode: meta.launch_mode, follow: meta.follow_action,,
+            state: ClipState::Playing, launch_mode: meta.launch_mode, follow: meta.follow_action,
         just_started: true,
 });
         self.pending[t] = None;

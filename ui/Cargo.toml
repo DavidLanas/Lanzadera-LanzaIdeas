@@ -8,4 +8,5 @@ caja-core = { path = "../../CAJA.GrooveMaschine-/core" }
 lanzadera-core   = { path = "../core" }
 lanzadera-engine = { path = "../engine" }  # RtStore + SessionShared para los widgets
 egui = "0.28"
+rfd = "0.17"   # diálogos de archivo nativos (MIT) — Fase 1: Abrir / Guardar como
 # egui_extras = "0.28"  # Fase 3 (imágenes/tablas avanzadas)

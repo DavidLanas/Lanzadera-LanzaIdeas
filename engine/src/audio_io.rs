@@ -67,6 +67,10 @@ pub struct AudioHandle {
     /// (indice de pista, instancia). El indice permite abrir la GUI de la
     /// pista correcta: el orden de carga no es el orden de pista.
     instances: Vec<(usize, clap_host::Instance)>,
+    /// Instancias de Note FX y FX CLAP. Id pseudo-pista (MAX_TRACKS + t para Note FX,
+    /// 2*MAX_TRACKS + t para FX) para no chocar con las tablas por pista del instrumento.
+    #[cfg(feature = "clap")]
+    fx_instances: Vec<(usize, clap_host::Instance)>,
     #[cfg(feature = "clap")]
     retire_rx: Option<std::sync::mpsc::Receiver<clap_host::Stopped>>,
     /// Ventanas X11 de las GUI CLAP embebidas (plugins sin GUI flotante).
@@ -78,6 +82,9 @@ pub struct AudioHandle {
     vst3_handles: Vec<(usize, std::sync::Arc<std::sync::Mutex<vst3_host::plugin::Plugin>>)>,
     #[cfg(feature = "vst3")]
     vst3_gui: crate::vst3_slot::Vst3Gui,
+    /// FX VST3 vivos (se sueltan en el hilo de teardown junto a los demás).
+    #[cfg(feature = "vst3")]
+    fx_vst3_handles: Vec<std::sync::Arc<std::sync::Mutex<vst3_host::plugin::Plugin>>>,
     #[allow(dead_code)] // mantiene vivo el stream de entrada
     in_stream: Option<crate::audio_input::AudioInputStream>,
 }
@@ -97,6 +104,7 @@ impl AudioHandle {
         }
         // GUI CLAP embebidas: cierre por la X y resizes del plugin.
         crate::clap_services::poll(&mut self.instances);
+        crate::clap_services::poll(&mut self.fx_instances);
         crate::clap_gui::poll_embedded(&mut self.instances, &mut self.clap_embed);
 
         // GUI VST3: run loop del plugin + cierre por la X.
@@ -157,11 +165,13 @@ impl Drop for AudioHandle {
         {
             let mut gui = std::mem::take(&mut self.vst3_gui);
             let handles = std::mem::take(&mut self.vst3_handles);
+            let fx_handles = std::mem::take(&mut self.fx_vst3_handles);
             std::thread::Builder::new()
                 .name("vst3-teardown".into())
                 .spawn(move || {
                     gui.close_all();  // editores primero (la vista antes que el plugin)
                     drop(handles);    // luego los plugins (teardown wine)
+                    drop(fx_handles); // y los FX
                 })
                 .ok();
         }
@@ -169,6 +179,8 @@ impl Drop for AudioHandle {
         if let Some(rx) = &self.retire_rx {
             while let Ok(p) = rx.recv_timeout(std::time::Duration::from_millis(300)) {
                 if let Some((_, inst)) = self.instances.iter_mut().find(|(_, i)| p.matches(i)) {
+                    inst.deactivate(p);
+                } else if let Some((_, inst)) = self.fx_instances.iter_mut().find(|(_, i)| p.matches(i)) {
                     inst.deactivate(p);
                 }
             }
@@ -190,6 +202,10 @@ struct Renderer {
     was_playing: bool,
     /// Notas en vivo pendientes de cerrar (grabación): (nota, vel, tick).
     rec_pending: [Option<(u8, u8, u32)>; 32],
+    /// Pedal de sustain por pista (solo sinte interno; los plugins reciben el CC 64).
+    sustain_down: [bool; MAX_TRACKS],
+    /// Notas con note-off retenido por el pedal, por pista. Arrays fijos: sin alloc en RT.
+    sustained: [[bool; 128]; MAX_TRACKS],
     rec_on: bool,
     /// Origen del loop de grabación (global_ticks al abrir la puerta).
     /// Las notas se graban relativas a este origen para que el primer
@@ -204,6 +220,28 @@ struct Renderer {
     plugins: [Option<Processor>; MAX_TRACKS],
     #[cfg(feature = "vst3")]
     vst3_plugins: [Option<vst3_slot::Vst3Slot>; MAX_TRACKS],
+    /// Note FX CLAP por pista: transforman las notas antes del instrumento.
+    #[cfg(feature = "clap")]
+    note_fx: [Option<Processor>; MAX_TRACKS],
+    /// FX de audio CLAP por pista: procesan la mezcla de la pista (insert).
+    #[cfg(feature = "clap")]
+    fx_clap: [Option<Processor>; MAX_TRACKS],
+    /// FX de audio VST3 por pista.
+    #[cfg(feature = "vst3")]
+    fx_vst3: [Option<vst3_slot::Vst3Slot>; MAX_TRACKS],
+    // Scratch fijo del procesado de Note FX / FX: se reserva una vez, sin alloc en RT.
+    #[cfg(feature = "clap")]
+    nfx_in: EventBuffer,
+    #[cfg(feature = "clap")]
+    nfx_out: EventBuffer,
+    #[cfg(feature = "clap")]
+    nfx_src: Box<crate::plugin_events::PluginEvents>,
+    #[cfg(feature = "clap")]
+    nfx_keep: Box<crate::plugin_events::PluginEvents>,
+    #[cfg(feature = "clap")]
+    fxin: Box<[[f32; MAX_BLOCK]; 2]>,
+    #[cfg(feature = "clap")]
+    fx_ports: AudioPorts,
     #[cfg(feature = "clap")]
     ev: [EventBuffer; MAX_TRACKS],
     /// Cola neutral donde escriben los sitios de eventos. Solo flush_clap()
@@ -231,7 +269,6 @@ struct Renderer {
     caja_scheduler: CajaScheduler,
     record_engine: crate::audio_record::RecordEngine,
     was_recording: bool,
-    was_audio_recording: bool,
     audio_in_cons: Option<ringbuf::HeapCons<f32>>,
     audio_in_ch: u16,
     audio_in_scratch: Vec<f32>,
@@ -245,7 +282,7 @@ struct Renderer {
 impl Drop for Renderer {
     fn drop(&mut self) {
         if let Some(tx) = &self.retire {
-            for slot in self.plugins.iter_mut() {
+            for slot in self.plugins.iter_mut().chain(self.note_fx.iter_mut()).chain(self.fx_clap.iter_mut()) {
                 if let Some(p) = slot.take() { let _ = tx.send(p.into_stopped()); }
             }
         }
@@ -290,12 +327,11 @@ impl Renderer {
     /// Tick relativo al origen de la grabación (o al playhead del clip activo).
     /// Así el primer ataque tras la frontera de quantize cae en 0.1 del clip,
     /// no en 2.1 del transporte global.
-    fn rec_tick(&self, audio: &SessionAudio, _t: usize) -> u32 {
+    fn rec_tick(&self, audio: &SessionAudio, t: usize) -> u32 {
         let lt = audio.rec_loop_ticks.max(1) as u64;
-        // Siempre relativo al origen de la grabación (fijado al abrir la
-        // puerta). Antes se usaba el playhead de cualquier clip activo de
-        // la pista, y si quedaba una voz vieja viva las notas entraban
-        // desfasadas un compás.
+        if let Some(a) = self.engine.active(t) {
+            return a.playhead % lt as u32;
+        }
         let abs = self.engine.global_ticks().saturating_sub(self.rec_origin_ticks);
         (abs % lt) as u32
     }
@@ -405,7 +441,7 @@ impl Renderer {
             let period = gcd(audio.rec_loop_ticks.max(1) as u64, groove_loop as u64);
             rec_q = (q / gcd(q, period) * period) as u32;
         }
-        let mut rec_live = rec_gate(
+        let rec_live = rec_gate(
             audio.recording,
             audio.playing,
             rec_q,
@@ -424,45 +460,17 @@ impl Renderer {
                 );
             }
         }
-        // Al desarmar la grabación (p. ej. lanzar otro clip), el clip que
-        // grababa deja de estar Recording. El motor no emite StateChange
-        // para un clip que grababa (nunca estuvo activo), así que lo
-        // pasamos a Empty aquí para que la GUI no se quede congelada.
-        if self.was_audio_recording && !audio.recording {
-            shared.rt.set_clip_state(audio.rec_track as usize, audio.rec_scene as usize, ClipState::Empty);
-        }
-        self.was_audio_recording = audio.recording;
         if self.rec_on && !rec_live {
-        let t = audio.rec_track as usize;
-        let s = audio.rec_scene as usize;
-        let now = self.rec_tick(audio, t);
-        // Calcular duración total de la grabación (desde el origen)
-        let total_dur_ticks = if now >= self.rec_origin_ticks as u32 {
-            now - self.rec_origin_ticks as u32
-        } else {
-            // Wrap-around: calcular desde origen hasta el final del loop + now
-            let loop_ticks = audio.rec_loop_ticks.max(1) as u32;
-            loop_ticks.saturating_sub(self.rec_origin_ticks as u32) + now
-        };
-        // Convertir a compases (asumiendo 4/4, TICKS_PER_BAR = 1920)
-        let total_bars = (total_dur_ticks as u64 / lanzadera_core::TICKS_PER_BAR).max(1) as u8;
-        // Actualizar loop_bars del clip en SessionState
-        shared.edit(|st| {
-            if let Some(tr) = st.tracks.get_mut(t) {
-                if let Some(Some(c)) = tr.clips.get_mut(s) {
-                    c.loop_bars = total_bars;
+            let t = audio.rec_track as usize;
+            let now = self.rec_tick(audio, t);
+            for slot in self.rec_pending.iter_mut() {
+                if let Some((n, v, st)) = slot.take() {
+                    let dur = if now >= st { now - st }
+                              else { audio.rec_loop_ticks.saturating_sub(st) + now };
+                    let _ = shared.rec_rx.push(RecNote { track: t as u8, note: n, vel: v, tick: st, dur: dur.max(1) });
                 }
             }
-        });
-        // Cerrar todas las notas pendientes
-        for slot in self.rec_pending.iter_mut() {
-            if let Some((n, v, st)) = slot.take() {
-                let dur = if now >= st { now - st }
-                          else { audio.rec_loop_ticks.saturating_sub(st) + now };
-                let _ = shared.rec_rx.push(RecNote { track: t as u8, note: n, vel: v, tick: st, dur: dur.max(1) });
-            }
         }
-    }
         let old_rec_on = self.rec_on;
         self.rec_on = rec_live;
 
@@ -561,6 +569,8 @@ impl Renderer {
                     match cmd {
                         ControlCmd::LiveNoteOn { track, note, vel } => {
                             let t = (track as usize).min(n - 1);
+                            // Si la nota estaba retenida por el pedal, se re-ataca limpia.
+                            self.sustained[t][(note & 0x7F) as usize] = false;
                             self.note(t, f as u32, MidiMsg::On { note, vel, ch: 0 });
                             if rec_live && t == audio.rec_track as usize {
                                 let tick = self.rec_tick(audio, t);
@@ -571,7 +581,14 @@ impl Renderer {
                         }
                         ControlCmd::LiveNoteOff { track, note } => {
                             let t = (track as usize).min(n - 1);
-                            self.note(t, f as u32, MidiMsg::Off { note, ch: 0 });
+                            // Sinte interno con el pedal pisado: el note-off queda
+                            // retenido hasta soltarlo. Los plugins reciben el CC 64 y
+                            // aplican su propio sustain, así que ahí el off va directo.
+                            if self.sustain_down[t] && !self.has_plugin(t) {
+                                self.sustained[t][(note & 0x7F) as usize] = true;
+                            } else {
+                                self.note(t, f as u32, MidiMsg::Off { note, ch: 0 });
+                            }
                             if rec_live && t == audio.rec_track as usize {
                                 let now = self.rec_tick(audio, t);
                                 let found = self.rec_pending.iter_mut()
@@ -583,6 +600,26 @@ impl Renderer {
                                         let _ = shared.rec_rx.push(RecNote {
                                             track: t as u8, note: nn, vel: v, tick: st, dur: dur.max(1),
                                         });
+                                    }
+                                }
+                            }
+                        }
+                        ControlCmd::LiveSustain { track, value } => {
+                            let t = (track as usize).min(n - 1);
+                            let down = value >= 64;
+                            if self.has_plugin(t) {
+                                #[cfg(feature = "clap")]
+                                self.pev[t].midi3(f as u32, 0xB0, 64, value);
+                            } else {
+                                let was_down = self.sustain_down[t];
+                                self.sustain_down[t] = down;
+                                if was_down && !down {
+                                    // Pedal suelto: liberar todas las notas retenidas.
+                                    for nn in 0..128usize {
+                                        if self.sustained[t][nn] {
+                                            self.sustained[t][nn] = false;
+                                            self.note(t, f as u32, MidiMsg::Off { note: nn as u8, ch: 0 });
+                                        }
                                     }
                                 }
                             }
@@ -669,6 +706,52 @@ impl Renderer {
             }
         }
 
+        // ── Note FX CLAP: transforman las notas de la pista ANTES del instrumento ──
+        // Entran las notas/MIDI crudo de pev[t]; los Param se conservan intactos. La
+        // salida del plugin reemplaza las notas en pev[t] (ordenada por frame), así
+        // que el instrumento (CLAP o VST3) ya recibe las notas transformadas en el
+        // mismo bloque: latencia añadida = 0. Buffers fijos, sin alloc ni locks.
+        #[cfg(feature = "clap")]
+        for t in 0..n {
+            if self.note_fx[t].is_none() || !self.has_plugin(t) { continue; }
+            let Some(proc) = self.note_fx[t].as_mut() else { continue };
+            let Ok(started) = proc.ensure_processing_started() else { continue };
+            self.nfx_src.clear();
+            self.nfx_keep.clear();
+            for e in self.pev[t].as_slice() {
+                if e.kind == crate::plugin_events::EvKind::Param { self.nfx_keep.push_ev(*e); }
+                else { self.nfx_src.push_ev(*e); }
+            }
+            crate::plugin_events::flush_clap(&self.nfx_src, &mut self.nfx_in);
+            self.nfx_out.clear();
+            let ok = {
+                // Un plugin de notas no tiene audio, pero process() deduce el número
+                // de frames de los buffers: se le da el mismo puerto de salida de
+                // trabajo que a los instrumentos y se descarta.
+                let [pl, pr] = &mut *self.pbuf;
+                pl[..frames].fill(0.0);
+                pr[..frames].fill(0.0);
+                let mut audio_out = self.out_ports.with_output_buffers([AudioPortBuffer {
+                    latency: 0,
+                    channels: AudioPortBufferType::f32_output_only(
+                        [&mut pl[..frames], &mut pr[..frames]].into_iter()
+                    ),
+                }]);
+                let input_events = self.nfx_in.as_input();
+                let mut output_events = self.nfx_out.as_output();
+                started.process(
+                    &InputAudioBuffers::empty(), &mut audio_out,
+                    &input_events, &mut output_events,
+                    Some(self.steady), None,
+                ).is_ok()
+            };
+            if !ok { continue; } // si el plugin falla, las notas pasan sin transformar
+            self.pev[t].clear();
+            for e in self.nfx_keep.as_slice() { self.pev[t].push_ev(*e); }
+            crate::plugin_events::read_clap(&self.nfx_out, &mut self.pev[t]);
+            self.pev[t].sort_by_frame();
+        }
+
         // ── Plugins VST3: un process_bus_audio() por pista y bloque ──
         // Efectos: la señal de la pista entra por los buses de audio del plugin
         // y la salida sustituye al dry (no se suma dos veces). Instrumentos:
@@ -730,6 +813,67 @@ impl Renderer {
             for f in 0..frames {
                 buf[0][f] += self.pbuf[0][f];
                 buf[1][f] += self.pbuf[1][f];
+            }
+        }
+        // ── FX de audio por pista (insert después del instrumento y de los clips de
+        // audio): la mezcla de la pista entra al plugin y su salida la sustituye.
+        // Sirve igual para pistas MIDI (salida del instrumento) y de audio.
+        #[cfg(feature = "vst3")]
+        for t in 0..n {
+            let Some(slot) = self.fx_vst3[t].as_mut() else { continue; };
+            if !vst3_slot::process(slot, &[], frames, &self.bufs[t][0][..frames], &self.bufs[t][1][..frames]) {
+                continue;
+            }
+            if slot.buffers.outputs.is_empty() { continue; }
+            let out_bus = &slot.buffers.outputs[0];
+            let ch_count = out_bus.channels.len().min(2);
+            if ch_count == 0 { continue; }
+            let buf = &mut self.bufs[t];
+            for f in 0..frames {
+                let l = out_bus.channels[0][f];
+                let r = if ch_count >= 2 { out_bus.channels[1][f] } else { l };
+                buf[0][f] = l;
+                buf[1][f] = r;
+            }
+        }
+        #[cfg(feature = "clap")]
+        for t in 0..n {
+            let Some(proc) = self.fx_clap[t].as_mut() else { continue };
+            let Ok(started) = proc.ensure_processing_started() else { continue };
+            let ok = {
+                let [il, ir] = &mut *self.fxin;
+                il[..frames].copy_from_slice(&self.bufs[t][0][..frames]);
+                ir[..frames].copy_from_slice(&self.bufs[t][1][..frames]);
+                let [pl, pr] = &mut *self.pbuf;
+                pl[..frames].fill(0.0);
+                pr[..frames].fill(0.0);
+                let in_bufs = self.fx_ports.with_input_buffers([AudioPortBuffer {
+                    latency: 0,
+                    channels: AudioPortBufferType::f32_input_only([
+                        InputChannel::variable(&mut il[..frames]),
+                        InputChannel::variable(&mut ir[..frames]),
+                    ].into_iter()),
+                }]);
+                let mut audio_out = self.out_ports.with_output_buffers([AudioPortBuffer {
+                    latency: 0,
+                    channels: AudioPortBufferType::f32_output_only(
+                        [&mut pl[..frames], &mut pr[..frames]].into_iter()
+                    ),
+                }]);
+                self.nfx_in.clear();
+                let input_events = self.nfx_in.as_input();
+                let mut output_events = OutputEvents::void();
+                started.process(
+                    &in_bufs, &mut audio_out,
+                    &input_events, &mut output_events,
+                    Some(self.steady), None,
+                ).is_ok()
+            };
+            if !ok { continue; } // si el efecto falla, la pista suena seca
+            let buf = &mut self.bufs[t];
+            for f in 0..frames {
+                buf[0][f] = self.pbuf[0][f];
+                buf[1][f] = self.pbuf[1][f];
             }
         }
         #[cfg(feature = "clap")]
@@ -1159,6 +1303,80 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
     #[cfg(feature = "vst3")]
     let _ = &mut vst3_plugins;
 
+    // ── Note FX / FX por pista (paso 2) ──
+    // Note FX: solo CLAP y solo en pistas con instrumento plugin (las notas llegan al
+    // instrumento por la cola neutral pev). FX: CLAP o VST3, en pistas MIDI y de audio.
+    #[cfg(feature = "clap")]
+    let mut note_fx: [Option<Processor>; MAX_TRACKS] = std::array::from_fn(|_| None);
+    #[cfg(feature = "clap")]
+    let mut fx_clap: [Option<Processor>; MAX_TRACKS] = std::array::from_fn(|_| None);
+    #[cfg(feature = "clap")]
+    let mut fx_instances: Vec<(usize, clap_host::Instance)> = Vec::new();
+    #[cfg(feature = "vst3")]
+    let mut fx_vst3: [Option<vst3_slot::Vst3Slot>; MAX_TRACKS] = std::array::from_fn(|_| None);
+    #[cfg(feature = "vst3")]
+    let mut fx_vst3_handles: Vec<std::sync::Arc<Mutex<vst3_host::plugin::Plugin>>> = Vec::new();
+    {
+        type Slot = Option<(String, Option<String>)>;
+        let slots: Vec<(usize, Slot, Slot, bool)> = {
+            let st = shared.state.lock().unwrap();
+            st.tracks.iter().enumerate().take(MAX_TRACKS).map(|(i, tr)| (
+                i,
+                tr.note_fx_path.clone().map(|p| (p, tr.note_fx_id.clone())),
+                tr.fx_path.clone().map(|p| (p, tr.fx_id.clone())),
+                tr.plugin_path.is_some(),
+            )).collect()
+        };
+        for (t, nfx, fx, has_instr) in slots {
+            if let Some((path, id)) = nfx {
+                let _ = &id;
+                if !has_instr {
+                    crate::clap_gui::notify(format!("⚠ Note FX pista {}: la pista no tiene instrumento plugin; no se aplica", t + 1));
+                } else if path.trim_end_matches('/').ends_with(".vst3") {
+                    crate::clap_gui::notify(format!("⚠ Note FX pista {}: los Note FX VST3 aún no se procesan; usa la versión CLAP", t + 1));
+                } else {
+                    #[cfg(feature = "clap")]
+                    match clap_host::load(&path, id.as_deref(), sample_rate, MAX_BLOCK as u32, MAX_TRACKS + t) {
+                        Ok((inst, proc, name, _params)) => {
+                            println!("[lanzadera] Note FX pista {}: {}", t + 1, name);
+                            note_fx[t] = Some(proc);
+                            fx_instances.push((MAX_TRACKS + t, inst));
+                        }
+                        Err(e) => crate::clap_gui::notify(format!("⚠ Note FX pista {}: {}", t + 1, e)),
+                    }
+                }
+            }
+            if let Some((path, id)) = fx {
+                let _ = &id;
+                if path.trim_end_matches('/').ends_with(".vst3") {
+                    #[cfg(feature = "vst3")]
+                    match vst3_slot::load(&path, sample_rate, MAX_BLOCK as u32) {
+                        Ok(slot) => {
+                            if slot.is_instrument {
+                                crate::clap_gui::notify(format!("⚠ FX pista {}: «{}» es un instrumento, no un efecto", t + 1, slot.name));
+                            } else {
+                                println!("[lanzadera] FX VST3 pista {}: {}", t + 1, slot.name);
+                                fx_vst3_handles.push(slot.plugin.clone());
+                                fx_vst3[t] = Some(slot);
+                            }
+                        }
+                        Err(e) => crate::clap_gui::notify(format!("⚠ FX VST3 pista {}: {}", t + 1, e)),
+                    }
+                } else {
+                    #[cfg(feature = "clap")]
+                    match clap_host::load(&path, id.as_deref(), sample_rate, MAX_BLOCK as u32, 2 * MAX_TRACKS + t) {
+                        Ok((inst, proc, name, _params)) => {
+                            println!("[lanzadera] FX CLAP pista {}: {}", t + 1, name);
+                            fx_clap[t] = Some(proc);
+                            fx_instances.push((2 * MAX_TRACKS + t, inst));
+                        }
+                        Err(e) => crate::clap_gui::notify(format!("⚠ FX CLAP pista {}: {}", t + 1, e)),
+                    }
+                }
+            }
+        }
+    }
+
     // ── Motor de drums de Caja (Fase 4A) ──
     // El store vive en SessionShared: la UI lo necesita para saber qué
     // muestra sonó (cur_idx) y cuál está fijada (pin_idx).
@@ -1202,6 +1420,8 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
         peaks: [0.0; MAX_TRACKS + 1],
         was_playing: false,
         rec_pending: [None; 32],
+        sustain_down: [false; MAX_TRACKS],
+        sustained: [[false; 128]; MAX_TRACKS],
         rec_on: false,
         rec_origin_ticks: 0,
         last_global_ticks: 0,
@@ -1212,6 +1432,24 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
         plugins,
         #[cfg(feature = "vst3")]
         vst3_plugins,
+        #[cfg(feature = "clap")]
+        note_fx,
+        #[cfg(feature = "clap")]
+        fx_clap,
+        #[cfg(feature = "vst3")]
+        fx_vst3,
+        #[cfg(feature = "clap")]
+        nfx_in: EventBuffer::with_capacity(MAX_EVENTS),
+        #[cfg(feature = "clap")]
+        nfx_out: EventBuffer::with_capacity(MAX_EVENTS),
+        #[cfg(feature = "clap")]
+        nfx_src: Box::new(crate::plugin_events::PluginEvents::new()),
+        #[cfg(feature = "clap")]
+        nfx_keep: Box::new(crate::plugin_events::PluginEvents::new()),
+        #[cfg(feature = "clap")]
+        fxin: Box::new([[0.0; MAX_BLOCK]; 2]),
+        #[cfg(feature = "clap")]
+        fx_ports: AudioPorts::with_capacity(2, 1),
         #[cfg(feature = "clap")]
         ev: std::array::from_fn(|_| EventBuffer::with_capacity(MAX_EVENTS)),
         #[cfg(feature = "clap")]
@@ -1241,7 +1479,6 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
         metro_phase: 0.0,
         record_engine: crate::audio_record::RecordEngine::new(sample_rate, 180),
         was_recording: false,
-     was_audio_recording: false,
     };
     let _ = &mut renderer;
 
@@ -1273,11 +1510,15 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
         #[cfg(feature = "clap")]
         instances,
         #[cfg(feature = "clap")]
+        fx_instances,
+        #[cfg(feature = "clap")]
         retire_rx,
         #[cfg(feature = "clap")]
         clap_embed: crate::clap_gui::EmbedHost::default(),
         #[cfg(feature = "vst3")]
         vst3_handles,
+        #[cfg(feature = "vst3")]
+        fx_vst3_handles,
         #[cfg(feature = "vst3")]
         vst3_gui: crate::vst3_slot::Vst3Gui::default(),
         in_stream: audio_in_stream,
@@ -1307,19 +1548,9 @@ fn rec_gate(recording: bool, playing: bool, q_ticks: u32, now_tick: u64) -> bool
         return false;
     }
     if !REC_REQ_PREV.swap(true, Relaxed) {
+        REC_Q_BASE.store(now_tick, Relaxed);
         if q_ticks == 0 {
             REC_ARMED.store(true, Relaxed);
-        } else {
-            let q = q_ticks as u64;
-            let pos = now_tick % q;
-            // Cuenta atrás garantizada: si la petición llega en la segunda
-            // mitad del compás, el siguiente límite está a menos de medio
-            // compás y la grabación parecía arrancar "al instante". En ese
-            // caso la base salta al límite siguiente y la espera queda entre
-            // medio compás y compás y medio. Pulsar en la primera mitad
-            // sigue esperando al 1.1 inmediato.
-            let base = if pos > q / 2 { now_tick - pos + q } else { now_tick };
-            REC_Q_BASE.store(base, Relaxed);
         }
     }
     if !REC_ARMED.load(Relaxed) {
