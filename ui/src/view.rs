@@ -22,6 +22,9 @@ pub enum BrowserTarget { Instrument, NoteFx, Fx }
 /// Qué se pidió en un diálogo de archivo / de ruta.
 #[derive(Clone, Copy, PartialEq)]
 pub enum DialogKind { Open, Save }
+/// Acción que espera a que el usuario decida qué hacer con los cambios sin guardar.
+#[derive(Clone, PartialEq)]
+pub enum PendingAction { New, Open, OpenPath(String), Quit }
 use crate::eq_view;
 
 const Q_LIST: [(Quantize, &str); 10] = [
@@ -164,6 +167,19 @@ pub struct SessionView {
     pub show_shortcuts: bool,
     pub show_about: bool,
     pub last_title: String,
+    // ── Fase 2: cambios sin guardar, autoguardado y recuperación ──
+    pub now: f64,
+    pub dirty: bool,
+    pub force_dirty: bool,
+    pub saved_fp: Option<u64>,
+    pub baseline_at: Option<f64>,
+    pub last_fp_check: f64,
+    pub last_autosave: f64,
+    pub confirm: Option<PendingAction>,
+    pub after_save: Option<PendingAction>,
+    pub force_close: bool,
+    pub recover_prompt: Option<String>,
+    pub startup_checked: bool,
     pub audio_modal: Option<(usize, usize)>,
     pub audio_path_input: String,
     pub roll: PianoRoll,
@@ -227,6 +243,18 @@ impl Default for SessionView {
             show_shortcuts: false,
             show_about: false,
             last_title: String::new(),
+            now: 0.0,
+            dirty: false,
+            force_dirty: false,
+            saved_fp: None,
+            baseline_at: None,
+            last_fp_check: 0.0,
+            last_autosave: 0.0,
+            confirm: None,
+            after_save: None,
+            force_close: false,
+            recover_prompt: None,
+            startup_checked: false,
             audio_modal: None,
             audio_path_input: String::new(),
             roll: PianoRoll::default(),
@@ -525,6 +553,9 @@ impl SessionView {
 
         self.audio_modal_window(ctx, shared);
         // ── Fase 1: menús, atajos y diálogos de proyecto ──
+        self.project_tick(ctx, shared);
+        self.confirm_window(ctx, shared);
+        self.recover_window(ctx, shared);
         self.handle_shortcuts(ctx, shared);
         self.poll_dialog(shared);
         self.path_prompt_window(ctx, shared);
@@ -567,7 +598,15 @@ impl SessionView {
     fn project_save(&mut self, shared: &SessionShared) {
         let path = self.project_path.clone();
         self.msg = match shared.save_to_file(&path) {
-            Ok(()) => { self.push_recent(&path); format!("Guardado {}", path) }
+            Ok(()) => {
+                self.push_recent(&path);
+                self.force_dirty = false;
+                self.dirty = false;
+                self.baseline_at = None;
+                self.saved_fp = Some(shared.project_fingerprint());
+                Self::clear_autosave();
+                format!("Guardado {}", path)
+            }
             Err(e) => format!("⚠ No se pudo guardar: {}", e),
         };
     }
@@ -579,6 +618,7 @@ impl SessionView {
                 self.push_recent(&path);
                 // Reinicia el audio para cargar los plugins (instrumento, Note FX, FX) del proyecto.
                 shared.audio_restart.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.reset_dirty_baseline();
                 format!("Abierto {}", path)
             }
             Err(e) => format!("⚠ No se pudo abrir: {}", e),
@@ -589,7 +629,170 @@ impl SessionView {
         shared.new_project();
         shared.audio_restart.store(true, std::sync::atomic::Ordering::Relaxed);
         self.project_path = "sin_titulo.lanzadera".into();
+        self.reset_dirty_baseline();
         self.msg = "Proyecto nuevo".into();
+    }
+
+    // ── Fase 2: cambios sin guardar, confirmaciones, autoguardado ──────────
+    fn autosave_paths() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+        let dir = Self::config_dir()?.join("autosave");
+        Some((dir.join("autosave.lanzadera"), dir.join("autosave.origin")))
+    }
+
+    fn clear_autosave() {
+        if let Some((a, o)) = Self::autosave_paths() {
+            let _ = std::fs::remove_file(a);
+            let _ = std::fs::remove_file(o);
+        }
+    }
+
+    /// Tras abrir o crear un proyecto: la «huella limpia» se toma 2 s después, cuando
+    /// ya terminaron las cargas asíncronas de audio y plugins.
+    fn reset_dirty_baseline(&mut self) {
+        self.force_dirty = false;
+        self.dirty = false;
+        self.saved_fp = None;
+        self.baseline_at = Some(self.now + 2.0);
+    }
+
+    fn needs_save_as(&self) -> bool {
+        !std::path::Path::new(&self.project_path).exists()
+    }
+
+    fn project_save_or_ask(&mut self, shared: &SessionShared) {
+        if self.needs_save_as() { self.spawn_file_dialog(DialogKind::Save); }
+        else { self.project_save(shared); }
+    }
+
+    fn run_action(&mut self, shared: &SessionShared, a: PendingAction) {
+        match a {
+            PendingAction::New => self.project_new(shared),
+            PendingAction::Open => self.spawn_file_dialog(DialogKind::Open),
+            PendingAction::OpenPath(p) => self.project_open(shared, p),
+            PendingAction::Quit => { Self::clear_autosave(); self.force_close = true; }
+        }
+    }
+
+    /// Ejecuta la acción, o pregunta primero si hay cambios sin guardar.
+    fn request_action(&mut self, shared: &SessionShared, a: PendingAction) {
+        if self.dirty { self.confirm = Some(a); } else { self.run_action(shared, a); }
+    }
+
+    /// Una vez por frame: huella (1 Hz), autoguardado (60 s), arranque y cierre de ventana.
+    fn project_tick(&mut self, ctx: &egui::Context, shared: &SessionShared) {
+        self.now = ctx.input(|i| i.time);
+        let now = self.now;
+
+        if !self.startup_checked {
+            self.startup_checked = true;
+            if let Some((a, o)) = Self::autosave_paths() {
+                if a.exists() {
+                    self.recover_prompt = Some(std::fs::read_to_string(&o).unwrap_or_default().trim().to_string());
+                }
+            }
+            self.baseline_at = Some(now + 2.0);
+        }
+        if let Some(t) = self.baseline_at {
+            if now >= t {
+                self.saved_fp = Some(shared.project_fingerprint());
+                self.baseline_at = None;
+            }
+        }
+        if now - self.last_fp_check >= 1.0 {
+            self.last_fp_check = now;
+            if self.baseline_at.is_none() {
+                if let Some(b) = self.saved_fp {
+                    self.dirty = self.force_dirty || shared.project_fingerprint() != b;
+                }
+            }
+            // Autoguardado: nunca mientras se decide si recuperar el anterior.
+            if self.dirty && self.recover_prompt.is_none() && now - self.last_autosave >= 60.0 {
+                self.last_autosave = now;
+                if let Some((a, o)) = Self::autosave_paths() {
+                    if let Some(dir) = a.parent() { let _ = std::fs::create_dir_all(dir); }
+                    if shared.autosave_to_file(&a.to_string_lossy()).is_ok() {
+                        let _ = std::fs::write(&o, &self.project_path);
+                    }
+                }
+            }
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+
+        // Cierre de la ventana: si hay cambios, se pregunta antes.
+        if self.force_close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if ctx.input(|i| i.viewport().close_requested()) && self.dirty {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if self.confirm.is_none() { self.confirm = Some(PendingAction::Quit); }
+        }
+    }
+
+    fn confirm_window(&mut self, ctx: &egui::Context, shared: &SessionShared) {
+        let Some(action) = self.confirm.clone() else { return };
+        let mut choice: Option<u8> = None;
+        egui::Window::new("Cambios sin guardar").collapsible(false).resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                ui.label(format!("«{}» tiene cambios sin guardar.", self.project_name()));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Guardar").clicked() { choice = Some(0); }
+                    if ui.button("No guardar").clicked() { choice = Some(1); }
+                    if ui.button("Cancelar").clicked() { choice = Some(2); }
+                });
+            });
+        match choice {
+            Some(0) => {
+                self.confirm = None;
+                if self.needs_save_as() {
+                    // Proyecto sin nombre: se pide el nombre y la acción sigue al guardar.
+                    self.after_save = Some(action);
+                    self.spawn_file_dialog(DialogKind::Save);
+                } else {
+                    self.project_save(shared);
+                    self.run_action(shared, action);
+                }
+            }
+            Some(1) => { self.confirm = None; self.run_action(shared, action); }
+            Some(2) => { self.confirm = None; }
+            _ => {}
+        }
+    }
+
+    fn recover_window(&mut self, ctx: &egui::Context, shared: &SessionShared) {
+        let Some(origin) = self.recover_prompt.clone() else { return };
+        let name = std::path::Path::new(&origin).file_stem().and_then(|s| s.to_str())
+            .filter(|s| !s.is_empty()).unwrap_or("proyecto sin nombre").to_string();
+        let (mut recover, mut discard) = (false, false);
+        egui::Window::new("Autoguardado encontrado").collapsible(false).resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                ui.label(format!("Lanzadera se cerró sin guardar «{}».", name));
+                ui.label("¿Quieres recuperar el trabajo autoguardado?");
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Recuperar").clicked() { recover = true; }
+                    if ui.button("Descartar").clicked() { discard = true; }
+                });
+            });
+        if recover {
+            self.recover_prompt = None;
+            if let Some((a, _)) = Self::autosave_paths() {
+                self.msg = match shared.load_from_file(&a.to_string_lossy()) {
+                    Ok(()) => {
+                        shared.audio_restart.store(true, std::sync::atomic::Ordering::Relaxed);
+                        if !origin.is_empty() { self.project_path = origin; }
+                        self.reset_dirty_baseline();
+                        // Lo recuperado no está guardado en el proyecto real.
+                        self.force_dirty = true;
+                        self.dirty = true;
+                        "Autoguardado recuperado: guarda el proyecto para conservarlo".to_string()
+                    }
+                    Err(e) => format!("⚠ No se pudo recuperar el autoguardado: {}", e),
+                };
+            }
+        } else if discard {
+            self.recover_prompt = None;
+            Self::clear_autosave();
+        }
     }
 
     /// Abre el diálogo nativo de archivos en un hilo aparte; el resultado se recoge en `poll_dialog`.
@@ -623,12 +826,13 @@ impl SessionView {
                         if path.extension().is_none() { path.set_extension("lanzadera"); }
                         self.project_path = path.to_string_lossy().into_owned();
                         self.project_save(shared);
+                        if let Some(a) = self.after_save.take() { self.run_action(shared, a); }
                     }
                 }
             }
             // Cancelado, o el sistema no tiene portal de diálogos: queda la opción «por ruta».
-            Ok((_, None)) => { self.dialog_rx = None; }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => { self.dialog_rx = None; }
+            Ok((_, None)) => { self.dialog_rx = None; self.after_save = None; }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => { self.dialog_rx = None; self.after_save = None; }
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
         }
     }
@@ -647,7 +851,7 @@ impl SessionView {
         });
         if let Some(p) = done {
             match kind {
-                DialogKind::Open => self.project_open(shared, p),
+                DialogKind::Open => self.request_action(shared, PendingAction::OpenPath(p)),
                 DialogKind::Save => { self.project_path = p; self.project_save(shared); }
             }
         } else if keep {
@@ -665,12 +869,12 @@ impl SessionView {
             let n = i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::N));
             (sa, s, o, n)
         });
-        if new { self.project_new(shared); }
-        if open { self.spawn_file_dialog(DialogKind::Open); }
+        if new { self.request_action(shared, PendingAction::New); }
+        if open { self.request_action(shared, PendingAction::Open); }
         if save_as { self.spawn_file_dialog(DialogKind::Save); }
-        else if save { self.project_save(shared); }
+        else if save { self.project_save_or_ask(shared); }
         // Título de la ventana = nombre del proyecto.
-        let title = format!("{} — Lanzadera", self.project_name());
+        let title = format!("{}{} — Lanzadera", self.project_name(), if self.dirty { " *" } else { "" });
         if title != self.last_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.last_title = title;
@@ -681,8 +885,8 @@ impl SessionView {
         use lanzadera_core::control::TRACK_CURSOR;
         egui::menu::bar(ui, |ui| {
             ui.menu_button("Archivo", |ui| {
-                if ui.button("Nuevo                  Ctrl+N").clicked() { self.project_new(shared); ui.close_menu(); }
-                if ui.button("Abrir…                 Ctrl+O").clicked() { self.spawn_file_dialog(DialogKind::Open); ui.close_menu(); }
+                if ui.button("Nuevo                  Ctrl+N").clicked() { self.request_action(shared, PendingAction::New); ui.close_menu(); }
+                if ui.button("Abrir…                 Ctrl+O").clicked() { self.request_action(shared, PendingAction::Open); ui.close_menu(); }
                 ui.menu_button("Abrir reciente", |ui| {
                     if self.recent_projects.is_empty() {
                         ui.add_enabled(false, egui::Button::new("(sin proyectos recientes)"));
@@ -690,13 +894,13 @@ impl SessionView {
                     let recents = self.recent_projects.clone();
                     for p in recents {
                         if ui.button(trunc(&p, 48)).on_hover_text(p.clone()).clicked() {
-                            self.project_open(shared, p);
+                            self.request_action(shared, PendingAction::OpenPath(p));
                             ui.close_menu();
                         }
                     }
                 });
                 ui.separator();
-                if ui.button("Guardar                Ctrl+S").clicked() { self.project_save(shared); ui.close_menu(); }
+                if ui.button("Guardar                Ctrl+S").clicked() { self.project_save_or_ask(shared); ui.close_menu(); }
                 if ui.button("Guardar como…     Ctrl+Mayús+S").clicked() { self.spawn_file_dialog(DialogKind::Save); ui.close_menu(); }
                 ui.separator();
                 if ui.button("Abrir por ruta…").on_hover_text("Alternativa si no aparecen los diálogos de archivo del sistema").clicked() {
@@ -720,7 +924,7 @@ impl SessionView {
                 ui.add_enabled(false, egui::Button::new("Exportar audio (bounce)…"))
                     .on_disabled_hover_text("Llega en la Fase 9");
                 ui.separator();
-                if ui.button("Salir").clicked() { ctx.send_viewport_cmd(egui::ViewportCommand::Close); ui.close_menu(); }
+                if ui.button("Salir").clicked() { self.request_action(shared, PendingAction::Quit); ui.close_menu(); }
             });
 
             ui.menu_button("Edición", |ui| {
@@ -974,7 +1178,7 @@ impl SessionView {
             // Fila 2: nombre del proyecto + último mensaje
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("Proyecto").size(10.0).color(T.text_dim));
-                ui.label(egui::RichText::new(self.project_name()).size(11.0).strong().color(T.text_bright))
+                ui.label(egui::RichText::new(format!("{}{}", self.project_name(), if self.dirty { " *" } else { "" })).size(11.0).strong().color(T.text_bright))
                     .on_hover_text(self.project_path.clone());
                 if !self.msg.is_empty() {
                     ui.label(egui::RichText::new(&self.msg).color(T.accent).size(11.0));

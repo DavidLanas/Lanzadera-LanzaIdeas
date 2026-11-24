@@ -7,6 +7,10 @@ use crate::{Clip, ClipState, LaunchMode, Quantize, Scene, Track, TrackKind, MAX_
 
 fn default_follow_playhead() -> bool { true }
 
+/// Versión del formato del archivo de proyecto. Súbela cuando cambie la estructura de
+/// forma incompatible y añade el paso de migración en `SessionState::migrate`.
+pub const FORMAT_VERSION: u32 = 2;
+
 /// Preset de Groove Machine guardado dentro del proyecto (.lanzadera).
 /// `json` es el estado completo serializado por GrooveModel::to_json().
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -67,6 +71,9 @@ pub struct SessionState {
     /// Bancos Groove importados recientemente, el más nuevo primero.
     #[serde(default)]
     pub groove_bank_recent: Vec<String>,
+    /// Formato del archivo (0 = proyectos anteriores a que existiera este campo).
+    #[serde(default)]
+    pub format_version: u32,
 }
 
 impl Default for SessionState {
@@ -109,6 +116,7 @@ impl Default for SessionState {
             groove_bank_name: String::new(),
             groove_bank_favorites: Vec::new(),
             groove_bank_recent: Vec::new(),
+            format_version: FORMAT_VERSION,
         }
     }
 }

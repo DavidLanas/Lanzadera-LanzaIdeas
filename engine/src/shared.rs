@@ -632,7 +632,23 @@ impl SessionShared {
         self.save_groove_preset(&final_name)
     }
 
-    pub fn save_to_file(&self, path: &str) -> Result<(), String> {
+    /// Guarda el proyecto: escritura atómica (tmp + rename), copia `.bak` del archivo
+    /// anterior y el audio referenciado copiado a `<proyecto>_audio/` con rutas relativas
+    /// (así el proyecto no depende de /tmp ni de dónde se grabó cada WAV).
+    pub fn save_to_file(&self, path: &str) -> Result<(), String> { self.save_impl(path, true) }
+
+    /// Autoguardado: mismo JSON, pero sin copiar audio, sin rotar `.bak` y sin tocar el
+    /// estado del proyecto real.
+    pub fn autosave_to_file(&self, path: &str) -> Result<(), String> { self.save_impl(path, false) }
+
+    fn save_impl(&self, path: &str, final_save: bool) -> Result<(), String> {
+        let proj = std::path::Path::new(path);
+        let dir = proj.parent().filter(|d| !d.as_os_str().is_empty())
+            .map(|d| d.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
+        let stem = proj.file_stem().and_then(|x| x.to_str()).unwrap_or("proyecto").to_string();
+        let audio_dir_name = format!("{}_audio", stem);
+        let audio_dir = dir.join(&audio_dir_name);
+
         let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
 
         // El patrón Groove se guarda dentro del mismo proyecto que la sesión.
@@ -645,11 +661,90 @@ impl SessionShared {
         s.groove_event_mode = self.mk3_event_mode.load(Ordering::Relaxed);
         s.groove_sel_pad = self.groove_sel_pad.load(Ordering::Relaxed).min(24);
 
-        let json = s.to_json();
-        if let Ok(mut persist) = self.persist.lock() {
-            *persist = json.clone();
+        // Copia de trabajo: lo que se escribe lleva rutas de audio relativas; el estado
+        // vivo conserva rutas absolutas.
+        let mut out = s.clone();
+        out.format_version = lanzadera_core::FORMAT_VERSION;
+        let mut moved: Vec<(usize, usize, String)> = Vec::new();
+        if final_save {
+            for (t, tr) in out.tracks.iter_mut().enumerate() {
+                for (sc, slot) in tr.clips.iter_mut().enumerate() {
+                    let Some(c) = slot else { continue };
+                    let Some(p) = c.audio_path.clone() else { continue };
+                    let src = std::path::PathBuf::from(&p);
+                    let src_abs = if src.is_absolute() { src } else { dir.join(src) };
+                    if src_abs.starts_with(&audio_dir) {
+                        // Ya vive en la carpeta del proyecto: solo se relativiza.
+                        if let Ok(rel) = src_abs.strip_prefix(&dir) {
+                            c.audio_path = Some(rel.to_string_lossy().into_owned());
+                        }
+                        continue;
+                    }
+                    if !src_abs.is_file() {
+                        eprintln!("[proyecto] audio no encontrado, se guarda la ruta tal cual: {}", p);
+                        continue;
+                    }
+                    std::fs::create_dir_all(&audio_dir)
+                        .map_err(|e| format!("No se pudo crear {}: {}", audio_dir.display(), e))?;
+                    let base = src_abs.file_name().and_then(|n| n.to_str()).unwrap_or("audio.wav");
+                    let dest_name = format!("p{}_e{}_{}", t + 1, sc + 1, base);
+                    let dest = audio_dir.join(&dest_name);
+                    std::fs::copy(&src_abs, &dest)
+                        .map_err(|e| format!("No se pudo copiar {}: {}", src_abs.display(), e))?;
+                    c.audio_path = Some(format!("{}/{}", audio_dir_name, dest_name));
+                    moved.push((t, sc, dest.to_string_lossy().into_owned()));
+                }
+            }
         }
-        std::fs::write(path, json).map_err(|e| e.to_string())
+
+        let json = out.to_json();
+        if final_save {
+            let tmp = format!("{}.tmp", path);
+            std::fs::write(&tmp, &json).map_err(|e| e.to_string())?;
+            if proj.exists() {
+                let _ = std::fs::rename(path, format!("{}.bak", path));
+            }
+            std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+            if let Ok(mut persist) = self.persist.lock() {
+                *persist = json.clone();
+            }
+            // El estado vivo apunta ya a la copia dentro del proyecto (no a /tmp).
+            for (t, sc, p) in moved {
+                if let Some(Some(c)) = s.tracks.get_mut(t).and_then(|tr| tr.clips.get_mut(sc)) {
+                    c.audio_path = Some(p);
+                }
+            }
+            Ok(())
+        } else {
+            std::fs::write(path, &json).map_err(|e| e.to_string())
+        }
+    }
+
+    /// Huella del contenido guardable del proyecto: ignora lo transitorio (transporte,
+    /// estado de los clips, selección, navegación del Groove). Sirve para saber si hay
+    /// cambios sin guardar comparando dos huellas.
+    pub fn project_fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut s = { self.state.lock().unwrap_or_else(|e| e.into_inner()).clone() };
+        s.playing = false;
+        s.recording = false;
+        s.selected_track = 0;
+        s.selected_scene = 0;
+        s.selected_clip = None;
+        s.groove_json = self.groove.to_json();
+        s.groove_view = 0;
+        s.groove_bar = 0;
+        s.groove_page = 0;
+        s.groove_sel_pad = 0;
+        s.groove_event_mode = false;
+        for tr in s.tracks.iter_mut() {
+            for slot in tr.clips.iter_mut() {
+                if let Some(c) = slot { c.state = ClipState::Empty; }
+            }
+        }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        s.to_json().hash(&mut h);
+        h.finish()
     }
 
     /// Proyecto nuevo: sesión por defecto y patrón de Groove inicial. No reinicia el
@@ -670,6 +765,9 @@ impl SessionShared {
     pub fn load_from_file(&self, path: &str) -> Result<(), String> {
         let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
         let mut s = SessionState::from_json(&json)?;
+        // Las rutas de audio relativas se resuelven contra la carpeta del proyecto.
+        let base_dir = std::path::Path::new(path).parent().filter(|d| !d.as_os_str().is_empty())
+            .map(|d| d.to_path_buf()).unwrap_or_else(|| std::path::PathBuf::from("."));
 
         // Cargar el patrón antes de cambiar el resto de la sesión: si el JSON
         // del Groove está corrupto, devolver el error sin sustituir el proyecto.
@@ -691,7 +789,12 @@ impl SessionShared {
             for (sc, slot) in tr.clips.iter_mut().enumerate() {
                 if let Some(c) = slot {
                     c.state = ClipState::Empty;
-                    if let Some(p) = &c.audio_path { loads.push((t, sc, p.clone())); }
+                    if let Some(p) = c.audio_path.clone() {
+                        let abs = if std::path::Path::new(&p).is_absolute() { p }
+                                  else { base_dir.join(&p).to_string_lossy().into_owned() };
+                        c.audio_path = Some(abs.clone());
+                        loads.push((t, sc, abs));
+                    }
                     if !c.midi_notes.is_empty() { midi.push((t, sc)); }
                 }
             }
