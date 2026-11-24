@@ -5,6 +5,8 @@
 pub mod clip;
 pub mod track;
 pub mod scene;
+pub mod b64;
+pub mod config;
 pub mod session;
 pub mod audio_state;
 pub mod control;

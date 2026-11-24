@@ -25,6 +25,37 @@ fn find_port(mi: &midir::MidiInput, hint: &str) -> Option<midir::MidiInputPort> 
     mi.ports().into_iter().find(|p| mi.port_name(p).map(|n| n.contains(hint)).unwrap_or(false))
 }
 
+/// Teclado / controlador cualquiera: notas, pitch bend, rueda de modulación (CC 1) y pedal
+/// de sustain (CC 64) hacia la pista seleccionada. `port_name` es el nombre del puerto de
+/// entrada (o un fragmento de él).
+pub fn connect_generic(port_name: &str, sink: Arc<Spsc>) -> Result<MidiConn, Box<dyn std::error::Error>> {
+    use lanzadera_core::control::TRACK_CURSOR;
+    let mut mi = midir::MidiInput::new("lanzadera-generic").map_err(|e| e.to_string())?;
+    mi.ignore(midir::Ignore::All);
+    let port = find_port(&mi, port_name)
+        .ok_or_else(|| format!("puerto MIDI «{}» no encontrado", port_name))?;
+    let s = sink.clone();
+    let conn = mi.connect(&port, "lanzadera-generic", move |_ts, msg, _| {
+        if msg.len() < 2 { return; }
+        let (st, d1) = (msg[0], msg[1]);
+        let d2 = *msg.get(2).unwrap_or(&0);
+        let emit = |c: ControlCmd| { let _ = s.push(c.encode()); };
+        match st & 0xF0 {
+            0x90 if d2 > 0 => emit(ControlCmd::LiveNoteOn { track: TRACK_CURSOR, note: d1, vel: d2 }),
+            0x80 | 0x90 => emit(ControlCmd::LiveNoteOff { track: TRACK_CURSOR, note: d1 }),
+            0xE0 => {
+                // Pitch bend: 14 bits = (MSB<<7)|LSB, 8192 = centro.
+                let value = (((d2 as u16) << 7) | d1 as u16) & 0x3FFF;
+                emit(ControlCmd::LivePitchBend { track: TRACK_CURSOR, value });
+            }
+            0xB0 if d1 == 1 => emit(ControlCmd::LiveModWheel { track: TRACK_CURSOR, value: d2 }),
+            0xB0 if d1 == 64 => emit(ControlCmd::LiveSustain { track: TRACK_CURSOR, value: d2 }),
+            _ => {}
+        }
+    }, ()).map_err(|e| e.to_string())?;
+    Ok(MidiConn(conn))
+}
+
 /// Conexión genérica de un puerto (MK3 vía driver askz / snd-virmidi).
 pub fn connect(kind: BridgeKind, name_hint: &str, sink: Arc<Spsc>) -> Result<MidiConn, Box<dyn std::error::Error>> {
     let mut mi = midir::MidiInput::new("lanzadera-ctrl").map_err(|e| e.to_string())?;

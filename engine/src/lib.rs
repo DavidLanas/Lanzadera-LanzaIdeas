@@ -1,6 +1,8 @@
 //! lanzadera-engine — estado compartido, motor de clips, audio I/O, loader,
 //! MIDI, sinte interno y EQ (Fase 3A).
 pub mod shared;
+pub mod midi_ctl;
+pub mod state_ctl;
 pub mod clip_engine;
 pub mod rt;
 pub mod loader;
@@ -45,6 +47,16 @@ pub fn vst3_scan_kinds() -> Vec<((String, String), lanzadera_core::PluginKind)> 
 pub fn clap_scan() -> Vec<clap_host::ClapRef> { clap_host::scan() }
 #[cfg(not(feature = "clap"))]
 pub fn clap_scan() -> Vec<(String, String, String)> { Vec::new() }
+/// Carpetas estándar donde se buscan plugins (Preferencias las muestra).
+#[cfg(feature = "clap")]
+pub fn clap_standard_dirs() -> Vec<std::path::PathBuf> { clap_host::standard_dirs() }
+#[cfg(not(feature = "clap"))]
+pub fn clap_standard_dirs() -> Vec<std::path::PathBuf> { Vec::new() }
+#[cfg(feature = "vst3")]
+pub fn vst3_standard_dirs() -> Vec<std::path::PathBuf> { vst3_slot::standard_dirs() }
+#[cfg(not(feature = "vst3"))]
+pub fn vst3_standard_dirs() -> Vec<std::path::PathBuf> { Vec::new() }
+
 /// Igual que `clap_scan`, con el rol de cada plugin (Instrumento / Note FX / FX).
 #[cfg(feature = "clap")]
 pub fn clap_scan_kinds() -> Vec<(clap_host::ClapRef, lanzadera_core::PluginKind)> { clap_host::scan_kinds() }

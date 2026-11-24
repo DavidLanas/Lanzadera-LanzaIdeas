@@ -56,6 +56,20 @@ pub struct Vst3Slot {
     pending: Vec<PluginEv>,
 }
 
+/// Carpetas estándar de VST3 (para mostrarlas en Preferencias).
+pub fn standard_dirs() -> Vec<PathBuf> { vst3_dirs() }
+
+/// Carpetas donde se buscan plugins VST3: las estándar (si no se desactivan) más las del usuario.
+pub fn scan_dirs() -> Vec<PathBuf> {
+    let c = lanzadera_core::config::get();
+    let mut v = if c.use_default_plugin_paths { vst3_dirs() } else { Vec::new() };
+    for p in &c.vst3_paths {
+        let pb = PathBuf::from(p);
+        if !v.contains(&pb) { v.push(pb); }
+    }
+    v
+}
+
 /// Directorios estándar de VST3 en Linux (mas `$VST3_PATH`, separado por ':').
 fn vst3_dirs() -> Vec<PathBuf> {
     let mut v = Vec::new();
@@ -97,7 +111,7 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>, depth: usize,
 pub fn scan() -> Vec<Vst3Ref> {
     let mut paths = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for d in vst3_dirs() {
+    for d in scan_dirs() {
         if d.exists() { walk(&d, &mut paths, 0, &mut seen); }
     }
     paths.sort();

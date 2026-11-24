@@ -9,10 +9,23 @@ use std::time::{Duration, Instant};
 
 use lanzadera_core::control::ControlCmd;
 use lanzadera_engine::audio_io::{self, AudioHandle};
+use lanzadera_engine::midi_ctl::{self, MidiProfile, MidiRequest, MidiStatus};
 use lanzadera_engine::{loader, SessionShared};
 use lanzadera_ui::SessionView;
 
+/// Controlador conectado desde Preferencias (o reconectado automáticamente).
+struct MidiEntry {
+    profile: MidiProfile,
+    port: String,
+    conns: Vec<lanzadera_controller::MidiConn>,
+    leds: Option<lanzadera_controller::leds::LedHandle>,
+}
+
 struct LanzaderaApp {
+    midi_entries: Vec<MidiEntry>,
+    last_midi_scan: Instant,
+    /// Con `--midi` la conexión es la de siempre; la reconexión automática no se mezcla.
+    legacy_midi: bool,
     shared: Arc<SessionShared>,
     view: SessionView,
     _audio: Option<AudioHandle>,
@@ -23,10 +36,114 @@ struct LanzaderaApp {
         taps: Vec<Instant>,
 }
 
+impl LanzaderaApp {
+    fn midi_connect(&mut self, profile: MidiProfile, port: &str) -> String {
+        if self.midi_entries.iter().any(|e| e.profile == profile && e.port == port) {
+            return format!("{} ya está conectado", profile.label());
+        }
+        let sink = self.shared.ctrl_rx.clone();
+        let shared = self.shared.clone();
+        let result: Result<MidiEntry, String> = match profile {
+            MidiProfile::Generic => lanzadera_controller::connect_generic(port, sink)
+                .map(|c| MidiEntry { profile, port: port.to_string(), conns: vec![c], leds: None })
+                .map_err(|e| e.to_string()),
+            MidiProfile::KeyLab => lanzadera_controller::connect_keylab(sink, shared)
+                .map(|cs| MidiEntry { profile, port: port.to_string(), conns: cs, leds: None })
+                .map_err(|e| e.to_string()),
+            MidiProfile::Mk3 => lanzadera_controller::connect_mk3(port, sink, shared.clone())
+                .map_err(|e| e.to_string())
+                .map(|c| {
+                    // Los LED salen por el puerto de salida homónimo.
+                    let hint = if port.contains("Maschine Mikro") { "Maschine Mikro" } else { port };
+                    let leds = lanzadera_controller::leds::spawn_mk3_leds(hint, shared).ok();
+                    MidiEntry { profile, port: port.to_string(), conns: vec![c], leds }
+                }),
+        };
+        match result {
+            Ok(e) => { self.midi_entries.push(e); format!("Conectado: {} → {}", profile.label(), port) }
+            Err(e) => format!("⚠ {}: {}", profile.label(), e),
+        }
+    }
+
+    fn midi_disconnect(&mut self, profile: MidiProfile, port: &str) {
+        if let Some(i) = self.midi_entries.iter().position(|e| e.profile == profile && e.port == port) {
+            let e = self.midi_entries.remove(i);
+            if let Some(l) = &e.leds { l.stop(); }
+        }
+    }
+
+    /// Atiende las peticiones de Preferencias, suelta los controladores desenchufados y
+    /// reconecta los marcados como automáticos. Sin peticiones ni automáticos no hace nada.
+    fn service_midi(&mut self) {
+        let reqs = midi_ctl::take_requests();
+        let auto = lanzadera_core::config::get().midi_auto;
+        let periodic = !self.legacy_midi && !auto.is_empty()
+            && self.last_midi_scan.elapsed() >= Duration::from_secs(3);
+        if reqs.is_empty() && !periodic { return; }
+        self.last_midi_scan = Instant::now();
+
+        let mut msg = String::new();
+        for r in reqs {
+            match r {
+                MidiRequest::Rescan => {}
+                MidiRequest::Connect { profile, port } => { msg = self.midi_connect(profile, &port); }
+                MidiRequest::Disconnect { profile, port } => {
+                    self.midi_disconnect(profile, &port);
+                    msg = format!("Desconectado: {}", port);
+                }
+            }
+        }
+        let ports = lanzadera_controller::list_input_ports();
+
+        // Puertos que desaparecieron (se desenchufó el aparato).
+        let mut i = 0;
+        while i < self.midi_entries.len() {
+            let e = &self.midi_entries[i];
+            let present = match e.profile {
+                MidiProfile::KeyLab => ports.iter().any(|p| p.to_lowercase().contains("keylab")),
+                _ => ports.iter().any(|p| p == &e.port),
+            };
+            if present { i += 1; } else {
+                let gone = self.midi_entries.remove(i);
+                if let Some(l) = &gone.leds { l.stop(); }
+                msg = format!("Se desconectó {}", gone.port);
+            }
+        }
+        // Autoconexión de los aparatos recordados.
+        if !self.legacy_midi {
+            for a in &auto {
+                let Some(p) = MidiProfile::from_id(&a.profile) else { continue };
+                let present = ports.iter().any(|x| x == &a.port);
+                let connected = self.midi_entries.iter().any(|e| e.profile == p && e.port == a.port);
+                if present && !connected {
+                    let m = self.midi_connect(p, &a.port);
+                    if msg.is_empty() { msg = m; }
+                }
+            }
+        }
+        midi_ctl::set_status(MidiStatus {
+            ports,
+            connected: self.midi_entries.iter().map(|e| (e.profile, e.port.clone())).collect(),
+            msg,
+        });
+    }
+}
+
 impl eframe::App for LanzaderaApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Reinicio del stream cuando cambia el set de plugins CLAP.
+        self.service_midi();
+        // Captura del estado de los plugins (guardar proyecto, autoguardado).
+        if lanzadera_engine::state_ctl::take_capture_request() {
+            if let Some(a) = self._audio.as_mut() { a.capture_plugin_states(&self.shared); }
+        }
         if self.shared.audio_restart.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            // Antes de descargar los plugins se guarda su estado, para que al volver a
+            // cargarlos (p. ej. al añadir un FX) no pierdan lo que el usuario ajustó.
+            // Al abrir/crear un proyecto NO se captura: pisaría el estado recién cargado.
+            if !lanzadera_engine::state_ctl::take_skip_capture() {
+                if let Some(a) = self._audio.as_mut() { a.capture_plugin_states(&self.shared); }
+            }
             self._audio = None; // desactiva los plugins viejos ordenadamente
             match audio_io::start(self.shared.clone()) {
                 Ok(h) => { self._audio = Some(h); self.view.msg = "Audio reiniciado".into(); }
@@ -158,6 +275,7 @@ impl eframe::App for LanzaderaApp {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.shared.loader_stop.store(true, std::sync::atomic::Ordering::Relaxed);
         if let Some(l) = &self._leds { l.stop(); }
+        for e in &self.midi_entries { if let Some(l) = &e.leds { l.stop(); } }
     }
 }
 
@@ -241,6 +359,9 @@ fn main() {
         }
 
         Ok(Box::new(LanzaderaApp {
+            midi_entries: Vec::new(),
+            last_midi_scan: Instant::now().checked_sub(Duration::from_secs(10)).unwrap_or_else(Instant::now),
+            legacy_midi: midi,
             shared: app_shared, view, _audio: audio, _conns: conns,
             _leds: leds, _kl_leds: kl_leds, taps: Vec::new(),
         }))

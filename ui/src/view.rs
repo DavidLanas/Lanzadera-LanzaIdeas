@@ -19,6 +19,11 @@ pub enum BrowserMode { Clap, Vst3 }
 /// A qué ranura de la pista va el plugin que se elige en el browser.
 #[derive(Clone, Copy, PartialEq)]
 pub enum BrowserTarget { Instrument, NoteFx, Fx }
+/// Pestañas de la ventana de Preferencias.
+#[derive(Clone, Copy, PartialEq)]
+pub enum PrefsTab { Plugins, Midi, Apariencia }
+/// Resultado de un escaneo de plugins en segundo plano.
+type ScanResult = (BrowserMode, Vec<(String, String, String)>, std::collections::HashMap<(String, String), lanzadera_core::PluginKind>);
 /// Qué se pidió en un diálogo de archivo / de ruta.
 #[derive(Clone, Copy, PartialEq)]
 pub enum DialogKind { Open, Save }
@@ -180,6 +185,17 @@ pub struct SessionView {
     pub force_close: bool,
     pub recover_prompt: Option<String>,
     pub startup_checked: bool,
+    // ── Fase 2b: guardado en dos tiempos (captura de plugins → escritura) ──
+    pub save_pending: bool,
+    // ── Fase 3: preferencias y escaneo en segundo plano ──
+    pub prefs_open: bool,
+    pub prefs_tab: PrefsTab,
+    pub folder_rx: Option<std::sync::mpsc::Receiver<(BrowserMode, Option<std::path::PathBuf>)>>,
+    pub scan_rx: Option<std::sync::mpsc::Receiver<ScanResult>>,
+    pub midi_last_poll: f64,
+    pub ui_scale_edit: f32,
+    pub autosave_pending: bool,
+    pub ctx_cache: Option<egui::Context>,
     pub audio_modal: Option<(usize, usize)>,
     pub audio_path_input: String,
     pub roll: PianoRoll,
@@ -255,6 +271,15 @@ impl Default for SessionView {
             force_close: false,
             recover_prompt: None,
             startup_checked: false,
+            save_pending: false,
+            prefs_open: false,
+            prefs_tab: PrefsTab::Plugins,
+            folder_rx: None,
+            scan_rx: None,
+            midi_last_poll: 0.0,
+            ui_scale_edit: 1.0,
+            autosave_pending: false,
+            ctx_cache: None,
             audio_modal: None,
             audio_path_input: String::new(),
             roll: PianoRoll::default(),
@@ -554,6 +579,9 @@ impl SessionView {
         self.audio_modal_window(ctx, shared);
         // ── Fase 1: menús, atajos y diálogos de proyecto ──
         self.project_tick(ctx, shared);
+        self.poll_scan();
+        self.poll_folder_dialog();
+        self.prefs_window(ctx);
         self.confirm_window(ctx, shared);
         self.recover_window(ctx, shared);
         self.handle_shortcuts(ctx, shared);
@@ -595,9 +623,18 @@ impl SessionView {
             .and_then(|s| s.to_str()).unwrap_or("sin título").to_string()
     }
 
-    fn project_save(&mut self, shared: &SessionShared) {
+    /// Guardar en dos tiempos: primero se pide al hilo principal el estado de los plugins
+    /// (es quien los posee) y, cuando está listo, `project_tick` escribe el archivo.
+    fn project_save(&mut self, _shared: &SessionShared) {
+        lanzadera_engine::state_ctl::request_capture();
+        self.save_pending = true;
+        if let Some(c) = &self.ctx_cache { c.request_repaint(); }
+    }
+
+    /// Escritura real del proyecto. Devuelve true si se guardó bien.
+    fn project_save_now(&mut self, shared: &SessionShared) -> bool {
         let path = self.project_path.clone();
-        self.msg = match shared.save_to_file(&path) {
+        match shared.save_to_file(&path) {
             Ok(()) => {
                 self.push_recent(&path);
                 self.force_dirty = false;
@@ -605,10 +642,20 @@ impl SessionView {
                 self.baseline_at = None;
                 self.saved_fp = Some(shared.project_fingerprint());
                 Self::clear_autosave();
-                format!("Guardado {}", path)
+                self.msg = format!("Guardado {}", path);
+                true
             }
-            Err(e) => format!("⚠ No se pudo guardar: {}", e),
-        };
+            Err(e) => { self.msg = format!("⚠ No se pudo guardar: {}", e); false }
+        }
+    }
+
+    fn write_autosave(&mut self, shared: &SessionShared) {
+        if let Some((a, o)) = Self::autosave_paths() {
+            if let Some(dir) = a.parent() { let _ = std::fs::create_dir_all(dir); }
+            if shared.autosave_to_file(&a.to_string_lossy()).is_ok() {
+                let _ = std::fs::write(&o, &self.project_path);
+            }
+        }
     }
 
     fn project_open(&mut self, shared: &SessionShared, path: String) {
@@ -617,6 +664,7 @@ impl SessionView {
                 self.project_path = path.clone();
                 self.push_recent(&path);
                 // Reinicia el audio para cargar los plugins (instrumento, Note FX, FX) del proyecto.
+                lanzadera_engine::state_ctl::skip_capture_on_next_restart();
                 shared.audio_restart.store(true, std::sync::atomic::Ordering::Relaxed);
                 self.reset_dirty_baseline();
                 format!("Abierto {}", path)
@@ -627,6 +675,7 @@ impl SessionView {
 
     fn project_new(&mut self, shared: &SessionShared) {
         shared.new_project();
+        lanzadera_engine::state_ctl::skip_capture_on_next_restart();
         shared.audio_restart.store(true, std::sync::atomic::Ordering::Relaxed);
         self.project_path = "sin_titulo.lanzadera".into();
         self.reset_dirty_baseline();
@@ -682,9 +731,33 @@ impl SessionView {
     fn project_tick(&mut self, ctx: &egui::Context, shared: &SessionShared) {
         self.now = ctx.input(|i| i.time);
         let now = self.now;
+        self.ctx_cache = Some(ctx.clone());
+
+        // Guardado en dos tiempos: cuando el hilo principal ya capturó los plugins, se escribe.
+        if self.save_pending && !lanzadera_engine::state_ctl::capture_pending() {
+            self.save_pending = false;
+            let ok = self.project_save_now(shared);
+            // Nuevo / Abrir / Salir solo siguen si el guardado salió bien.
+            if let Some(a) = self.after_save.take() {
+                if ok { self.run_action(shared, a); }
+            }
+        }
+        if self.autosave_pending && !lanzadera_engine::state_ctl::capture_pending() {
+            self.autosave_pending = false;
+            if self.recover_prompt.is_none() { self.write_autosave(shared); }
+        }
+        if self.save_pending || self.autosave_pending { ctx.request_repaint(); }
+        // Un plugin CLAP avisó de que su estado cambió: el proyecto tiene cambios.
+        if lanzadera_engine::state_ctl::take_plugin_dirty() && self.baseline_at.is_none() && self.saved_fp.is_some() {
+            self.force_dirty = true;
+            self.dirty = true;
+        }
 
         if !self.startup_checked {
             self.startup_checked = true;
+            let sc = lanzadera_core::config::get().ui_scale;
+            self.ui_scale_edit = sc;
+            if (sc - 1.0).abs() > 0.01 { ctx.set_zoom_factor(sc); }
             if let Some((a, o)) = Self::autosave_paths() {
                 if a.exists() {
                     self.recover_prompt = Some(std::fs::read_to_string(&o).unwrap_or_default().trim().to_string());
@@ -706,14 +779,11 @@ impl SessionView {
                 }
             }
             // Autoguardado: nunca mientras se decide si recuperar el anterior.
-            if self.dirty && self.recover_prompt.is_none() && now - self.last_autosave >= 60.0 {
+            if self.dirty && self.recover_prompt.is_none() && !self.autosave_pending
+                && now - self.last_autosave >= 60.0 {
                 self.last_autosave = now;
-                if let Some((a, o)) = Self::autosave_paths() {
-                    if let Some(dir) = a.parent() { let _ = std::fs::create_dir_all(dir); }
-                    if shared.autosave_to_file(&a.to_string_lossy()).is_ok() {
-                        let _ = std::fs::write(&o, &self.project_path);
-                    }
-                }
+                lanzadera_engine::state_ctl::request_capture();
+                self.autosave_pending = true;
             }
         }
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
@@ -743,13 +813,12 @@ impl SessionView {
         match choice {
             Some(0) => {
                 self.confirm = None;
+                // La acción (Nuevo / Abrir / Salir) sigue solo cuando el guardado termina bien.
+                self.after_save = Some(action);
                 if self.needs_save_as() {
-                    // Proyecto sin nombre: se pide el nombre y la acción sigue al guardar.
-                    self.after_save = Some(action);
                     self.spawn_file_dialog(DialogKind::Save);
                 } else {
                     self.project_save(shared);
-                    self.run_action(shared, action);
                 }
             }
             Some(1) => { self.confirm = None; self.run_action(shared, action); }
@@ -778,6 +847,7 @@ impl SessionView {
             if let Some((a, _)) = Self::autosave_paths() {
                 self.msg = match shared.load_from_file(&a.to_string_lossy()) {
                     Ok(()) => {
+                        lanzadera_engine::state_ctl::skip_capture_on_next_restart();
                         shared.audio_restart.store(true, std::sync::atomic::Ordering::Relaxed);
                         if !origin.is_empty() { self.project_path = origin; }
                         self.reset_dirty_baseline();
@@ -826,7 +896,6 @@ impl SessionView {
                         if path.extension().is_none() { path.set_extension("lanzadera"); }
                         self.project_path = path.to_string_lossy().into_owned();
                         self.project_save(shared);
-                        if let Some(a) = self.after_save.take() { self.run_action(shared, a); }
                     }
                 }
             }
@@ -976,16 +1045,23 @@ impl SessionView {
             });
 
             ui.menu_button("Opciones", |ui| {
-                for (lbl, fase) in [
-                    ("Preferencias…", "Fase 3"),
-                    ("Audio (dispositivo y entradas)…", "Fase 4"),
-                    ("Controladores MIDI — buscar…", "Fase 3"),
-                    ("Carpetas de plugins…", "Fase 3"),
-                    ("Atajos de teclado (editar)…", "Fase 3"),
-                ] {
-                    ui.add_enabled(false, egui::Button::new(lbl))
-                        .on_disabled_hover_text(format!("Llega en la {}", fase));
+                if ui.button("Preferencias…").clicked() { self.prefs_open = true; ui.close_menu(); }
+                if ui.button("Controladores MIDI — buscar…").clicked() {
+                    self.prefs_open = true;
+                    self.prefs_tab = PrefsTab::Midi;
+                    lanzadera_engine::midi_ctl::request(lanzadera_engine::midi_ctl::MidiRequest::Rescan);
+                    ui.close_menu();
                 }
+                if ui.button("Carpetas de plugins…").clicked() {
+                    self.prefs_open = true;
+                    self.prefs_tab = PrefsTab::Plugins;
+                    ui.close_menu();
+                }
+                ui.separator();
+                ui.add_enabled(false, egui::Button::new("Audio (dispositivo y entradas)…"))
+                    .on_disabled_hover_text("Llega en la Fase 4");
+                ui.add_enabled(false, egui::Button::new("Atajos de teclado (editar)…"))
+                    .on_disabled_hover_text("Llega más adelante");
             });
 
             ui.menu_button("Ayuda", |ui| {
@@ -1977,20 +2053,231 @@ impl SessionView {
     }
 
     // ── Browser de plugins CLAP (Fase 3E) ─────────────────────────────────
-    /// Escanea los plugins del formato activo y guarda su rol (Instrumento / Note FX / FX).
+    /// Escanea los plugins del formato activo en un hilo aparte (cargar bundles puede tardar
+    /// segundos y no debe congelar la interfaz). El resultado se recoge en `poll_scan`.
     fn browser_rescan(&mut self) {
-        let mut kinds = std::collections::HashMap::new();
-        let list: Vec<(String, String, String)> = match self.browser_mode {
-            BrowserMode::Clap => lanzadera_engine::clap_scan_kinds().into_iter()
-                .map(|(r, k)| { kinds.insert((r.0.clone(), r.1.clone()), k); r })
-                .collect(),
-            // VST3: el id de CLAP no aplica; (path, "", nombre).
-            BrowserMode::Vst3 => lanzadera_engine::vst3_scan_kinds().into_iter()
-                .map(|((p, n), k)| { kinds.insert((p.clone(), String::new()), k); (p, String::new(), n) })
-                .collect(),
-        };
-        self.browser_kinds = kinds;
-        self.browser_list = Some(list);
+        if self.scan_rx.is_some() { return; }
+        let mode = self.browser_mode;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.scan_rx = Some(rx);
+        std::thread::spawn(move || {
+            let mut kinds = std::collections::HashMap::new();
+            let list: Vec<(String, String, String)> = match mode {
+                BrowserMode::Clap => lanzadera_engine::clap_scan_kinds().into_iter()
+                    .map(|(r, k)| { kinds.insert((r.0.clone(), r.1.clone()), k); r })
+                    .collect(),
+                // VST3: el id de CLAP no aplica; (path, "", nombre).
+                BrowserMode::Vst3 => lanzadera_engine::vst3_scan_kinds().into_iter()
+                    .map(|((p, n), k)| { kinds.insert((p.clone(), String::new()), k); (p, String::new(), n) })
+                    .collect(),
+            };
+            let _ = tx.send((mode, list, kinds));
+        });
+    }
+
+    fn poll_scan(&mut self) {
+        let Some(rx) = &self.scan_rx else { return };
+        match rx.try_recv() {
+            Ok((mode, list, kinds)) => {
+                self.scan_rx = None;
+                if mode == self.browser_mode {
+                    self.browser_kinds = kinds;
+                    self.browser_list = Some(list);
+                } else {
+                    // Cambió de pestaña mientras escaneaba: se vuelve a escanear la actual.
+                    self.browser_list = None;
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.scan_rx = None;
+                self.browser_list = Some(Vec::new());
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                if let Some(c) = &self.ctx_cache { c.request_repaint_after(std::time::Duration::from_millis(100)); }
+            }
+        }
+    }
+
+    // ── Fase 3: Preferencias ───────────────────────────────────────────────
+    fn spawn_folder_dialog(&mut self, fmt: BrowserMode) {
+        if self.folder_rx.is_some() { return; }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.folder_rx = Some(rx);
+        std::thread::spawn(move || {
+            let res = rfd::FileDialog::new().set_title("Elige la carpeta de plugins").pick_folder();
+            let _ = tx.send((fmt, res));
+        });
+    }
+
+    fn poll_folder_dialog(&mut self) {
+        let Some(rx) = &self.folder_rx else { return };
+        match rx.try_recv() {
+            Ok((fmt, Some(path))) => {
+                self.folder_rx = None;
+                let p = path.to_string_lossy().into_owned();
+                lanzadera_core::config::update(|c| {
+                    let list = if fmt == BrowserMode::Clap { &mut c.clap_paths } else { &mut c.vst3_paths };
+                    if !list.contains(&p) { list.push(p.clone()); }
+                });
+                self.browser_list = None;
+                self.msg = format!("Carpeta de plugins añadida: {}", p);
+            }
+            Ok((_, None)) => { self.folder_rx = None; }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => { self.folder_rx = None; }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    fn prefs_window(&mut self, ctx: &egui::Context) {
+        if !self.prefs_open { return; }
+        let mut open = true;
+        egui::Window::new("Preferencias").open(&mut open).default_size([580.0, 440.0]).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(&mut self.prefs_tab, PrefsTab::Plugins, "Plugins");
+                ui.selectable_value(&mut self.prefs_tab, PrefsTab::Midi, "Controladores MIDI");
+                ui.selectable_value(&mut self.prefs_tab, PrefsTab::Apariencia, "Apariencia");
+            });
+            ui.separator();
+            match self.prefs_tab {
+                PrefsTab::Plugins => self.prefs_plugins(ui),
+                PrefsTab::Midi => self.prefs_midi(ui, ctx),
+                PrefsTab::Apariencia => self.prefs_look(ui, ctx),
+            }
+        });
+        self.prefs_open = open;
+    }
+
+    fn prefs_plugins(&mut self, ui: &mut egui::Ui) {
+        fn dirs_text(v: &[std::path::PathBuf]) -> String {
+            v.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("  ·  ")
+        }
+        let mut cfg = lanzadera_core::config::get();
+        let mut changed = false;
+        changed |= ui.checkbox(&mut cfg.use_default_plugin_paths, "Buscar también en las carpetas estándar del sistema").changed();
+        if cfg.use_default_plugin_paths {
+            ui.label(egui::RichText::new(format!("CLAP: {}", dirs_text(&lanzadera_engine::clap_standard_dirs()))).size(10.0).color(T.text_dim));
+            ui.label(egui::RichText::new(format!("VST3: {}", dirs_text(&lanzadera_engine::vst3_standard_dirs()))).size(10.0).color(T.text_dim));
+        }
+        for (fmt, title) in [(BrowserMode::Clap, "Carpetas CLAP añadidas"), (BrowserMode::Vst3, "Carpetas VST3 añadidas")] {
+            ui.add_space(8.0);
+            ui.label(egui::RichText::new(title).strong());
+            let list = if fmt == BrowserMode::Clap { &mut cfg.clap_paths } else { &mut cfg.vst3_paths };
+            let mut remove: Option<usize> = None;
+            if list.is_empty() {
+                ui.label(egui::RichText::new("(ninguna)").color(T.text_dim));
+            }
+            for (i, p) in list.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    if ui.small_button("✕").on_hover_text("Quitar carpeta").clicked() { remove = Some(i); }
+                    if std::path::Path::new(p).is_dir() {
+                        ui.label(p.as_str());
+                    } else {
+                        ui.label(egui::RichText::new(format!("{} (no existe)", p)).color(egui::Color32::from_rgb(232, 100, 100)));
+                    }
+                });
+            }
+            if let Some(i) = remove { list.remove(i); changed = true; }
+            if ui.button("＋ Añadir carpeta…").clicked() { self.spawn_folder_dialog(fmt); }
+        }
+        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            if ui.button("Restaurar por defecto").on_hover_text("Quita las carpetas añadidas y vuelve a las estándar").clicked() {
+                cfg.use_default_plugin_paths = true;
+                cfg.clap_paths.clear();
+                cfg.vst3_paths.clear();
+                changed = true;
+            }
+            if ui.button("⟳ Re-escanear plugins").clicked() { self.browser_list = None; }
+            if self.scan_rx.is_some() { ui.label("⏳ Escaneando…"); }
+        });
+        if changed {
+            lanzadera_core::config::update(|c| {
+                c.use_default_plugin_paths = cfg.use_default_plugin_paths;
+                c.clap_paths = cfg.clap_paths.clone();
+                c.vst3_paths = cfg.vst3_paths.clone();
+            });
+            self.browser_list = None; // la lista se vuelve a escanear con las carpetas nuevas
+        }
+    }
+
+    fn prefs_midi(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        use lanzadera_engine::midi_ctl::{self, MidiProfile, MidiRequest};
+        // Mientras esta pestaña está abierta se vuelve a listar cada 2 s (enchufar y ver).
+        if self.now - self.midi_last_poll > 2.0 {
+            self.midi_last_poll = self.now;
+            midi_ctl::request(MidiRequest::Rescan);
+        }
+        ctx.request_repaint_after(std::time::Duration::from_secs(2));
+        ui.horizontal(|ui| {
+            if ui.button("🔍 Buscar controladores").clicked() {
+                self.midi_last_poll = self.now;
+                midi_ctl::request(MidiRequest::Rescan);
+            }
+            ui.label(egui::RichText::new("Conecta un teclado o pads y pulsa Buscar").size(10.0).color(T.text_dim));
+        });
+        let st = midi_ctl::status();
+        ui.add_space(6.0);
+        if st.ports.is_empty() {
+            ui.label(egui::RichText::new("No se detectaron puertos MIDI de entrada.").color(T.text_dim));
+        }
+        let auto = lanzadera_core::config::get().midi_auto;
+        for port in &st.ports {
+            let lower = port.to_lowercase();
+            let conn = st.connected.iter().find(|(prof, p)| {
+                p == port || (*prof == MidiProfile::KeyLab && lower.contains("keylab"))
+            }).map(|(prof, _)| *prof);
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(port).strong());
+                match conn {
+                    Some(prof) => {
+                        ui.label(egui::RichText::new(format!("● {}", prof.label())).color(T.accent));
+                        if ui.small_button("Desconectar").clicked() {
+                            midi_ctl::request(MidiRequest::Disconnect { profile: prof, port: port.clone() });
+                        }
+                        let mut is_auto = auto.iter().any(|a| a.profile == prof.id() && &a.port == port);
+                        if ui.checkbox(&mut is_auto, "Conectar al iniciar").changed() {
+                            let (id, pn) = (prof.id().to_string(), port.clone());
+                            lanzadera_core::config::update(|c| {
+                                c.midi_auto.retain(|a| !(a.profile == id && a.port == pn));
+                                if is_auto { c.midi_auto.push(lanzadera_core::config::MidiAuto { profile: id.clone(), port: pn.clone() }); }
+                            });
+                        }
+                    }
+                    None => {
+                        ui.label("Conectar como:");
+                        if ui.small_button("Teclado / controlador").clicked() {
+                            midi_ctl::request(MidiRequest::Connect { profile: MidiProfile::Generic, port: port.clone() });
+                        }
+                        if lower.contains("maschine") && ui.small_button("Maschine Mikro MK3").clicked() {
+                            midi_ctl::request(MidiRequest::Connect { profile: MidiProfile::Mk3, port: port.clone() });
+                        }
+                        if lower.contains("keylab") && ui.small_button("KeyLab Essential 49").clicked() {
+                            midi_ctl::request(MidiRequest::Connect { profile: MidiProfile::KeyLab, port: port.clone() });
+                        }
+                    }
+                }
+            });
+        }
+        if !st.msg.is_empty() {
+            ui.add_space(6.0);
+            ui.label(egui::RichText::new(&st.msg).color(T.accent).size(11.0));
+        }
+    }
+
+    fn prefs_look(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.label(egui::RichText::new("Tamaño de la interfaz").strong());
+        let r = ui.add(egui::Slider::new(&mut self.ui_scale_edit, 0.75..=1.6).step_by(0.05).suffix("×"));
+        if r.drag_stopped() || (r.changed() && !r.dragged()) {
+            ctx.set_zoom_factor(self.ui_scale_edit);
+            let v = self.ui_scale_edit;
+            lanzadera_core::config::update(|c| c.ui_scale = v);
+        }
+        if ui.button("Restablecer (1.0×)").clicked() {
+            self.ui_scale_edit = 1.0;
+            ctx.set_zoom_factor(1.0);
+            lanzadera_core::config::update(|c| c.ui_scale = 1.0);
+        }
+        ui.label(egui::RichText::new("Se aplica al soltar el control y se recuerda al reiniciar.").size(10.0).color(T.text_dim));
     }
 
     fn browser_window(&mut self, ctx: &egui::Context, shared: &SessionShared) {
@@ -2054,6 +2341,7 @@ impl SessionView {
                         });
                     }
                 }
+                if self.browser_list.is_none() { ui.label("⏳ Escaneando plugins…"); }
                 if ui.button("⟳ Re-escanear").clicked() { rescan = true; }
             });
         self.browser_open = open;

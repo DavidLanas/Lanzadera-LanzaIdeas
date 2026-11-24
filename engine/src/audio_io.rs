@@ -84,13 +84,65 @@ pub struct AudioHandle {
     vst3_gui: crate::vst3_slot::Vst3Gui,
     /// FX VST3 vivos (se sueltan en el hilo de teardown junto a los demás).
     #[cfg(feature = "vst3")]
-    fx_vst3_handles: Vec<std::sync::Arc<std::sync::Mutex<vst3_host::plugin::Plugin>>>,
+    fx_vst3_handles: Vec<(usize, std::sync::Arc<std::sync::Mutex<vst3_host::plugin::Plugin>>)>,
+    /// (pista, ranura 0=instrumento 1=Note FX 2=FX, ruta) de cada plugin cargado: sirve para
+    /// saber a qué plugin pertenece el estado que se captura.
+    loaded: Vec<(usize, u8, String)>,
     #[allow(dead_code)] // mantiene vivo el stream de entrada
     in_stream: Option<crate::audio_input::AudioInputStream>,
 }
 
 #[cfg(feature = "clap")]
 impl AudioHandle {
+    /// Pide a cada plugin su estado y lo guarda (base64) en la sesión viva, para que el
+    /// proyecto lo incluya y sobreviva a un reinicio del audio. Hilo principal.
+    /// Solo se guarda el estado de plugins cuya ruta sigue siendo la de la pista.
+    pub fn capture_plugin_states(&mut self, shared: &SessionShared) {
+        // (pista, ranura 0=instrumento 1=Note FX 2=FX, estado en base64)
+        let mut got: Vec<(usize, u8, String)> = Vec::new();
+        #[cfg(feature = "clap")]
+        {
+            for (t, inst) in self.instances.iter_mut() {
+                if let Some(b) = clap_host::save_state(inst) {
+                    got.push((*t, 0, lanzadera_core::b64::encode(&b)));
+                }
+            }
+            for (id, inst) in self.fx_instances.iter_mut() {
+                let (t, slot) = if *id >= 2 * MAX_TRACKS { (*id - 2 * MAX_TRACKS, 2u8) } else { (*id - MAX_TRACKS, 1u8) };
+                if let Some(b) = clap_host::save_state(inst) {
+                    got.push((t, slot, lanzadera_core::b64::encode(&b)));
+                }
+            }
+        }
+        #[cfg(feature = "vst3")]
+        {
+            for (t, h) in self.vst3_handles.iter() {
+                if let Ok(pl) = h.lock() {
+                    if let Ok(b) = pl.save_state() { got.push((*t, 0, lanzadera_core::b64::encode(&b))); }
+                }
+            }
+            for (t, h) in self.fx_vst3_handles.iter() {
+                if let Ok(pl) = h.lock() {
+                    if let Ok(b) = pl.save_state() { got.push((*t, 2, lanzadera_core::b64::encode(&b))); }
+                }
+            }
+        }
+        if got.is_empty() { return; }
+        let loaded = self.loaded.clone();
+        shared.edit(|st| {
+            for (t, slot, b) in got {
+                let Some(tr) = st.tracks.get_mut(t) else { continue };
+                let cur = match slot { 0 => tr.plugin_path.clone(), 1 => tr.note_fx_path.clone(), _ => tr.fx_path.clone() };
+                if !loaded.iter().any(|(lt, ls, lp)| *lt == t && *ls == slot && Some(lp) == cur.as_ref()) { continue; }
+                match slot {
+                    0 => tr.plugin_state = Some(b),
+                    1 => tr.note_fx_state = Some(b),
+                    _ => tr.fx_state = Some(b),
+                }
+            }
+        });
+    }
+
     /// Atiende la peticion de abrir/cerrar la interfaz de un plugin (CLAP o
     /// VST3) y mantiene vivas las GUI abiertas. Se llama CADA frame desde el
     /// hilo principal (App::update), nunca desde RT.
@@ -1196,6 +1248,8 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
         buffer_size,
     };
 
+    let mut loaded: Vec<(usize, u8, String)> = Vec::new();
+
     // Estado de GUI limpio en cada (re)arranque: si se quito un plugin, su
     // boton "Interfaz" no debe quedar activo.
     #[cfg(feature = "clap")]
@@ -1209,13 +1263,13 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
         let mut plugins: [Option<Processor>; MAX_TRACKS] = std::array::from_fn(|_| None);
         let mut instances = Vec::new();
         let (tx, rx) = std::sync::mpsc::channel();
-        let plugs: Vec<(usize, String, Option<String>)> = {
+        let plugs: Vec<(usize, String, Option<String>, Option<String>)> = {
             let st = shared.state.lock().unwrap();
             st.tracks.iter().enumerate()
-                .filter_map(|(i, tr)| tr.plugin_path.clone().map(|p| (i, p, tr.plugin_id.clone())))
+                .filter_map(|(i, tr)| tr.plugin_path.clone().map(|p| (i, p, tr.plugin_id.clone(), tr.plugin_state.clone())))
                 .collect()
         };
-        for (t, path, id) in plugs {
+        for (t, path, id, state) in plugs {
             if path.ends_with(".vst3") { continue; } // lo carga el bloque VST3
             match clap_host::load(&path, id.as_deref(), sample_rate, MAX_BLOCK as u32, t) {
                 Ok((mut inst, proc, name, params)) => {
@@ -1238,6 +1292,13 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
 
                     plugins[t] = Some(proc);
                     crate::clap_gui::probe(&mut inst, t);
+                    // Estado guardado en el proyecto (parámetros, preset interno…).
+                    if let Some(bytes) = state.as_deref().and_then(lanzadera_core::b64::decode) {
+                        if clap_host::load_state(&mut inst, &bytes) {
+                            println!("[lanzadera] estado restaurado en pista {}", t + 1);
+                        }
+                    }
+                    loaded.push((t, 0, path.clone()));
                     instances.push((t, inst));
                 }
                 Err(e) => {
@@ -1257,15 +1318,15 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
     let mut vst3_handles = Vec::new();
     #[cfg(feature = "vst3")]
     {
-        let plugs: Vec<(usize, String)> = {
+        let plugs: Vec<(usize, String, Option<String>)> = {
             let st = shared.state.lock().unwrap();
             st.tracks.iter().enumerate()
                 .filter_map(|(i, tr)| tr.plugin_path.as_ref()
                     .filter(|p| p.trim_end_matches('/').ends_with(".vst3"))
-                    .map(|p| (i, p.clone())))
+                    .map(|p| (i, p.clone(), tr.plugin_state.clone())))
                 .collect()
         };
-        for (t, path) in plugs {
+        for (t, path, state) in plugs {
             match vst3_slot::load(&path, sample_rate, MAX_BLOCK as u32) {
                 Ok(slot) => {
                     println!(
@@ -1291,6 +1352,10 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
                     crate::clap_gui::set_avail(t, slot.has_editor);
                     crate::clap_gui::set_open(t, false);
                     vst3_handles.push((t, slot.plugin.clone()));
+                    if let Some(bytes) = state.as_deref().and_then(lanzadera_core::b64::decode) {
+                        if let Ok(mut pl) = slot.plugin.lock() { let _ = pl.load_state(&bytes); }
+                    }
+                    loaded.push((t, 0, path.clone()));
                     vst3_plugins[t] = Some(slot);
                 }
                 Err(e) => {
@@ -1315,21 +1380,21 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
     #[cfg(feature = "vst3")]
     let mut fx_vst3: [Option<vst3_slot::Vst3Slot>; MAX_TRACKS] = std::array::from_fn(|_| None);
     #[cfg(feature = "vst3")]
-    let mut fx_vst3_handles: Vec<std::sync::Arc<Mutex<vst3_host::plugin::Plugin>>> = Vec::new();
+    let mut fx_vst3_handles: Vec<(usize, std::sync::Arc<Mutex<vst3_host::plugin::Plugin>>)> = Vec::new();
     {
-        type Slot = Option<(String, Option<String>)>;
+        type Slot = Option<(String, Option<String>, Option<String>)>;
         let slots: Vec<(usize, Slot, Slot, bool)> = {
             let st = shared.state.lock().unwrap();
             st.tracks.iter().enumerate().take(MAX_TRACKS).map(|(i, tr)| (
                 i,
-                tr.note_fx_path.clone().map(|p| (p, tr.note_fx_id.clone())),
-                tr.fx_path.clone().map(|p| (p, tr.fx_id.clone())),
+                tr.note_fx_path.clone().map(|p| (p, tr.note_fx_id.clone(), tr.note_fx_state.clone())),
+                tr.fx_path.clone().map(|p| (p, tr.fx_id.clone(), tr.fx_state.clone())),
                 tr.plugin_path.is_some(),
             )).collect()
         };
         for (t, nfx, fx, has_instr) in slots {
-            if let Some((path, id)) = nfx {
-                let _ = &id;
+            if let Some((path, id, state)) = nfx {
+                let _ = (&id, &state);
                 if !has_instr {
                     crate::clap_gui::notify(format!("⚠ Note FX pista {}: la pista no tiene instrumento plugin; no se aplica", t + 1));
                 } else if path.trim_end_matches('/').ends_with(".vst3") {
@@ -1337,8 +1402,12 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
                 } else {
                     #[cfg(feature = "clap")]
                     match clap_host::load(&path, id.as_deref(), sample_rate, MAX_BLOCK as u32, MAX_TRACKS + t) {
-                        Ok((inst, proc, name, _params)) => {
+                        Ok((mut inst, proc, name, _params)) => {
                             println!("[lanzadera] Note FX pista {}: {}", t + 1, name);
+                            if let Some(bytes) = state.as_deref().and_then(lanzadera_core::b64::decode) {
+                                let _ = clap_host::load_state(&mut inst, &bytes);
+                            }
+                            loaded.push((t, 1, path.clone()));
                             note_fx[t] = Some(proc);
                             fx_instances.push((MAX_TRACKS + t, inst));
                         }
@@ -1346,8 +1415,8 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
                     }
                 }
             }
-            if let Some((path, id)) = fx {
-                let _ = &id;
+            if let Some((path, id, state)) = fx {
+                let _ = (&id, &state);
                 if path.trim_end_matches('/').ends_with(".vst3") {
                     #[cfg(feature = "vst3")]
                     match vst3_slot::load(&path, sample_rate, MAX_BLOCK as u32) {
@@ -1356,7 +1425,11 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
                                 crate::clap_gui::notify(format!("⚠ FX pista {}: «{}» es un instrumento, no un efecto", t + 1, slot.name));
                             } else {
                                 println!("[lanzadera] FX VST3 pista {}: {}", t + 1, slot.name);
-                                fx_vst3_handles.push(slot.plugin.clone());
+                                if let Some(bytes) = state.as_deref().and_then(lanzadera_core::b64::decode) {
+                                    if let Ok(mut pl) = slot.plugin.lock() { let _ = pl.load_state(&bytes); }
+                                }
+                                loaded.push((t, 2, path.clone()));
+                                fx_vst3_handles.push((t, slot.plugin.clone()));
                                 fx_vst3[t] = Some(slot);
                             }
                         }
@@ -1365,8 +1438,12 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
                 } else {
                     #[cfg(feature = "clap")]
                     match clap_host::load(&path, id.as_deref(), sample_rate, MAX_BLOCK as u32, 2 * MAX_TRACKS + t) {
-                        Ok((inst, proc, name, _params)) => {
+                        Ok((mut inst, proc, name, _params)) => {
                             println!("[lanzadera] FX CLAP pista {}: {}", t + 1, name);
+                            if let Some(bytes) = state.as_deref().and_then(lanzadera_core::b64::decode) {
+                                let _ = clap_host::load_state(&mut inst, &bytes);
+                            }
+                            loaded.push((t, 2, path.clone()));
                             fx_clap[t] = Some(proc);
                             fx_instances.push((2 * MAX_TRACKS + t, inst));
                         }
@@ -1511,6 +1588,7 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
         instances,
         #[cfg(feature = "clap")]
         fx_instances,
+        loaded,
         #[cfg(feature = "clap")]
         retire_rx,
         #[cfg(feature = "clap")]

@@ -73,7 +73,10 @@ impl HostPosixFdImpl for LanzaderaMainThread {
 }
 
 impl HostStateImpl for LanzaderaMainThread {
-    fn mark_dirty(&self) { crate::clap_services::mark_dirty(self.track); }
+    fn mark_dirty(&self) {
+        crate::clap_services::mark_dirty(self.track);
+        crate::state_ctl::mark_plugin_dirty();
+    }
 }
 
 pub struct LanzaderaHost;
@@ -139,6 +142,20 @@ fn default_dirs() -> Vec<std::path::PathBuf> {
     v
 }
 
+/// Carpetas estándar de CLAP (para mostrarlas en Preferencias).
+pub fn standard_dirs() -> Vec<std::path::PathBuf> { default_dirs() }
+
+/// Carpetas donde se buscan plugins CLAP: las estándar (si no se desactivan) más las del usuario.
+pub fn scan_dirs() -> Vec<std::path::PathBuf> {
+    let c = lanzadera_core::config::get();
+    let mut v = if c.use_default_plugin_paths { default_dirs() } else { Vec::new() };
+    for p in &c.clap_paths {
+        let pb = std::path::PathBuf::from(p);
+        if !v.contains(&pb) { v.push(pb); }
+    }
+    v
+}
+
 fn walk_clap(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>, depth: usize) {
     if depth > 4 { return; }
     let Ok(rd) = std::fs::read_dir(dir) else { return };
@@ -160,7 +177,7 @@ pub fn scan() -> Vec<ClapRef> {
 pub fn scan_kinds() -> Vec<(ClapRef, lanzadera_core::PluginKind)> {
     use lanzadera_core::PluginKind;
     let mut files = Vec::new();
-    for d in default_dirs() { walk_clap(&d, &mut files, 0); }
+    for d in scan_dirs() { walk_clap(&d, &mut files, 0); }
     let mut out = Vec::new();
     for f in files.into_iter().take(64) {
         let Some(path) = f.to_str().map(|s| s.to_string()) else { continue };
@@ -285,4 +302,23 @@ fn describe_params(instance: &mut Instance) -> Vec<PluginParamInfo> {
     }
 
     out
+}
+
+/// Pide al plugin su estado (extensión CLAP `state`). Hilo principal.
+pub fn save_state(inst: &mut Instance) -> Option<Vec<u8>> {
+    use clack_extensions::state::PluginState;
+    let main = inst.plugin_handle();
+    let st = main.get_extension::<PluginState>()?;
+    let mut buf: Vec<u8> = Vec::new();
+    st.save(&main, &mut buf).ok()?;
+    Some(buf)
+}
+
+/// Restaura un estado guardado con `save_state`. Hilo principal. true si el plugin lo aceptó.
+pub fn load_state(inst: &mut Instance, bytes: &[u8]) -> bool {
+    use clack_extensions::state::PluginState;
+    let main = inst.plugin_handle();
+    let Some(st) = main.get_extension::<PluginState>() else { return false };
+    let mut reader = bytes;
+    st.load(&main, &mut reader).is_ok()
 }

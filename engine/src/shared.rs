@@ -741,6 +741,10 @@ impl SessionShared {
             for slot in tr.clips.iter_mut() {
                 if let Some(c) = slot { c.state = ClipState::Empty; }
             }
+            // El estado de los plugins se captura a destiempo: no cuenta como edición.
+            tr.plugin_state = None;
+            tr.note_fx_state = None;
+            tr.fx_state = None;
         }
         let mut h = std::collections::hash_map::DefaultHasher::new();
         s.to_json().hash(&mut h);
