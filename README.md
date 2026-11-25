@@ -1,6 +1,6 @@
 # Lanzadera
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[[![License: AGPL-3.0-or-later](https://img.shields.io/badge/License-AGPL--3.0--or--later-blue.svg)](https://opensource.org/licenses/AGPL-3.0)
 [![Rust](https://img.shields.io/badge/Made%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![Platform](https://img.shields.io/badge/Platform-Linux-lightgrey.svg)](#)
 [![GitHub stars](https://img.shields.io/github/stars/DavidLanas/Lanzadera-LanzaIdeas?style=social)](https://github.com/DavidLanas/Lanzadera-LanzaIdeas)
