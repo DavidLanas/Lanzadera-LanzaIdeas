@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! SessionShared — equivalente a KitShared de Caja.
 //! Fase 3: además de muestras, almacén de notas MIDI por slot (mismo patrón
 //! ArcSwapOption: el audio lee con load_full, lock-free y sin alloc).
@@ -76,6 +78,8 @@ pub struct SessionShared {
     pub caja_store: Arc<CajaStore>,
     /// Groove Machine visible → MK3 cambia de comportamiento
     pub groove_machine_visible: AtomicBool,
+    /// Canales del dispositivo de entrada abierto (0 = sin entrada). Lo publica el audio.
+    pub input_channels: AtomicU8,
     /// 0=Pad 1=Step 2=Mixer 3=Browser (sincronizado desde UI)
     pub groove_sub_mode: AtomicU8,
     /// Vista del groove persistida en la sesión: 0=Piano Roll, 1=Rack.
@@ -180,6 +184,7 @@ impl SessionShared {
             groove: groove_model,
             kit: groove_kit,
             groove_machine_visible: AtomicBool::new(false),
+            input_channels: AtomicU8::new(0),
             groove_sub_mode: AtomicU8::new(0),
             groove_view: AtomicU8::new(0),
             groove_bar: AtomicUsize::new(0),

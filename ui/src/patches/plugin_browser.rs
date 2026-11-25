@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Browser de plugins con búsqueda fuzzy, pestañas y escaneo en hilo aparte.
 use egui::{Key, Ui};
 use serde::{Deserialize, Serialize};

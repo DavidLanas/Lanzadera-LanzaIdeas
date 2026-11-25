@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! lanzadera-ui — widgets egui del launcher (Fase 3A).
 pub mod theme;
 pub mod widgets;
@@ -12,3 +14,4 @@ pub mod plugin_window;
 
 // ── Patches Lanzadera ──
 pub mod patches;
+pub mod waveform;

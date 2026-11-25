@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Peticiones y estado de los controladores MIDI entre la UI (Preferencias) y el hilo
 //! principal de la app, que es quien posee las conexiones.
 use std::sync::{Mutex, OnceLock};

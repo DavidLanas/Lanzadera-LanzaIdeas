@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 use egui::Color32;
 use lanzadera_core::session::SessionState;
 use lanzadera_core::track::Track;
@@ -73,8 +75,21 @@ fn quantize_to_bars(q: &Quantize) -> u8 {
     }
 }
 
-fn generate_peaks(_notes: &[MidiNote]) -> Vec<f32> {
-    Vec::new()
+fn generate_peaks(notes: &[MidiNote]) -> Vec<f32> {
+    if notes.is_empty() { return Vec::new(); }
+    const BUCKETS: usize = 64;
+    let end = notes.iter()
+        .map(|n| n.tick_start + n.tick_dur.max(1))
+        .max().unwrap_or(1).max(1) as u64;
+    let mut out = vec![0.0f32; BUCKETS];
+    for n in notes {
+        let a = (n.tick_start as u64 * BUCKETS as u64 / end) as usize;
+        let b = (((n.tick_start + n.tick_dur.max(1)) as u64 * BUCKETS as u64 / end) as usize)
+            .max(a + 1).min(BUCKETS);
+        let v = n.vel as f32 / 127.0;
+        for k in a..b { if v > out[k] { out[k] = v; } }
+    }
+    out
 }
 
 fn compute_scene_count(tracks: &[TrackSnapshot]) -> usize {

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! GrooveKit — configuración y estado en vivo de las 25 celdas del drum kit.
 //!
 //! Equivalente al `Kit` de Caja. Separa claramente:

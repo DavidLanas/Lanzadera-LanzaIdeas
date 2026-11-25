@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! SessionView — layout principal de Fase 2 (spec §9.1):
 //! TOP BAR / SESSION VIEW (grid) / MIXER (strips Vibez) / INSPECTOR derecho.
 //! Regla de oro: NUNCA llamar a shared.edit/apply_control con el Mutex de
@@ -1306,6 +1308,15 @@ impl SessionView {
             }
         }
 
+        // C2b: picos REALES del audio (el snapshot no ve el SampleStore).
+        for (ti, tr) in snapshot.tracks.iter_mut().enumerate() {
+            for (si, slot) in tr.clips.iter_mut().enumerate() {
+                let Some(c) = slot.as_mut() else { continue };
+                if let Some(sd) = shared.samples.load(ti, si) {
+                    if !sd.peaks.is_empty() { c.peaks = sd.peaks.clone(); }
+                }
+            }
+        }
         let mut actions = crate::patches::clip_grid::ClipGridActions::default();
         crate::patches::clip_grid::render_session_matrix(ui, &snapshot, &mut actions);
 
@@ -1776,6 +1787,27 @@ impl SessionView {
                     {
                         shared.edit(|st| { if let Some(tr) = st.tracks.get_mut(t) { tr.mono = !tr.mono; } });
                     }
+                // Canal de entrada que alimenta esta pista (Entrada 1, 2, ...).
+                let n_in = shared.input_channels.load(std::sync::atomic::Ordering::Relaxed) as usize;
+                if n_in > 1 {
+                    let cur_ch = shared.state.lock().unwrap().tracks.get(t)
+                        .map(|tr| tr.input_channel).unwrap_or(0) as usize;
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("CH").size(9.0).color(T.text_dim));
+                        egui::ComboBox::from_id_source(format!("in_ch_{}", t))
+                            .width(46.0)
+                            .selected_text(egui::RichText::new(format!("{}", cur_ch + 1)).size(9.0))
+                            .show_ui(ui, |ui| {
+                                for c in 0..n_in {
+                                    if ui.selectable_label(cur_ch == c, format!("Entrada {}", c + 1)).clicked() {
+                                        shared.edit(|st| {
+                                            if let Some(tr) = st.tracks.get_mut(t) { tr.input_channel = c as u8; }
+                                        });
+                                    }
+                                }
+                            });
+                    });
+                }
                     // Entrada de audio (preparar pista para loops analógicos)
                     ui.add_space(2.0);
                     ui.label(egui::RichText::new("IN").size(9.0).color(T.text_dim));
@@ -1890,6 +1922,28 @@ impl SessionView {
                     });
                     changed |= ui.add(egui::Slider::new(&mut c.probability, 0.0..=1.0).text("Probabilidad")).changed();
                     ui.separator();
+                // C2: vista de ondas del clip (picos del loader + playhead).
+                if c.audio_path.is_some() {
+                    if let Some(sd) = shared.samples.load(t, s) {
+                        let lt = (c.loop_bars.max(1) as u32 * TICKS_PER_BAR as u32).max(1);
+                        let head = if shared.rt.active_scene(t) == Some(s as u8) {
+                            Some((shared.rt.playhead(t) as f32 / lt as f32).clamp(0.0, 1.0))
+                        } else { None };
+                        let ch = sd.channels.max(1) as usize;
+                        let frames = sd.data.len() / ch;
+                        let secs = frames as f32 / sd.sample_rate.max(1) as f32;
+                        let pmax = sd.peaks.iter().fold(0.0f32, |a, &b| a.max(b));
+                        let fallback;
+                        let peaks: &[f32] = if pmax > 0.0 { &sd.peaks } else {
+                            fallback = crate::waveform::overview_from_samples(&sd.data, ch, 256);
+                            &fallback
+                        };
+                        crate::waveform::view(ui, peaks, 72.0, head);
+                        ui.label(egui::RichText::new(format!(
+                            "{:.2} s · {} ch · {} muestras · pico {:.2}",
+                            secs, ch, frames, pmax)).size(9.0).color(T.text_dim));
+                    }
+                }
                     if let Some(p) = &c.audio_path {
                         ui.label(egui::RichText::new(format!("🎵 {}", trunc(p, 26))).size(10.0).color(T.text_dim));
                     }
@@ -2334,7 +2388,7 @@ impl SessionView {
             lanzadera_core::config::update(|c| c.rec_latency_ms = if auto { None } else { Some(ms) });
         }
         ui.add_space(8.0);
-        ui.label(egui::RichText::new("Las entradas por canal (Entrada 1 / Entrada 2) llegan en la Fase 4.")
+        ui.label(egui::RichText::new("Cada pista elige su canal de entrada (CH) en el mixer. El monitoreo suena solo con la pista armada (R).")
             .size(10.0).color(T.text_dim));
     }
 

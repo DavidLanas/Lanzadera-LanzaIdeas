@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Pista del launcher: clips + canal de mezcla (estilo consola Vibez).
 use serde::{Deserialize, Serialize};
 use crate::{Clip, MAX_SCENES};
@@ -86,6 +88,9 @@ pub struct Track {
     /// Suma L+R en ambos lados (para una entrada mono grabada en un solo canal).
     #[serde(default)]
     pub mono: bool,
+    /// Canal de entrada (0-based) que alimenta esta pista: 0 = Entrada 1.
+    #[serde(default)]
+    pub input_channel: u8,
 }
 
 fn def_hpf_hz() -> f32 { 20.0 }
@@ -127,6 +132,7 @@ impl Default for Track {
             note_fx_state: None,
             fx_state: None,
             mono: false,
+            input_channel: 0,
         }
     }
 }

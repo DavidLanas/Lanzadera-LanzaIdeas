@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Hosting de plugins VST3 (Fase 7) usando vst3-host 0.11 (MIT).
 //!
 //! # Atribución

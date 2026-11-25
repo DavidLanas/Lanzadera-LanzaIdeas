@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Estado compartido del kit de Caja: la configuración de los 16 pads
 //! que el motor necesita para decidir qué muestra tocar en cada golpe.
 //! Vive en el SessionShared y se publica al audio vía el snapshot.

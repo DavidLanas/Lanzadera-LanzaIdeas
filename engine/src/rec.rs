@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Grabación MIDI (Fase 3D): el hilo de audio captura las notas en vivo con
 //! su posición exacta en ticks dentro del loop y las publica por este anillo
 //! lock-free. La UI las drena y las añade al clip (overdub).

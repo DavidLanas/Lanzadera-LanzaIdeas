@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Runtime del Maschine Mikro MK3 para Lanzadera — port de caja/plugin/src/midi/mk3.rs.
 //! CCs y PAD_NOTES idénticos a Caja; los comandos ahora son ControlCmd del launcher.
 //! Fase 1: solo parsing. Los LEDs (Mk3Out) se cablean al puerto de salida en Fase 2.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! SessionState — estado completo de la sesión + reductor de ControlCmd.
 //! El hilo de UI aplica comandos aquí; el ClipEngine del audio es la autoridad
 //! de timing en tiempo real (Fase 2 reconcilia vía resync).

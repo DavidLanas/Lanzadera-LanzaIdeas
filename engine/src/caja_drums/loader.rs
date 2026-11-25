@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Cargador de samples en background. Usa symphonia para decodificar
 //! WAV/FLAC/OGG/MP3 sin bloquear el audio.
 //!

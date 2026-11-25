@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Lectura de archivos MIDI (.mid) a notas de clip (Fase G2).
 //!
 //! Todo ocurre en el hilo del loader, NUNCA en el callback de audio.

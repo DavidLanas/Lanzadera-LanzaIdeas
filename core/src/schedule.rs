@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Triple buffer sin bloqueos — port textual de caja/core/src/schedule.rs
 //! (sin el Schedule de golpes, que es específico de Caja).
 //! Un productor a la vez (serializado por un Mutex SOLO en su lado) y UN

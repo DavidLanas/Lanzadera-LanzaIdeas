@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Curva de EQ estilo ProQ3 simplificado: 3 bandas arrastrables sobre una
 //! respuesta en frecuencia logarítmica (20 Hz – 20 kHz).
 //!

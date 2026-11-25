@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Arturia KeyLab Essential 49 — parsing nativo (port del script de Bitwig v7.2).
 //! Dos puertos físicos: DAW (transporte/knobs/faders) y MIDI 1 (pads, canal 10).
 //! Los knobs relativos mantienen una "sombra" local del valor (Fase 2: resync

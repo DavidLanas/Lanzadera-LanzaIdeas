@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Muestra decodificada estéreo. Versión mínima del plugin/src/sample.rs
 //! sin dependencias de nih-plug (solo Arc<[f32]>).
 

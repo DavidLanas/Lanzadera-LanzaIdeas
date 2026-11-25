@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! RtStore — feedback del hilo de audio hacia la GUI y los LEDs, solo atomics
 //! (mismo patrón que store.rs de Caja: AtomicU32 con bits de f32 para picos).
 //! El audio ESCRIBE, la GUI/LEDs LEEN. Nunca hay locks aquí.

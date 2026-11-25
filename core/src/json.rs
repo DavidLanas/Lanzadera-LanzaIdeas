@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Serialización JSON del estado (patrón de persist de Caja).
 //! El archivo de proyecto .lanzadera es este JSON, con `format_version`.
 use crate::session::{SessionState, FORMAT_VERSION};

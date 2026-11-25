@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! lanzadera — standalone de escritorio (Fase 2: GUI egui + audio real).
 //! Uso:
 //!   cargo run -p lanzadera                 → GUI + audio (ALSA/PipeWire)

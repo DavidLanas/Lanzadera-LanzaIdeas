@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Escena = fila del launcher (lanza todos los clips de la columna).
 use serde::{Deserialize, Serialize};
 

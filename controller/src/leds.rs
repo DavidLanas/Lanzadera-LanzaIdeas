@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Feedback de LEDs del MK3 — protocolo del script Bitwig v4.8.
 //!
 //! Los 41 botones (CC 20..60) van a DIM=42 en reposo, ON=127 si su función

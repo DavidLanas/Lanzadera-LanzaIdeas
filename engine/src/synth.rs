@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Sinte interno de referencia (Fase 3A): polifónico, saw+sub, ADSR y un
 //! lowpass de un polo por voz. Existe para que los clips MIDI suenen sin
 //! plugins; en Fase 3B el host CLAP se suma por pista y esto queda de fallback.

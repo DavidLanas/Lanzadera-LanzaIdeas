@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Tokens de color — estética DAW oscura para Lanzadera (clip launcher live).
 //! Inspiración: consolas analógicas + Lemon Studio / Bitwig-like dark panels.
 //! Paleta: charcoal / near-black, cream foreground, amber, phosphor green, vintage gold.

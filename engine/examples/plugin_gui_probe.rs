@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Prueba SIN audio de la carga + ventana de un plugin (VST3 o CLAP).
 //!
 //!   cargo run -p lanzadera-engine --features clap,vst3 --example plugin_gui_probe -- /ruta/Plugin.vst3

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Cola SPSC sin bloqueos de `u32` — port textual de caja/core/src/spsc.rs.
 //! CAP sube de 64 a 256 para absorber ráfagas de faders/encoders del controlador.
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};

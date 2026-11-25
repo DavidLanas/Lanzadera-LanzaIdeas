@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! lanzadera-controller — adaptadores MIDI nativos (midir).
 //! Los puentes viven en el hilo de controlador: aquí SÍ se puede usar Mutex.
 //! El hilo de audio jamás toca nada de este crate.

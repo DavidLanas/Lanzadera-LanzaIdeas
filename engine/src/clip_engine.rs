@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! ClipEngine — scheduling quantizado del launcher en el hilo de audio.
 //! Sin locks, sin reservas, sin I/O. Los datos llegan por &SessionAudio
 //! (TripleBuffer) y por el Spsc<u32> (ControlCmd codificados). Los eventos de

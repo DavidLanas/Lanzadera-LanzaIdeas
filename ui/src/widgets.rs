@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Widgets custom estilo consola Vibez: knob con arco, fader vertical con
 //! meter LED al lado. Todo con Painter (canvas), sin imágenes.
 use egui::{pos2, vec2, Align2, Color32, FontId, Rect, Rounding, Sense, Stroke};

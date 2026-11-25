@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Fase F5a: tabla de parametros CLAP para control desde UI/controlador.
 //!
 //! El hilo de audio no puede hacer locks ni asignaciones. Guardamos en tablas

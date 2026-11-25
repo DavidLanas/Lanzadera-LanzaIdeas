@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 use egui::Color32;
 pub const GRID_LINE: Color32 = Color32::from_rgb(40, 40, 40);
 pub const TRACK_HEADER_BG: Color32 = Color32::from_rgb(25, 25, 25);

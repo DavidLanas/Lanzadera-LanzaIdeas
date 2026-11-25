@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Audio I/O con cpal (Fase 3B). Render por bloques:
 //!   1) frame a frame: ClipEngine (sample-accurate) + notas MIDI + archivo + sinte
 //!   2) por pista con plugin CLAP: process() del bloque con eventos time-stamped
@@ -334,6 +336,7 @@ struct Renderer {
     audio_in_cons: Option<ringbuf::HeapCons<f32>>,
     audio_in_ch: u16,
     audio_in_scratch: Vec<f32>,
+    rec_mono: Vec<f32>,
     /// Envelope residual del click del metrónomo (decay por sample).
     metro_env: f32,
     metro_freq: f32,
@@ -1163,31 +1166,36 @@ impl Renderer {
                 for i in read..needed {
                     self.audio_in_scratch[i] = 0.0;
                 }
-                // Mezclar: primer canal de input → todos los canales de output.
+                // Monitoreo por pista ARMADA y por su canal de entrada.
+                let _ = any_playing;
                 let out_ch = self.channels as usize;
-                let gain = if audio.recording {
-                    0.35
-                } else if any_playing {
-                    0.0
-                } else {
-                    0.8
-                };
-                for f in 0..frames {
-                    let in_sample = self.audio_in_scratch[f * in_ch] * gain;
-                    for c in 0..out_ch {
-                        let idx = f * out_ch + c;
-                        if idx < out.len() {
-                            out[idx] += in_sample;
+                let mon_gain = 0.8f32;
+                for t in 0..n {
+                    let ta = &audio.tracks[t];
+                    if !ta.arm { continue; }
+                    let (gl, gr, audible) = self.gains[t];
+                    if !audible { continue; }
+                    // Si su clip ya suena, se oye el clip (no el instrumento en vivo).
+                    if self.engine.active(t).is_some() { continue; }
+                    let ch_t = (ta.input_ch as usize).min(in_ch - 1);
+                    let mut pk = 0.0f32;
+                    for f in 0..frames {
+                        let s = self.audio_in_scratch[f * in_ch + ch_t] * mon_gain;
+                        let l = s * gl * audio.master_volume;
+                        let r = s * gr * audio.master_volume;
+                        let base = f * out_ch;
+                        if out_ch == 1 {
+                            if base < out.len() { out[base] += (l + r) * 0.5; }
+                        } else if base + 1 < out.len() {
+                            out[base] += l;
+                            out[base + 1] += r;
                         }
+                        let a = s.abs() * gl.max(gr);
+                        if a > pk { pk = a; }
                     }
+                    if pk > self.peaks[t] { self.peaks[t] = pk; }
                 }
-                // Actualizar peaks del master con el input.
-                for i in 0..needed {
-                    let a = self.audio_in_scratch[i].abs();
-                    if a > self.peaks[MAX_TRACKS] {
-                        self.peaks[MAX_TRACKS] = a;
-                    }
-                }
+                // El pico del input ya se contabiliza por pista en el monitoreo.
             }
         }
 
@@ -1198,7 +1206,7 @@ impl Renderer {
             let rs = audio.rec_scene as usize;
             self.rec_audio_slot = Some((rt, rs));
             self.record_engine
-                .start_recording(rt, rs, self.audio_in_ch, self.sample_rate);
+                .start_recording(rt, rs, 1, self.sample_rate);
             println!("[record] inicio: pista {} escena {}", rt + 1, rs + 1);
         } else if !self.rec_on && self.was_recording {
             // La toma se cierra en el clip donde EMPEZÓ, aunque el cursor se haya movido.
@@ -1223,9 +1231,14 @@ impl Renderer {
 
         // Escribir muestras en todos los slots activos.
         if self.record_engine.is_any_recording() {
-            let in_valid = (frames * self.audio_in_ch as usize).min(self.audio_in_scratch.len());
-            if in_valid > 0 {
-                self.record_engine.write(&self.audio_in_scratch[..in_valid]);
+            // Se graba SOLO el canal de entrada de la pista que graba (clip mono).
+            let in_ch = self.audio_in_ch as usize;
+            if in_ch > 0 && self.audio_in_scratch.len() >= frames * in_ch {
+                let rt = self.rec_clip.map(|(t, _)| t).unwrap_or(audio.rec_track as usize);
+                let ch_t = (audio.tracks[rt.min(n.saturating_sub(1))].input_ch as usize).min(in_ch - 1);
+                if self.rec_mono.len() != frames { self.rec_mono.resize(frames, 0.0); }
+                for f in 0..frames { self.rec_mono[f] = self.audio_in_scratch[f * in_ch + ch_t]; }
+                self.record_engine.write(&self.rec_mono[..frames]);
             }
         }
     }
@@ -1553,6 +1566,7 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
         }
     };
     let (audio_in_stream, audio_in_cons, audio_in_ch) = audio_in;
+    shared.input_channels.store(audio_in_ch.min(255) as u8, std::sync::atomic::Ordering::Relaxed);
 
     let mut renderer = Renderer {
         engine: ClipEngine::new(sample_rate as f64),
@@ -1623,6 +1637,7 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
         audio_in_cons,
         audio_in_ch,
         audio_in_scratch: Vec::with_capacity(MAX_BLOCK * (audio_in_ch.max(2) as usize)),
+        rec_mono: Vec::with_capacity(MAX_BLOCK),
         metro_env: 0.0,
         metro_freq: 1000.0,
         metro_phase: 0.0,

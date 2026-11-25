@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Coordinación UI ↔ hilo principal para el estado de los plugins.
 //! Las instancias de plugin viven en `AudioHandle`, que posee el hilo principal de la
 //! app; la UI (que guarda proyectos) solo puede pedir la captura y esperar a que se haga.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Host CLAP sobre clack-host 0.2 + servicios de main-thread (paso 1).
 
 use std::collections::HashMap;

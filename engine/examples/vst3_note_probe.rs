@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Comprueba que las notas llegan a un instrumento VST3 por `vst3_slot::process`
 //! (el camino que usa el callback de audio) y que sale audio.
 //!   cargo run -p lanzadera-engine --features vst3 --example vst3_note_probe -- /ruta/Synth.vst3

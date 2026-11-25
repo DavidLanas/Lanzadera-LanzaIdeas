@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! ControlCmd — comando unificado de cualquier controlador, empaquetado en u32
 //! para viajar por el Spsc (mismo patrón que Mk3Cmd → u32 de Caja).
 //!

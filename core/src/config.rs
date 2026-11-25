@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Preferencias de la app: ~/.config/lanzadera/config.json (o $XDG_CONFIG_HOME).
 //! Una sola copia en memoria; `update` modifica y guarda en disco de forma atómica.
 use serde::{Deserialize, Serialize};

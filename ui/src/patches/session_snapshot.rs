@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 use egui::Color32;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ClipStateView { #[default] Empty, Triggered, Playing, Stopping, Recording, Overdubbing, RecQueued }

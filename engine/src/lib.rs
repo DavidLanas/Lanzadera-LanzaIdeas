@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! lanzadera-engine — estado compartido, motor de clips, audio I/O, loader,
 //! MIDI, sinte interno y EQ (Fase 3A).
 pub mod shared;

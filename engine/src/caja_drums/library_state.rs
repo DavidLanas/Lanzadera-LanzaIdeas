@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Estado compartido de la biblioteca de muestras de Groove Machine.
 //!
 //! Equivale a la pestaña Library de Caja: carpeta raíz, tope de muestras por

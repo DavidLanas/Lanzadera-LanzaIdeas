@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 use egui::{vec2, Align2, Color32, FontId, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, Ui, Vec2};
 use super::theme_tokens as theme;
 use super::session_snapshot::*;
@@ -234,7 +236,13 @@ fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize
                 Pos2::new(rect.left() + 26.0, rect.top() + 20.0),
                 Pos2::new(rect.right() - 4.0, rect.bottom() - 14.0),
             );
-            draw_mini_waveform(ui.painter(), wv, &x.peaks);
+            let wc = Color32::from_rgb(
+                x.color.r().saturating_add(90),
+                x.color.g().saturating_add(90),
+                x.color.b().saturating_add(90),
+            );
+            let head = if x.progress > 0.0 { Some(x.progress) } else { None };
+            crate::waveform::paint_cell(ui.painter(), wv, &x.peaks, head, wc);
         }
 
         let pr = Rect::from_min_size(Pos2::new(rect.left() + 4.0, rect.bottom() - 10.0), Vec2::new(rect.width() - 8.0, 4.0));
@@ -313,6 +321,7 @@ fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize
     }
 }
 
+#[allow(dead_code)] // sustituida por waveform::paint_cell (C2b)
 fn draw_mini_waveform(painter: &egui::Painter, rect: Rect, peaks: &[f32]) {
     if peaks.is_empty() || rect.width() < 2.0 { return; }
     let n = peaks.len();

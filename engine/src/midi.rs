@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Notas MIDI para el hilo de audio: datos POD tras Arc (sin locks ni alloc)
 //! y scheduling por tick con playhead del ClipEngine (480 PPQ).
 use std::sync::Arc;

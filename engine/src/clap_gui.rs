@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! GUI flotante de plugins CLAP (Fase G6a).
 //!
 //! TODO ocurre en el hilo principal (App::update). Nunca en el callback RT.

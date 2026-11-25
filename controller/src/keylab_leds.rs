@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Feedback del KeyLab Essential 49: LCD (SysEx) + LEDs de transporte + pads.
 //!
 //! El LCD usa los dos protocolos del script device_keylab_essential_49.py

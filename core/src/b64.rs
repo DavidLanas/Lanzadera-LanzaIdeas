@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Base64 estándar (RFC 4648, con relleno), sin dependencias. Sirve para guardar el
 //! estado binario de los plugins dentro del JSON del proyecto.
 

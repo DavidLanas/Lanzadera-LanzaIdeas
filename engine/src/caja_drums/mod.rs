@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Motor de drums de Caja integrado en Lanzadera (Fase 4A).
 //!
 //! Wrapper del Engine de Caja como "pista especial" de drums del launcher.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Wrapper del Engine de Caja para Lanzadera.
 //! Adaptado de plugin/src/dsp.rs, pero usando solo tipos de caja-core.
 

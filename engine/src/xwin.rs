@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Ventana X11 anfitriona para GUIs de plugin EMBEBIDAS (CLAP `is_floating = false`).
 //!
 //! Muchos plugins CLAP de Linux (p. ej. los hechos con nih-plug/baseview) NO

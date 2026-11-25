@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Clip y su máquina de estados (Session View de Bitwig).
 use serde::{Deserialize, Serialize};
 use crate::{PPQ, TICKS_PER_BAR};

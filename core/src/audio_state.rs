@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! SessionAudio — snapshot POD para el hilo de audio (idea de KitAudio de Caja).
 //! Sin String, sin Vec: arrays fijos copiables por TripleBuffer.
 //! Extensión de Fase 1: tabla ClipMeta (quantize/launch/follow/probability por
@@ -30,6 +32,8 @@ pub struct TrackAudio {
     pub lpf_hz: f32,
     pub sends: [f32; 4],
     pub mono: bool,
+    pub input_ch: u8,
+    pub arm: bool,
     pub active_clip: Option<ClipAudioRef>,
 }
 
@@ -39,7 +43,7 @@ impl TrackAudio {
         eq_low: 0.0, eq_mid: 0.0, eq_high: 0.0,
         eq_mid_f: 1000.0, eq_mid_q: 0.7,
         hpf_on: false, lpf_on: false,
-        hpf_hz: 20.0, lpf_hz: 20000.0, sends: [0.0; 4], mono: false, active_clip: None,
+        hpf_hz: 20.0, lpf_hz: 20000.0, sends: [0.0; 4], mono: false, input_ch: 0, arm: false, active_clip: None,
     };
 }
 impl Default for TrackAudio { fn default() -> Self { Self::EMPTY } }
@@ -145,7 +149,7 @@ impl SessionAudio {
                 eq_low: tr.eq_low, eq_mid: tr.eq_mid, eq_high: tr.eq_high,
                 eq_mid_f: tr.eq_mid_f, eq_mid_q: tr.eq_mid_q,
                 hpf_on: tr.hpf_on, lpf_on: tr.lpf_on, hpf_hz: tr.hpf_hz, lpf_hz: tr.lpf_hz,
-                sends: tr.sends, mono: tr.mono, active_clip: active,
+                sends: tr.sends, mono: tr.mono, input_ch: tr.input_channel, arm: tr.arm, active_clip: active,
             };
             out.any_solo |= tr.solo;
         }
@@ -189,5 +193,22 @@ mod rec_clip_no_launch_tests {
         assert_eq!((t, s), (1, 0));
         let audio = SessionAudio::from_state(&st);
         assert!(!audio.clip_meta(t, s).exists);
+    }
+}
+
+#[cfg(test)]
+mod input_routing_tests {
+    use super::*;
+
+    #[test]
+    fn el_canal_y_el_arm_llegan_al_audio() {
+        let mut st = SessionState::default();
+        st.tracks[1].input_channel = 2;
+        st.tracks[1].arm = true;
+        let a = SessionAudio::from_state(&st);
+        assert_eq!(a.tracks[1].input_ch, 2);
+        assert!(a.tracks[1].arm);
+        assert_eq!(a.tracks[0].input_ch, 0);
+        assert!(!a.tracks[0].arm);
     }
 }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! lanzadera-core — modelo de datos puro del clip launcher.
 //! Sin audio ni UI: estado, comandos y primitivas de concurrencia
 //! (TripleBuffer / Spsc) portadas textualmente de caja-core.

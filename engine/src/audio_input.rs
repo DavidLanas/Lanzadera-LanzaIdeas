@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Entrada de audio con cpal (Fase F2).
 //! Abre un InputStream de-input, deposita muestras en un ring buffer lockfree
 //! que el hilo RT drena en render(). Sin alloc en el callback: el Producer

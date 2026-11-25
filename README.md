@@ -137,3 +137,20 @@ Abre un Issue o un Pull Request.
 Autor
 
 Desarrollado por [David Lanas](https://github.com/DavidLanas)
+
+## Licencia
+
+Lanzadera es software libre: puedes redistribuirlo y/o modificarlo bajo los
+términos de la **GNU Affero General Public License v3.0 o posterior**
+(`AGPL-3.0-or-later`). Ver el archivo [LICENSE](LICENSE).
+
+Copyright (C) 2026 David Lanas.
+
+This program is free software under the GNU AGPLv3+. If you distribute it or
+offer it as a network service, you must release your complete source code
+under the same license.
+
+### Componentes de terceros
+- `vendor/vst3-host` — ver su propia licencia.
+- Symphonia (MPL-2.0), egui/eframe, cpal, midir, arc_swap, hound, ringbuf —
+  licencias permisivas compatibles con AGPLv3.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// Copyright (C) 2026 David Lanas
 //! Almacén de muestras del motor de drums.
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
