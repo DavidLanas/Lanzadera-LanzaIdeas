@@ -62,6 +62,9 @@ pub struct Clip {
     pub audio_path: Option<String>,
     pub midi_notes: Vec<MidiNote>, // Fase 2: reproducción real
     pub probability: f32, // 0.0–1.0 (Inspector de Bitwig)
+    /// Offset (segundos) donde empieza el loop dentro del archivo. 0 = principio.
+    #[serde(default)]
+    pub loop_start_sec: f32,
 }
 
 impl Default for Clip {
@@ -79,6 +82,7 @@ impl Default for Clip {
             audio_path: None,
             midi_notes: Vec::new(),
             probability: 1.0,
+            loop_start_sec: 0.0,
         }
     }
 }

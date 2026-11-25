@@ -59,6 +59,7 @@ pub struct ClipMeta {
     pub loop_bars: u8,
     pub loop_count: u8, // 0 = infinito
     pub probability: f32,
+    pub loop_start_sec: f32,
 }
 
 impl ClipMeta {
@@ -66,6 +67,7 @@ impl ClipMeta {
         exists: false, launch_mode: LaunchMode::Trigger, quantize: Quantize::One,
         follow_action: FollowAction::None, follow_bars: 0, loop_bars: 1,
         loop_count: 0, probability: 1.0,
+            loop_start_sec: 0.0,
     };
 }
 impl Default for ClipMeta { fn default() -> Self { Self::EMPTY } }
@@ -133,6 +135,7 @@ impl SessionAudio {
                         follow_action: c.follow_action, follow_bars: c.follow_bars,
                         loop_bars: c.loop_bars.max(1), loop_count: c.loop_count,
                         probability: c.probability,
+            loop_start_sec: c.loop_start_sec,
                     };
                     if active.is_none()
                         && matches!(c.state, ClipState::Playing | ClipState::Triggered | ClipState::Recording | ClipState::Overdubbing)
