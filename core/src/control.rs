@@ -34,6 +34,8 @@ pub enum ControlCmd {
     SetVolume { track: u8, value: f32 },
     SetPan { track: u8, value: f32 },
     SetMasterVol { value: f32 },
+    /// Master SOLO del Groove Machine (el master general afecta a todo).
+    SetGrooveMasterVol { value: f32 },
     ToggleMute { track: u8 },
     ToggleSolo { track: u8 },
     ToggleArm { track: u8 },
@@ -113,6 +115,7 @@ const OP_LIVE_PAD_OFF: u32 = 34;
 const OP_TOGGLE_METRONOME: u32 = 35;
 const OP_CREATE_CLIP: u32 = 36;
 const OP_LIVE_SUSTAIN: u32 = 37;
+const OP_SET_GROOVE_MASTER: u32 = 38;
 
 #[inline] fn pack_unit(v: f32) -> u32 { (v.clamp(0.0, 1.0) * 16383.0).round() as u32 }
 #[inline] fn unpack_unit(v: u32) -> f32 { v as f32 / 16383.0 }
@@ -135,6 +138,7 @@ impl ControlCmd {
             ControlCmd::SetVolume { track, value } => (OP_SET_VOLUME, track, 0, pack_unit(value), track == TRACK_CURSOR, false),
             ControlCmd::SetPan { track, value } => (OP_SET_PAN, track, 0, pack_unit((value.clamp(-1.0, 1.0) + 1.0) * 0.5), track == TRACK_CURSOR, false),
             ControlCmd::SetMasterVol { value } => (OP_SET_MASTER, 0, 0, pack_unit(value), false, false),
+            ControlCmd::SetGrooveMasterVol { value } => (OP_SET_GROOVE_MASTER, 0, 0, pack_unit(value), false, false),
             ControlCmd::ToggleMute { track } => (OP_MUTE, track, 0, 0, track == TRACK_CURSOR, false),
             ControlCmd::ToggleSolo { track } => (OP_SOLO, track, 0, 0, track == TRACK_CURSOR, false),
             ControlCmd::ToggleArm { track } => (OP_ARM, track, 0, 0, track == TRACK_CURSOR, false),
@@ -191,6 +195,7 @@ impl ControlCmd {
             OP_SET_VOLUME => ControlCmd::SetVolume { track, value: unpack_unit(v) },
             OP_SET_PAN => ControlCmd::SetPan { track, value: unpack_unit(v) * 2.0 - 1.0 },
             OP_SET_MASTER => ControlCmd::SetMasterVol { value: unpack_unit(v) },
+            OP_SET_GROOVE_MASTER => ControlCmd::SetGrooveMasterVol { value: unpack_unit(v) },
             OP_MUTE => ControlCmd::ToggleMute { track },
             OP_SOLO => ControlCmd::ToggleSolo { track },
             OP_ARM => ControlCmd::ToggleArm { track },
@@ -273,6 +278,7 @@ mod tests {
         }
         // Fader de 14 bits: exacto en los extremos.
         assert_eq!(rt(ControlCmd::SetMasterVol { value: 1.0 }), ControlCmd::SetMasterVol { value: 1.0 });
+        assert_eq!(rt(ControlCmd::SetGrooveMasterVol { value: 1.0 }), ControlCmd::SetGrooveMasterVol { value: 1.0 });
     }
 
     #[test]

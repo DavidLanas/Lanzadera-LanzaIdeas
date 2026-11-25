@@ -17,6 +17,7 @@ use lanzadera_ui::SessionView;
 struct MidiEntry {
     profile: MidiProfile,
     port: String,
+    #[allow(dead_code)] // solo mantiene viva la conexión MIDI mientras exista la entrada
     conns: Vec<lanzadera_controller::MidiConn>,
     leds: Option<lanzadera_controller::leds::LedHandle>,
 }
@@ -38,7 +39,10 @@ struct LanzaderaApp {
 
 impl LanzaderaApp {
     fn midi_connect(&mut self, profile: MidiProfile, port: &str) -> String {
-        if self.midi_entries.iter().any(|e| e.profile == profile && e.port == port) {
+        if self.legacy_midi && matches!(profile, MidiProfile::KeyLab | MidiProfile::Mk3) {
+            return "Ya conectado con --midi; no lo conectes tambien desde Preferencias".to_string();
+        }
+        if self.midi_entries.iter().any(|e| e.port == port) {
             return format!("{} ya está conectado", profile.label());
         }
         let sink = self.shared.ctrl_rx.clone();
@@ -159,6 +163,9 @@ impl eframe::App for LanzaderaApp {
                     }
                     ControlCmd::TapTempo => {
                         let now = Instant::now();
+                        if let Some(last) = self.taps.last() {
+                            if now.duration_since(*last) < Duration::from_millis(120) { continue; }
+                        }
                         self.taps.retain(|t| now.duration_since(*t) < Duration::from_secs(3));
                         self.taps.push(now);
                         if self.taps.len() >= 2 {
@@ -208,28 +215,39 @@ impl eframe::App for LanzaderaApp {
             }
         }
 
-        // Notas grabadas por el audio → clip MIDI (overdub).
-        let mut rec: Vec<lanzadera_core::MidiNote> = Vec::new();
-        let mut rec_track = 0usize;
+        // Notas grabadas por el audio → clip MIDI (overdub). Cada nota trae su pista y su
+        // escena: el destino NO se deduce del cursor actual, que puede haber cambiado
+        // (p. ej. al lanzar otro clip mientras se grababa).
+        let mut groups: Vec<((usize, usize), Vec<lanzadera_core::MidiNote>)> = Vec::new();
         while let Some(n) = self.shared.rec_rx.pop() {
-            rec_track = n.track as usize;
-            rec.push(lanzadera_core::MidiNote {
+            let key = (n.track as usize, n.scene as usize);
+            let note = lanzadera_core::MidiNote {
                 tick_start: n.tick, tick_dur: n.dur, note: n.note, vel: n.vel,
                 channel: 0, occurrence: 0, probability: 1.0,
-            });
+            };
+            match groups.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, v)) => v.push(note),
+                None => groups.push((key, vec![note])),
+            }
         }
-        if !rec.is_empty() {
-            let (t, s, _) = { self.shared.state.lock().unwrap().record_target() };
-            let count = rec.len();
+        for ((t, s), notes) in groups {
+            let count = notes.len();
+            let (tmin, tmax) = notes.iter().fold((u32::MAX, 0u32), |(a, b), n| (a.min(n.tick_start), b.max(n.tick_start)));
+            let loop_bars = {
+                let st = self.shared.state.lock().unwrap();
+                st.tracks.get(t).and_then(|tr| tr.clips.get(s)).and_then(|c| c.as_ref()).map(|c| c.loop_bars).unwrap_or(0)
+            };
             self.shared.edit(|st| {
                 if let Some(tr) = st.tracks.get_mut(t) {
                     if let Some(Some(c)) = tr.clips.get_mut(s) {
-                        for n in &rec { if n.note > 0 || n.vel > 0 { c.midi_notes.push(*n); } }
+                        for n in &notes { if n.note > 0 || n.vel > 0 { c.midi_notes.push(*n); } }
                     }
                 }
             });
-            let _ = rec_track;
             self.shared.sync_midi(t, s);
+            // Diagnóstico: rango de ticks de lo grabado frente a la duración del loop.
+            eprintln!("[rec] {} notas → pista {} escena {} (ticks {}..{}, loop de {} compases)",
+                count, t + 1, s + 1, tmin, tmax, loop_bars);
             self.view.msg = format!("● {} notas grabadas en Pista {} · Escena {}", count, t + 1, s + 1);
         }
         // GUI de plugins: la UI encola la pista y aqui se atiende, en el hilo

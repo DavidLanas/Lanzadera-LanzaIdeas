@@ -10,6 +10,9 @@ const CAP: usize = 512;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RecNote {
     pub track: u8,
+    /// Escena del clip que se grababa (el cursor de grabación puede cambiar antes de que
+    /// la UI reciba la nota, así que el destino viaja con ella).
+    pub scene: u8,
     pub note: u8,
     pub vel: u8,
     pub tick: u32, // posición dentro del loop del clip
@@ -17,7 +20,7 @@ pub struct RecNote {
 }
 
 impl RecNote {
-    pub const EMPTY: Self = RecNote { track: 0, note: 0, vel: 0, tick: 0, dur: 0 };
+    pub const EMPTY: Self = RecNote { track: 0, scene: 0, note: 0, vel: 0, tick: 0, dur: 0 };
 }
 
 /// Un productor (audio) y un consumidor (UI). Sin alloc en push/pop.

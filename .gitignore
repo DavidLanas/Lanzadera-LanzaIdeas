@@ -20,3 +20,4 @@ core
 core.*
 # Build propio del vendor (helper de aislamiento)
 vendor/vst3-host/target/
+!core/

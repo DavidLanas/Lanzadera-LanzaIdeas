@@ -201,7 +201,9 @@ impl Mk3Bridge {
                     }
                 }
             }
-            CC_SLIDER => emit(ControlCmd::SetMasterVol { value: value as f32 / 127.0 }),
+            // El slider del MK3 regula SOLO el master del Groove Machine; el master general
+            // lo lleva el fader 9 del KeyLab en modo MIX.
+            CC_SLIDER => emit(ControlCmd::SetGrooveMasterVol { value: value as f32 / 127.0 }),
             CC_SHIFT => self.shift = press,
             CC_SELECT => self.select = press,
             CC_PLAY if press => emit(ControlCmd::Play),
@@ -239,7 +241,7 @@ impl Mk3Bridge {
                         self.drum_cell_param_state = [0u8; 16];
                     }
                 } else {
-                    emit(ControlCmd::SetMasterVol { value: 1.0 }); // fallback
+                    emit(ControlCmd::SetGrooveMasterVol { value: 1.0 }); // fallback
                 }
             }
             CC_FIXED_VEL if press => self.fixed_vel = !self.fixed_vel,
@@ -419,10 +421,10 @@ mod tests {
     }
 
     #[test]
-    fn slider_es_master() {
+    fn slider_es_el_master_del_groove() {
         let mut b = Mk3Bridge::default();
         let out = cc(&mut b, CC_SLIDER, 127);
-        assert!(matches!(out[0], ControlCmd::SetMasterVol { value } if value > 0.99));
+        assert!(matches!(out[0], ControlCmd::SetGrooveMasterVol { value } if value > 0.99));
     }
 
     #[test]

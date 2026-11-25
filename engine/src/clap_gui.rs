@@ -215,7 +215,7 @@ mod crash_guard {
             unsafe extern "C" fn alarm_noop(_sig: libc::c_int) {
             ALARM_FIRED.store(true, Ordering::Release);
         }
-            unsafe { libc::signal(libc::SIGALRM, alarm_noop as libc::sighandler_t); }
+            unsafe { libc::signal(libc::SIGALRM, alarm_noop as *const () as libc::sighandler_t); }
         });
     }
     pub fn guarded<F, R>(f: F) -> Result<R, String>

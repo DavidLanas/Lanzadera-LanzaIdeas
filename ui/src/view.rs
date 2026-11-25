@@ -21,7 +21,7 @@ pub enum BrowserMode { Clap, Vst3 }
 pub enum BrowserTarget { Instrument, NoteFx, Fx }
 /// Pestañas de la ventana de Preferencias.
 #[derive(Clone, Copy, PartialEq)]
-pub enum PrefsTab { Plugins, Midi, Apariencia }
+pub enum PrefsTab { Plugins, Midi, Audio, Apariencia }
 /// Resultado de un escaneo de plugins en segundo plano.
 type ScanResult = (BrowserMode, Vec<(String, String, String)>, std::collections::HashMap<(String, String), lanzadera_core::PluginKind>);
 /// Qué se pidió en un diálogo de archivo / de ruta.
@@ -950,7 +950,7 @@ impl SessionView {
         }
     }
 
-    fn menu_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, shared: &SessionShared) {
+    fn menu_bar(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context, shared: &SessionShared) {
         use lanzadera_core::control::TRACK_CURSOR;
         egui::menu::bar(ui, |ui| {
             ui.menu_button("Archivo", |ui| {
@@ -1058,7 +1058,12 @@ impl SessionView {
                     ui.close_menu();
                 }
                 ui.separator();
-                ui.add_enabled(false, egui::Button::new("Audio (dispositivo y entradas)…"))
+                if ui.button("Audio y latencia…").clicked() {
+                    self.prefs_open = true;
+                    self.prefs_tab = PrefsTab::Audio;
+                    ui.close_menu();
+                }
+                ui.add_enabled(false, egui::Button::new("Entradas de audio por canal…"))
                     .on_disabled_hover_text("Llega en la Fase 4");
                 ui.add_enabled(false, egui::Button::new("Atajos de teclado (editar)…"))
                     .on_disabled_hover_text("Llega más adelante");
@@ -1217,12 +1222,16 @@ impl SessionView {
                 if vis_btn(ui, "🥁", groove_on) {
                     shared.caja_sched.enabled.store(!groove_on, std::sync::atomic::Ordering::Relaxed);
                 }
-                if vis_btn(ui, "Chords", self.groove_chords) {
-                    self.groove_chords = !self.groove_chords;
-                    if self.groove_chords {
-                        self.windows.groove_machine_visible = true;
-                        shared.caja_sched.enabled.store(true, std::sync::atomic::Ordering::Relaxed);
-                        shared.groove_machine_visible.store(true, std::sync::atomic::Ordering::Relaxed);
+                if vis_btn(ui, "Piano Roll", self.roll.open) {
+                    if self.roll.open {
+                        self.roll.open = false;
+                    } else {
+                        // Abre el clip que ya tenía el piano roll, o el clip seleccionado.
+                        let (t, s) = match self.roll.target {
+                            Some(ts) => ts,
+                            None => { let (t, s, _) = shared.state.lock().unwrap().record_target(); (t, s) }
+                        };
+                        self.roll.open_for(t, s);
                     }
                 }
                 if vis_btn(ui, "Inspector", self.windows.inspector_visible) {
@@ -1423,6 +1432,7 @@ impl SessionView {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)] // celda antigua: el render actual vive en patches/clip_grid.rs
     fn clip_cell(
         &mut self, ui: &mut egui::Ui, ctx: &egui::Context, shared: &SessionShared,
         t: usize, s: usize, audio_on: bool, has_drop: bool,
@@ -1624,6 +1634,7 @@ impl SessionView {
             ui.horizontal_top(|ui| {
                 for t in 0..n { self.strip(ui, shared, Some(t), audio_on, &mut cmds); }
                 self.strip(ui, shared, None, audio_on, &mut cmds);
+                self.groove_master_strip(ui, shared, &mut cmds);
             });
         });
         for c in cmds { shared.apply_control(c); }
@@ -1645,6 +1656,30 @@ impl SessionView {
                 }
             });
         }
+    }
+
+    /// Master del Groove Machine: regula SOLO la batería. El MASTER general afecta a todo.
+    fn groove_master_strip(&mut self, ui: &mut egui::Ui, shared: &SessionShared, cmds: &mut Vec<ControlCmd>) {
+        let mut vol = shared.state.lock().unwrap().groove_master;
+        let level = shared.rt.groove_peak();
+        egui::Frame::none()
+            .fill(T.strip_bg)
+            .rounding(Rounding::same(5.0))
+            .stroke(egui::Stroke::new(1.0, T.accent_gold))
+            .inner_margin(5.0)
+            .show(ui, |ui| {
+                ui.vertical(|ui| {
+                    ui.set_width(68.0);
+                    ui.label(egui::RichText::new("GROOVE").size(11.0).color(T.accent_gold).strong())
+                        .on_hover_text("Master del Groove Machine (slider del MK3)");
+                    ui.add_space(50.0);
+                    if widgets::fader(ui, &mut vol, 120.0, level) {
+                        cmds.push(ControlCmd::SetGrooveMasterVol { value: vol });
+                    }
+                    let db = if vol <= 0.0001 { "-inf".to_string() } else { format!("{:.1}", 20.0 * vol.log10()) };
+                    ui.label(egui::RichText::new(db).size(9.0).color(T.text_dim));
+                });
+            });
     }
 
     fn strip(&mut self, ui: &mut egui::Ui, shared: &SessionShared, track: Option<usize>,
@@ -1731,6 +1766,16 @@ impl SessionView {
                         }
                     });
 
+                    // Mono: suma L+R (para una entrada mono que llegó a un solo canal).
+                    let mono = shared.state.lock().unwrap().tracks.get(t).map(|tr| tr.mono).unwrap_or(false);
+                    if ui.add(egui::Button::new(egui::RichText::new("Mono").size(10.0))
+                        .fill(if mono { T.accent.gamma_multiply(0.6) } else { T.panel_raised })
+                        .min_size(vec2(62.0, 16.0)))
+                        .on_hover_text("Suma L+R en ambos lados: útil para una entrada mono grabada en un solo canal")
+                        .clicked()
+                    {
+                        shared.edit(|st| { if let Some(tr) = st.tracks.get_mut(t) { tr.mono = !tr.mono; } });
+                    }
                     // Entrada de audio (preparar pista para loops analógicos)
                     ui.add_space(2.0);
                     ui.label(egui::RichText::new("IN").size(9.0).color(T.text_dim));
@@ -1858,6 +1903,16 @@ impl SessionView {
                 ui.label("Selecciona un clip (click derecho o click en slot vacío).");
             }
             ui.separator();
+            {
+                let mono = shared.state.lock().unwrap().tracks.get(t).map(|tr| tr.mono).unwrap_or(false);
+                let mut m = mono;
+                if ui.checkbox(&mut m, "Mono (suma L+R)")
+                    .on_hover_text("Para una entrada mono grabada en un solo canal: suena igual en ambos lados")
+                    .changed()
+                {
+                    shared.edit(|st| { if let Some(tr) = st.tracks.get_mut(t) { tr.mono = m; } });
+                }
+            }
             ui.label(egui::RichText::new("Instrumento · Note FX · FX").size(12.0));
             if !lanzadera_engine::CLAP_ENABLED {
                 ui.label(egui::RichText::new("Compila con --features clap").size(10.0).color(T.text_dim));
@@ -2135,12 +2190,14 @@ impl SessionView {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.prefs_tab, PrefsTab::Plugins, "Plugins");
                 ui.selectable_value(&mut self.prefs_tab, PrefsTab::Midi, "Controladores MIDI");
+                ui.selectable_value(&mut self.prefs_tab, PrefsTab::Audio, "Audio");
                 ui.selectable_value(&mut self.prefs_tab, PrefsTab::Apariencia, "Apariencia");
             });
             ui.separator();
             match self.prefs_tab {
                 PrefsTab::Plugins => self.prefs_plugins(ui),
                 PrefsTab::Midi => self.prefs_midi(ui, ctx),
+                PrefsTab::Audio => self.prefs_audio(ui),
                 PrefsTab::Apariencia => self.prefs_look(ui, ctx),
             }
         });
@@ -2262,6 +2319,23 @@ impl SessionView {
             ui.add_space(6.0);
             ui.label(egui::RichText::new(&st.msg).color(T.accent).size(11.0));
         }
+    }
+
+    fn prefs_audio(&mut self, ui: &mut egui::Ui) {
+        let cfg = lanzadera_core::config::get();
+        ui.label(egui::RichText::new("Latencia de grabación de audio").strong());
+        ui.label(egui::RichText::new("Compensa el retraso de ida y vuelta de la interfaz al grabar. Si el loop grabado suena adelantado, baja el valor; si suena atrasado, súbelo. Se aplica a la próxima grabación.")
+            .size(10.0).color(T.text_dim));
+        let mut auto = cfg.rec_latency_ms.is_none();
+        let mut ms = cfg.rec_latency_ms.unwrap_or(5.0);
+        let a = ui.checkbox(&mut auto, "Automática (1 buffer de audio)").changed();
+        let r = ui.add_enabled(!auto, egui::Slider::new(&mut ms, 0.0..=40.0).step_by(0.5).suffix(" ms"));
+        if a || r.changed() {
+            lanzadera_core::config::update(|c| c.rec_latency_ms = if auto { None } else { Some(ms) });
+        }
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Las entradas por canal (Entrada 1 / Entrada 2) llegan en la Fase 4.")
+            .size(10.0).color(T.text_dim));
     }
 
     fn prefs_look(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -3702,6 +3776,7 @@ fn is_midi_file(path: &std::path::Path) -> bool {
 /// cualquier otro arrastre de texto de la app podria colisionar con este.
 /// egui exige `Any + Send + Sync`; String lo cumple.
 #[derive(Clone)]
+#[allow(dead_code)]
 struct BrowserFile(String);
 
 // ════════════════════════════════════════════════════════════════════════

@@ -6,6 +6,7 @@ use crate::control::{ControlCmd, SCENE_CURSOR, TRACK_CURSOR};
 use crate::{Clip, ClipState, LaunchMode, Quantize, Scene, Track, TrackKind, MAX_SCENES, MAX_TRACKS, TICKS_PER_BAR};
 
 fn default_follow_playhead() -> bool { true }
+fn default_groove_master() -> f32 { 1.0 }
 
 /// Versión del formato del archivo de proyecto. Súbela cuando cambie la estructura de
 /// forma incompatible y añade el paso de migración en `SessionState::migrate`.
@@ -74,6 +75,14 @@ pub struct SessionState {
     /// Formato del archivo (0 = proyectos anteriores a que existiera este campo).
     #[serde(default)]
     pub format_version: u32,
+    /// Volumen master SOLO del Groove Machine. El master general (`master_volume`) afecta
+    /// a todo: pistas y Groove.
+    #[serde(default = "default_groove_master")]
+    pub groove_master: f32,
+    /// Contador de grabaciones iniciadas (runtime, no se guarda). El audio lo usa para
+    /// detectar «grabación nueva sin haber parado la anterior».
+    #[serde(skip)]
+    pub rec_seq: u32,
 }
 
 impl Default for SessionState {
@@ -117,6 +126,8 @@ impl Default for SessionState {
             groove_bank_favorites: Vec::new(),
             groove_bank_recent: Vec::new(),
             format_version: FORMAT_VERSION,
+            groove_master: 1.0,
+            rec_seq: 0,
         }
     }
 }
@@ -238,6 +249,26 @@ impl SessionState {
         }
     }
 
+    /// Lanzar una escena también inicia la grabación en la pista armada cuya ranura de esa
+    /// escena está vacía. Si ya hay un clip, la escena solo lo reproduce.
+    fn record_on_armed_empty_slot(&mut self, s: usize) {
+        if self.recording { return; }
+        let empty_armed = |st: &SessionState, t: usize| {
+            st.tracks.get(t)
+                .map(|tr| tr.arm && tr.clips.get(s).map(|c| c.is_none()).unwrap_or(false))
+                .unwrap_or(false)
+        };
+        let sel = self.selected_track;
+        let pick = if empty_armed(self, sel) { Some(sel) }
+                   else { (0..self.tracks.len()).find(|&t| empty_armed(self, t)) };
+        if let Some(t) = pick {
+            self.selected_track = t;
+            self.selected_scene = s;
+            self.selected_clip = Some((t, s));
+            self.apply_control(ControlCmd::Record);
+        }
+    }
+
     pub fn stop_track(&mut self, t: usize) {
         let q = self.quantize;
         if let Some(tr) = self.tracks.get_mut(t) {
@@ -319,11 +350,27 @@ impl SessionState {
                 self.selected_track = t;
                 self.selected_scene = s;
                 self.selected_clip = Some((t, s));
-                if empezar_a_grabar && !self.recording {
+                if empezar_a_grabar {
+                    if self.recording {
+                        // Ya se estaba grabando otro clip: se cierra SIN reproducirlo (queda
+                        // parado) y la grabación pasa al clip nuevo, con su propia espera.
+                        for tr in self.tracks.iter_mut() {
+                            for c in tr.clips.iter_mut().flatten() {
+                                if matches!(c.state, ClipState::Recording | ClipState::RecQueued | ClipState::Overdubbing) {
+                                    c.state = ClipState::Empty;
+                                }
+                            }
+                        }
+                        self.recording = false; // Record lo vuelve a activar y sube rec_seq
+                    }
                     self.apply_control(ControlCmd::Record);
                 }
             }
-            ControlCmd::LaunchScene { scene } => { let s = self.resolve_scene(scene); self.launch_scene(s); }
+            ControlCmd::LaunchScene { scene } => {
+                let s = self.resolve_scene(scene);
+                self.launch_scene(s);
+                self.record_on_armed_empty_slot(s);
+            }
             ControlCmd::StopAll => self.stop_all(),
             ControlCmd::Play => self.playing = true,
             ControlCmd::Stop => self.playing = false,
@@ -371,6 +418,7 @@ impl SessionState {
                     }
                     self.playing = true;
                     self.selected_clip = Some((t, s));
+                    self.rec_seq = self.rec_seq.wrapping_add(1);
                 } else if let Some(tr) = self.tracks.get_mut(t) {
                     // Al desarmar, el clip grabado pasa a reproducirse.
                     if let Some(Some(c)) = tr.clips.get_mut(s) {
@@ -387,6 +435,7 @@ impl SessionState {
             ControlCmd::SetVolume { track, value } => { let t = self.resolve_track(track); if let Some(tr) = self.tracks.get_mut(t) { tr.volume = value.clamp(0.0, 1.0); } }
             ControlCmd::SetPan { track, value } => { let t = self.resolve_track(track); if let Some(tr) = self.tracks.get_mut(t) { tr.pan = value.clamp(-1.0, 1.0); } }
             ControlCmd::SetMasterVol { value } => self.master_volume = value.clamp(0.0, 1.0),
+            ControlCmd::SetGrooveMasterVol { value } => self.groove_master = value.clamp(0.0, 1.0),
             ControlCmd::ToggleMute { track } => { let t = self.resolve_track(track); if let Some(tr) = self.tracks.get_mut(t) { tr.mute = !tr.mute; } }
             ControlCmd::ToggleSolo { track } => { let t = self.resolve_track(track); if let Some(tr) = self.tracks.get_mut(t) { tr.solo = !tr.solo; } }
             ControlCmd::ToggleArm { track } => { let t = self.resolve_track(track); if let Some(tr) = self.tracks.get_mut(t) { tr.arm = !tr.arm; } }
@@ -454,7 +503,7 @@ impl SessionState {
             self.selected_scene = self.scenes.len() - 1;
         }
         self.selected_clip = match self.selected_clip {
-            Some((t, s)) if s == idx => None,
+            Some((_t, s)) if s == idx => None,
             Some((t, s)) if s > idx => Some((t, s - 1)),
             other => other,
         };
@@ -574,6 +623,9 @@ mod rec_queued_tests {
     #[test]
     fn record_con_quantize_queda_en_cola() {
         let mut st = SessionState::default();
+        // Record solo actúa si la pista destino está armada (regla de Session View).
+        let sel = st.selected_track;
+        st.tracks[sel].arm = true;
         st.quantize = Quantize::One;
         st.apply_control(ControlCmd::Record);
         let (t, s, _) = st.record_target();
@@ -586,6 +638,9 @@ mod rec_queued_tests {
     #[test]
     fn record_inmediato_graba_ya() {
         let mut st = SessionState::default();
+        // Record solo actúa si la pista destino está armada (regla de Session View).
+        let sel = st.selected_track;
+        st.tracks[sel].arm = true;
         st.quantize = Quantize::Immediate;
         st.apply_control(ControlCmd::Record);
         let (t, s, _) = st.record_target();
@@ -595,6 +650,9 @@ mod rec_queued_tests {
     #[test]
     fn desarmar_pasa_el_clip_a_playing() {
         let mut st = SessionState::default();
+        // Record solo actúa si la pista destino está armada (regla de Session View).
+        let sel = st.selected_track;
+        st.tracks[sel].arm = true;
         st.quantize = Quantize::One;
         st.apply_control(ControlCmd::Record);
         st.apply_control(ControlCmd::Record);
@@ -606,6 +664,9 @@ mod rec_queued_tests {
     #[test]
     fn stop_cancela_la_grabacion_en_cola() {
         let mut st = SessionState::default();
+        // Record solo actúa si la pista destino está armada (regla de Session View).
+        let sel = st.selected_track;
+        st.tracks[sel].arm = true;
         st.quantize = Quantize::One;
         st.apply_control(ControlCmd::Record);
         let (t, s, _) = st.record_target();

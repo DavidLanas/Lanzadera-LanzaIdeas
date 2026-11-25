@@ -83,6 +83,9 @@ pub struct Track {
     pub note_fx_state: Option<String>,
     #[serde(default)]
     pub fx_state: Option<String>,
+    /// Suma L+R en ambos lados (para una entrada mono grabada en un solo canal).
+    #[serde(default)]
+    pub mono: bool,
 }
 
 fn def_hpf_hz() -> f32 { 20.0 }
@@ -123,6 +126,7 @@ impl Default for Track {
             plugin_state: None,
             note_fx_state: None,
             fx_state: None,
+            mono: false,
         }
     }
 }

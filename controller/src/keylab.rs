@@ -70,6 +70,8 @@ pub struct KeyLabBridge {
     vol_shadow: [Option<f32>; MAX_TRACKS],
     /// Último volumen/pan conocido de la pista seleccionada (fader 9 / knob 9).
     cursor_vol: Option<f32>,
+    /// Soft-takeover del fader 9 cuando actúa como master general (modo MIX).
+    master_shadow: Option<f32>,
     cursor_pan: Option<f32>,
     /// Estado real del host. Sin él (tests) el pickup usa la sombra local.
     host: Option<Arc<SessionShared>>,
@@ -90,6 +92,7 @@ impl Default for KeyLabBridge {
             scene_bank: 0,
             vol_shadow: [None; MAX_TRACKS],
             cursor_vol: None,
+            master_shadow: None,
             cursor_pan: None,
             host: None,
         }
@@ -116,6 +119,13 @@ impl KeyLabBridge {
         let h = self.host.as_ref()?;
         let st = h.state.lock().unwrap_or_else(|e| e.into_inner());
         st.tracks.get(t).map(|tr| tr.volume)
+    }
+
+    /// Volumen master general real, si hay host conectado.
+    fn host_master_volume(&self) -> Option<f32> {
+        let h = self.host.as_ref()?;
+        let st = h.state.lock().unwrap_or_else(|e| e.into_inner());
+        Some(st.master_volume)
     }
 
     /// Volumen real de la pista seleccionada (fader 9).
@@ -160,6 +170,7 @@ impl KeyLabBridge {
     /// Al cambiar de pista seleccionada, fader 9 y knob 9 deben re-enganchar.
     fn reset_cursor_pickup(&mut self) {
         self.cursor_vol = None;
+        self.master_shadow = None;
         self.cursor_pan = None;
     }
 
@@ -172,6 +183,15 @@ impl KeyLabBridge {
                 // Faders = pitch bend de 14 bits (como el script).
                 let val = (((d2 as u32) << 7) | d1 as u32) as f32 / 16383.0;
                 if ch == FADER9_PB_CH {
+                    // En modo MIX el fader 9 es el master GENERAL (afecta a pistas y Groove; el
+                    // Groove tiene su propio master en el slider del MK3).
+                    if self.mode == CtrlMode::Mixer {
+                        let real = self.host_master_volume();
+                        if Self::pickup(&mut self.master_shadow, val, real) {
+                            emit(ControlCmd::SetMasterVol { value: val });
+                        }
+                        return;
+                    }
                     // Fader 9 = volumen de la pista seleccionada (script v7.2).
                     let real = self.host_cursor_volume();
                     if Self::pickup(&mut self.cursor_vol, val, real) {
@@ -471,6 +491,14 @@ mod tests {
         let mut b = KeyLabBridge::default();
         let out = feed(&mut b, 0xE0 | FADER9_PB_CH, 127, 127);
         assert_eq!(out, vec![ControlCmd::SetVolume { track: TRACK_CURSOR, value: 1.0 }]);
+    }
+
+    #[test]
+    fn fader9_en_mix_es_el_master_general() {
+        let mut b = KeyLabBridge::default();
+        b.set_mode(CtrlMode::Mixer);
+        let out = feed(&mut b, 0xE0 | FADER9_PB_CH, 127, 127);
+        assert_eq!(out, vec![ControlCmd::SetMasterVol { value: 1.0 }]);
     }
 
     #[test]

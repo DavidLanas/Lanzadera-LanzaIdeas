@@ -92,13 +92,13 @@ pub struct AudioHandle {
     in_stream: Option<crate::audio_input::AudioInputStream>,
 }
 
-#[cfg(feature = "clap")]
 impl AudioHandle {
     /// Pide a cada plugin su estado y lo guarda (base64) en la sesión viva, para que el
     /// proyecto lo incluya y sobreviva a un reinicio del audio. Hilo principal.
     /// Solo se guarda el estado de plugins cuya ruta sigue siendo la de la pista.
     pub fn capture_plugin_states(&mut self, shared: &SessionShared) {
         // (pista, ranura 0=instrumento 1=Note FX 2=FX, estado en base64)
+        #[allow(unused_mut)] // sin las features clap/vst3 no se añade nada
         let mut got: Vec<(usize, u8, String)> = Vec::new();
         #[cfg(feature = "clap")]
         {
@@ -142,7 +142,10 @@ impl AudioHandle {
             }
         });
     }
+}
 
+#[cfg(feature = "clap")]
+impl AudioHandle {
     /// Atiende la peticion de abrir/cerrar la interfaz de un plugin (CLAP o
     /// VST3) y mantiene vivas las GUI abiertas. Se llama CADA frame desde el
     /// hilo principal (App::update), nunca desde RT.
@@ -251,6 +254,7 @@ struct Renderer {
     midi_out: MidiOut,
     gains: [(f32, f32, bool); MAX_TRACKS],
     peaks: [f32; MAX_TRACKS + 1],
+    groove_peak: f32,
     was_playing: bool,
     /// Notas en vivo pendientes de cerrar (grabación): (nota, vel, tick).
     rec_pending: [Option<(u8, u8, u32)>; 32],
@@ -259,6 +263,12 @@ struct Renderer {
     /// Notas con note-off retenido por el pedal, por pista. Arrays fijos: sin alloc en RT.
     sustained: [[bool; 128]; MAX_TRACKS],
     rec_on: bool,
+    /// (pista, escena) del clip que se está grabando, fijado al empezar la grabación.
+    rec_clip: Option<(usize, usize)>,
+    /// Último `rec_seq` atendido: cambia cuando se pide una grabación nueva sin parar la anterior.
+    rec_seq_seen: u32,
+    /// (pista, escena) cuya toma de AUDIO está en curso (se fija al empezar; el cursor puede moverse).
+    rec_audio_slot: Option<(usize, usize)>,
     /// Origen del loop de grabación (global_ticks al abrir la puerta).
     /// Las notas se graban relativas a este origen para que el primer
     /// ataque caiga en tick 0 del clip, no en el compás 2 del transporte.
@@ -471,6 +481,11 @@ impl Renderer {
             if STOP_ALL_REQ.swap(false, std::sync::atomic::Ordering::Relaxed) {
                 self.engine.reset_transport();
                 self.caja_scheduler.reset();
+                for t in 0..n {
+                    self.synth.all_off(t as u8);
+                    self.sustain_down[t] = false;
+                    self.sustained[t] = [false; 128];
+                }
             }
         }
         self.was_playing = audio.playing;
@@ -484,6 +499,20 @@ impl Renderer {
             0
         };
         self.engine.set_groove_loop_ticks(groove_loop);
+
+        // Una grabación NUEVA pedida sin haber parado la anterior (pulsar otra ranura vacía de
+        // una pista armada mientras se graba): este bloque se ve «parado», lo que cierra la toma
+        // actual y reinicia la puerta de captura. El bloque siguiente ya espera la frontera.
+        let forced_stop = audio.recording && self.rec_clip.is_some() && audio.rec_seq != self.rec_seq_seen;
+        let audio_stopped;
+        let audio: &SessionAudio = if forced_stop {
+            self.rec_seq_seen = audio.rec_seq;
+            audio_stopped = SessionAudio { recording: false, ..*audio };
+            &audio_stopped
+        } else {
+            audio
+        };
+        if audio.recording && self.rec_clip.is_none() { self.rec_seq_seen = audio.rec_seq; }
 
         // Puerta de captura: quantize del clip alineado al ciclo de la batería.
         let mut rec_q = audio.rec_q_ticks;
@@ -499,32 +528,44 @@ impl Renderer {
             rec_q,
             self.engine.global_ticks(),
         );
+        // La identidad del clip que se graba se fija al empezar: el cursor de grabación
+        // (rec_track / rec_scene) sigue a la selección y cambia, por ejemplo, al lanzar otro
+        // clip de la pista.
+        if audio.recording && self.rec_clip.is_none() {
+            self.rec_clip = Some((audio.rec_track as usize, audio.rec_scene as usize));
+        }
         // Feedback del estado de grabación hacia la GUI y los LEDs.
-        {
-            let rt_t = audio.rec_track as usize;
-            let rt_s = audio.rec_scene as usize;
-            if audio.recording && !rec_live {
-                shared.rt.set_clip_state(rt_t, rt_s, ClipState::RecQueued);
-            } else if rec_live != self.rec_on {
-                shared.rt.set_clip_state(
-                    rt_t, rt_s,
-                    if rec_live { ClipState::Recording } else { ClipState::Playing },
-                );
+        if let Some((rt_t, rt_s)) = self.rec_clip {
+            if audio.recording {
+                if !rec_live {
+                    shared.rt.set_clip_state(rt_t, rt_s, ClipState::RecQueued);
+                } else if !self.rec_on {
+                    shared.rt.set_clip_state(rt_t, rt_s, ClipState::Recording);
+                }
+            } else {
+                // La grabación terminó. Si el cursor sigue en ese clip, se cerró con Rec y el
+                // clip queda listo (Playing). Si el cursor se movió (se lanzó otro clip de la
+                // pista) el clip grabado queda parado: antes el estado se escribía sobre el
+                // clip equivocado y la GUI seguía mostrando «grabando».
+                let displaced = (rt_t, rt_s) != (audio.rec_track as usize, audio.rec_scene as usize);
+                let st = if displaced || !self.rec_on { ClipState::Empty } else { ClipState::Playing };
+                shared.rt.set_clip_state(rt_t, rt_s, st);
             }
         }
         if self.rec_on && !rec_live {
-            let t = audio.rec_track as usize;
+            let (t, sc) = self.rec_clip.unwrap_or((audio.rec_track as usize, audio.rec_scene as usize));
             let now = self.rec_tick(audio, t);
             for slot in self.rec_pending.iter_mut() {
                 if let Some((n, v, st)) = slot.take() {
                     let dur = if now >= st { now - st }
                               else { audio.rec_loop_ticks.saturating_sub(st) + now };
-                    let _ = shared.rec_rx.push(RecNote { track: t as u8, note: n, vel: v, tick: st, dur: dur.max(1) });
+                    let _ = shared.rec_rx.push(RecNote { track: t as u8, scene: sc as u8, note: n, vel: v, tick: st, dur: dur.max(1) });
                 }
             }
         }
         let old_rec_on = self.rec_on;
         self.rec_on = rec_live;
+        if !audio.recording { self.rec_clip = None; }
 
         // Si acaba de abrirse la puerta de captura, detener de inmediato el
         // clip que estuviera sonando en esa pista. Sin esto, SessionState
@@ -558,6 +599,12 @@ impl Renderer {
             if f == 0 {
                 for i in 0..kill_n {
                     self.engine.stop_track_immediate(kill[i], &mut self.events);
+                    let kt = kill[i];
+                    self.synth.all_off(kt as u8);
+                    self.sustain_down[kt] = false;
+                    self.sustained[kt] = [false; 128];
+                    #[cfg(feature = "clap")]
+                    if self.has_plugin(kt) { self.pev[kt].midi3(0, 0xB0, 123, 0); }
                 }
             }
             if let Some(t) = force_stop_track.take() {
@@ -650,7 +697,9 @@ impl Renderer {
                                         let dur = if now >= st { now - st }
                                                   else { audio.rec_loop_ticks.saturating_sub(st) + now };
                                         let _ = shared.rec_rx.push(RecNote {
-                                            track: t as u8, note: nn, vel: v, tick: st, dur: dur.max(1),
+                                            track: t as u8,
+                                            scene: self.rec_clip.map(|(_, sc)| sc as u8).unwrap_or(audio.rec_scene as u8),
+                                            note: nn, vel: v, tick: st, dur: dur.max(1),
                                         });
                                     }
                                 }
@@ -1010,15 +1059,28 @@ impl Renderer {
             for t in 0..n {
                 let (gl, gr, audible) = self.gains[t];
                 if !audible { continue; }
-                let l = self.eq.bands[t].process(0, self.bufs[t][0][f]);
-                let r = self.eq.bands[t].process(1, self.bufs[t][1][f]);
+                // Mono: suma L+R (potencia constante) en ambos lados, para una entrada mono
+                // que llegó a un solo canal.
+                let (in_l, in_r) = if audio.tracks[t].mono {
+                    let m = (self.bufs[t][0][f] + self.bufs[t][1][f]) * std::f32::consts::FRAC_1_SQRT_2;
+                    (m, m)
+                } else {
+                    (self.bufs[t][0][f], self.bufs[t][1][f])
+                };
+                let l = self.eq.bands[t].process(0, in_l);
+                let r = self.eq.bands[t].process(1, in_r);
                 ml += l * gl;
                 mr += r * gr;
                 let pk = l.abs().max(r.abs()) * gl.max(gr);
                 if pk > self.peaks[t] { self.peaks[t] = pk; }
             }
-            ml += self.caja_buf[0][f];
-            mr += self.caja_buf[1][f];
+            // El Groove tiene su propio master; el master general se aplica después a todo.
+            let gl = self.caja_buf[0][f] * audio.groove_master;
+            let gr = self.caja_buf[1][f] * audio.groove_master;
+            ml += gl;
+            mr += gr;
+            let gp = gl.abs().max(gr.abs());
+            if gp > self.groove_peak { self.groove_peak = gp; }
 
             // Metrónomo: envelope + seno amortiguado en cada beat.
             if audio.metronome && audio.playing && ticks_per_sample > 0.0 {
@@ -1070,6 +1132,8 @@ impl Renderer {
         }
         shared.rt.set_peak(MAX_TRACKS, self.peaks[MAX_TRACKS]);
         self.peaks[MAX_TRACKS] = 0.0;
+        shared.rt.set_groove_peak(self.groove_peak);
+        self.groove_peak = 0.0;
 
         let any_playing = (0..audio.track_count as usize).any(|t| self.engine.active(t).is_some());
         // ── Input monitoring (Fase F2) ──
@@ -1131,12 +1195,14 @@ impl Renderer {
         if self.rec_on && !self.was_recording {
             let rt = audio.rec_track as usize;
             let rs = audio.rec_scene as usize;
+            self.rec_audio_slot = Some((rt, rs));
             self.record_engine
                 .start_recording(rt, rs, self.audio_in_ch, self.sample_rate);
             println!("[record] inicio: pista {} escena {}", rt + 1, rs + 1);
         } else if !self.rec_on && self.was_recording {
-            let rt = audio.rec_track as usize;
-            let rs = audio.rec_scene as usize;
+            // La toma se cierra en el clip donde EMPEZÓ, aunque el cursor se haya movido.
+            let (rt, rs) = self.rec_audio_slot.take()
+                .unwrap_or((audio.rec_track as usize, audio.rec_scene as usize));
             if let Some(clip) = self.record_engine.stop_recording(rt, rs) {
                 let denom = (clip.sample_rate as usize * clip.channels as usize).max(1);
                 let secs = clip.samples.len() / denom;
@@ -1248,6 +1314,7 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
         buffer_size,
     };
 
+    #[allow(unused_mut)] // sin las features clap/vst3 no se añade nada
     let mut loaded: Vec<(usize, u8, String)> = Vec::new();
 
     // Estado de GUI limpio en cada (re)arranque: si se quito un plugin, su
@@ -1495,11 +1562,15 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
         midi_out: MidiOut::new(),
         gains: [(0.0, 0.0, false); MAX_TRACKS],
         peaks: [0.0; MAX_TRACKS + 1],
+        groove_peak: 0.0,
         was_playing: false,
         rec_pending: [None; 32],
         sustain_down: [false; MAX_TRACKS],
         sustained: [[false; 128]; MAX_TRACKS],
         rec_on: false,
+        rec_clip: None,
+        rec_seq_seen: 0,
+        rec_audio_slot: None,
         rec_origin_ticks: 0,
         last_global_ticks: 0,
         channels,
@@ -1633,7 +1704,10 @@ fn rec_gate(recording: bool, playing: bool, q_ticks: u32, now_tick: u64) -> bool
     }
     if !REC_ARMED.load(Relaxed) {
         let q = q_ticks as u64;
-        if q > 0 && now_tick / q > REC_Q_BASE.load(Relaxed) / q {
+        let base = REC_Q_BASE.load(Relaxed);
+        // Que el reloj vuelva atrás (una escena reinició el transporte en 1.1) también es una
+        // frontera: sin esto la puerta no se abriría hasta recuperar el tick anterior.
+        if q > 0 && (now_tick / q > base / q || now_tick < base) {
             REC_ARMED.store(true, Relaxed);
         }
     }

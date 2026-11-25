@@ -15,11 +15,13 @@ fn main() {
     println!("cargado: {} (instrumento={})", slot.name, slot.is_instrument);
     let fr: usize = std::env::args().nth(2).and_then(|s| s.parse().ok()).unwrap_or(512);
     let mut q = PluginEvents::new();
+    // `process` ahora recibe también el audio de entrada (un instrumento no lo usa).
+    let silence = vec![0.0f32; fr];
 
     // 1) silencio sin notas
     q.clear();
     let mut silent = 0.0f32;
-    for _ in 0..8 { assert!(vst3_slot::process(&mut slot, q.as_slice(), fr)); silent = silent.max(peak(&slot)); }
+    for _ in 0..8 { assert!(vst3_slot::process(&mut slot, q.as_slice(), fr, &silence, &silence)); silent = silent.max(peak(&slot)); }
     assert_eq!(slot.buffers.outputs[0].channels[0].len(), fr, "el plugin debe procesar solo `frames` muestras");
     println!("pico sin notas      = {silent:.5}");
 
@@ -28,7 +30,7 @@ fn main() {
     for b in 0..40 {
         q.clear();
         if b == 0 { q.note_on(0, 60, 100, 0); }
-        assert!(vst3_slot::process(&mut slot, q.as_slice(), fr));
+        assert!(vst3_slot::process(&mut slot, q.as_slice(), fr, &silence, &silence));
         on = on.max(peak(&slot));
     }
     println!("pico con nota 60    = {on:.5}");
@@ -38,7 +40,7 @@ fn main() {
     for b in 0..400 {
         q.clear();
         if b == 0 { q.note_off(0, 60, 0); }
-        assert!(vst3_slot::process(&mut slot, q.as_slice(), fr));
+        assert!(vst3_slot::process(&mut slot, q.as_slice(), fr, &silence, &silence));
         tail = peak(&slot);
     }
     println!("pico tras note_off  = {tail:.5}");

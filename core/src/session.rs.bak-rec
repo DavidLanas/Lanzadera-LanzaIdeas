@@ -1,0 +1,605 @@
+//! SessionState — estado completo de la sesión + reductor de ControlCmd.
+//! El hilo de UI aplica comandos aquí; el ClipEngine del audio es la autoridad
+//! de timing en tiempo real (Fase 2 reconcilia vía resync).
+use serde::{Deserialize, Serialize};
+use crate::control::{ControlCmd, SCENE_CURSOR, TRACK_CURSOR};
+use crate::{Clip, ClipState, LaunchMode, Quantize, Scene, Track, TrackKind, MAX_SCENES, MAX_TRACKS, TICKS_PER_BAR};
+
+fn default_follow_playhead() -> bool { true }
+
+/// Preset de Groove Machine guardado dentro del proyecto (.lanzadera).
+/// `json` es el estado completo serializado por GrooveModel::to_json().
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GroovePreset {
+    pub name: String,
+    pub json: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionState {
+    pub tracks: Vec<Track>,
+    pub scenes: Vec<Scene>,
+    pub master_volume: f32,
+    pub tempo: f64,
+    pub quantize: Quantize, // quantize global por defecto
+    pub playing: bool,
+    pub recording: bool,
+    pub metronome: bool,
+    pub selected_track: usize,
+    pub selected_scene: usize,
+    pub selected_clip: Option<(usize, usize)>,
+    // Extensiones de Fase 1 (hooks para KeyLab/Caja):
+    pub fill_mode: bool,          // Occurrence operator (Fase 4)
+    pub groove_enabled: bool,     // groove global (Fase 2)
+    pub ctrl_mode: u8,            // modo actual del controlador (0=Device 1=Mixer 2=Sends 3=Drum)
+    pub device_params: [f32; 8],  // sombra de macros hasta que exista el host de plugins (Fase 3)
+
+    // Estado de Groove Machine guardado dentro del proyecto .lanzadera.
+    // Los defaults permiten seguir cargando proyectos creados antes de estos campos.
+    #[serde(default)]
+    pub groove_json: String,
+    #[serde(default)]
+    pub groove_view: u8,
+    #[serde(default)]
+    pub groove_bar: usize,
+    #[serde(default)]
+    pub groove_page: usize,
+    #[serde(default = "default_follow_playhead")]
+    pub groove_follow_playhead: bool,
+    #[serde(default)]
+    pub groove_event_mode: bool,
+    #[serde(default)]
+    pub groove_sel_pad: u8,
+    /// Presets de Groove guardados dentro del proyecto.
+    #[serde(default)]
+    pub groove_presets: Vec<GroovePreset>,
+    /// Nombre del preset asignado a cada uno de los ocho slots rápidos.
+    #[serde(default)]
+    pub groove_preset_slots: [Option<String>; 8],
+    /// Último slot de preset cargado o guardado.
+    #[serde(default)]
+    pub groove_preset_active: usize,
+    #[serde(default)]
+    pub groove_bank_name: String,
+    /// Rutas de bancos Groove marcados como favoritos.
+    #[serde(default)]
+    pub groove_bank_favorites: Vec<String>,
+    /// Bancos Groove importados recientemente, el más nuevo primero.
+    #[serde(default)]
+    pub groove_bank_recent: Vec<String>,
+}
+
+impl Default for SessionState {
+    fn default() -> Self {
+        const PALETTE: [[u8; 3]; 8] = [
+            [231, 76, 60], [230, 126, 34], [241, 196, 15], [46, 204, 113],
+            [26, 188, 156], [52, 152, 219], [155, 89, 182], [236, 100, 170],
+        ];
+        SessionState {
+            tracks: (0..8).map(|i| Track {
+                name: format!("Pista {}", i + 1),
+                color: PALETTE[i % 8],
+                kind: TrackKind::Instrument,
+                ..Default::default()
+            }).collect(),
+            scenes: (0..8).map(|i| Scene { name: format!("Escena {}", i + 1), ..Default::default() }).collect(),
+            master_volume: 0.8,
+            tempo: 120.0,
+            quantize: Quantize::One,
+            playing: false,
+            recording: false,
+            metronome: false,
+            selected_track: 0,
+            selected_scene: 0,
+            selected_clip: None,
+            fill_mode: false,
+            groove_enabled: true,
+            ctrl_mode: 0,
+            device_params: [0.5; 8],
+            groove_json: String::new(),
+            groove_view: 0,
+            groove_bar: 0,
+            groove_page: 0,
+            groove_follow_playhead: true,
+            groove_event_mode: false,
+            groove_sel_pad: 0,
+            groove_presets: Vec::new(),
+            groove_preset_slots: [None, None, None, None, None, None, None, None],
+            groove_preset_active: 0,
+            groove_bank_name: String::new(),
+            groove_bank_favorites: Vec::new(),
+            groove_bank_recent: Vec::new(),
+        }
+    }
+}
+
+fn clamp_idx(v: i32, len: usize) -> usize {
+    v.clamp(0, len.saturating_sub(1) as i32) as usize
+}
+
+impl SessionState {
+    /// Resuelve el sentinela TRACK_CURSOR a la pista seleccionada.
+    pub fn resolve_track(&self, t: u8) -> usize {
+        let idx = if t == TRACK_CURSOR { self.selected_track } else { t as usize };
+        idx.min(self.tracks.len().saturating_sub(1))
+    }
+
+    pub fn resolve_scene(&self, s: u8) -> usize {
+        let idx = if s == SCENE_CURSOR { self.selected_scene } else { s as usize };
+        idx.min(self.scenes.len().saturating_sub(1).max(MAX_SCENES - 1))
+    }
+
+    /// Sustituye sentinelas por índices concretos (el motor no conoce el cursor).
+    pub fn resolve_cmd(&self, cmd: ControlCmd) -> ControlCmd {
+        let t = |x: u8| self.resolve_track(x) as u8;
+        let s = |x: u8| self.resolve_scene(x) as u8;
+        match cmd {
+            ControlCmd::LaunchClip { track, scene } => ControlCmd::LaunchClip { track: t(track), scene: s(scene) },
+            ControlCmd::CreateClip { track, scene, bars } => ControlCmd::CreateClip { track: t(track), scene: s(scene), bars },
+            ControlCmd::StopClip { track } => ControlCmd::StopClip { track: t(track) },
+            ControlCmd::LaunchScene { scene } => ControlCmd::LaunchScene { scene: s(scene) },
+            ControlCmd::SelectClip { track, scene } => ControlCmd::SelectClip { track: t(track), scene: s(scene) },
+            ControlCmd::SetVolume { track, value } => ControlCmd::SetVolume { track: t(track), value },
+            ControlCmd::SetPan { track, value } => ControlCmd::SetPan { track: t(track), value },
+            ControlCmd::ToggleMute { track } => ControlCmd::ToggleMute { track: t(track) },
+            ControlCmd::ToggleSolo { track } => ControlCmd::ToggleSolo { track: t(track) },
+            ControlCmd::ToggleArm { track } => ControlCmd::ToggleArm { track: t(track) },
+            ControlCmd::SetSend { track, send, value } => ControlCmd::SetSend { track: t(track), send, value },
+            ControlCmd::LiveNoteOn { track, note, vel } => ControlCmd::LiveNoteOn { track: t(track), note, vel },
+            ControlCmd::LiveNoteOff { track, note } => ControlCmd::LiveNoteOff { track: t(track), note },
+            ControlCmd::LivePitchBend { track, value } => ControlCmd::LivePitchBend { track: t(track), value },
+            ControlCmd::LiveModWheel { track, value } => ControlCmd::LiveModWheel { track: t(track), value },
+            ControlCmd::SetPluginParam { track, param_idx, value } => ControlCmd::SetPluginParam { track: t(track), param_idx, value },
+            ControlCmd::SelectPluginParam { track, param_idx } => ControlCmd::SelectPluginParam { track: t(track), param_idx },
+            other => other,
+        }
+    }
+
+    /// Destino de grabación: (pista, escena, longitud del loop en ticks).
+    /// Usa el clip seleccionado, o el cursor si no hay selección.
+    pub fn record_target(&self) -> (usize, usize, u32) {
+        let (t, s) = self.selected_clip.unwrap_or((self.selected_track, self.selected_scene));
+        let t = t.min(self.tracks.len().saturating_sub(1));
+        let s = s.min(MAX_SCENES - 1);
+        let bars = self.tracks.get(t)
+            .and_then(|tr| tr.clips.get(s)).and_then(|c| c.as_ref())
+            .map(|c| c.loop_bars.max(1)).unwrap_or(2);
+        (t, s, bars as u32 * TICKS_PER_BAR as u32)
+    }
+
+    /// Lanza un clip existente: Immediate → Playing, si no → Triggered.
+    pub fn launch_clip(&mut self, t: usize, s: usize) {
+        let q_global = self.quantize;
+        // Una sola ranura sonando por pista (lógica Bitwig/Ableton): al lanzar
+        // un clip, los demás de ESA pista se detienen. Las otras pistas no se
+        // tocan, así que una escena puede seguir corriendo mientras cambias
+        // una pista suelta.
+        // Si en esta pista había un clip grabando/encolado, lanzar otro clip
+        // debe desarmar el transporte de grabación: una pista, una voz.
+        let had_recording_on_track = self.tracks.get(t)
+            .map(|tr| {
+                tr.clips.iter().flatten().any(|c| matches!(
+                    c.state,
+                    ClipState::Recording | ClipState::RecQueued | ClipState::Overdubbing
+                ))
+            })
+            .unwrap_or(false);
+        if had_recording_on_track {
+            self.recording = false;
+        }
+
+        let target_has_clip = self.tracks.get(t)
+            .and_then(|tr| tr.clips.get(s))
+            .map(|c| c.is_some())
+            .unwrap_or(false);
+        if target_has_clip {
+            if let Some(tr) = self.tracks.get_mut(t) {
+                for (i, slot) in tr.clips.iter_mut().enumerate() {
+                    if i == s { continue; }
+                    if let Some(c) = slot {
+                        if matches!(c.state,
+                            ClipState::Playing | ClipState::Triggered
+                            | ClipState::Recording | ClipState::Overdubbing
+                            | ClipState::RecQueued
+                            | ClipState::Stopping)
+                        {
+                            c.state = if q_global == Quantize::Immediate {
+                                ClipState::Empty
+                            } else {
+                                ClipState::Stopping
+                            };
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(tr) = self.tracks.get_mut(t) {
+            if let Some(clip) = tr.clips.get_mut(s).and_then(|c| c.as_mut()) {
+                // Toggle: relanzar el clip activo lo detiene.
+                if clip.launch_mode == LaunchMode::Toggle
+                    && matches!(clip.state, ClipState::Playing | ClipState::Triggered)
+                {
+                    clip.state = if q_global == Quantize::Immediate { ClipState::Empty } else { ClipState::Stopping };
+                    return;
+                }
+                clip.state = if clip.quantize == Quantize::Immediate { ClipState::Playing } else { ClipState::Triggered };
+                self.playing = true;
+                self.selected_clip = Some((t, s));
+            }
+        }
+    }
+
+    pub fn stop_track(&mut self, t: usize) {
+        let q = self.quantize;
+        if let Some(tr) = self.tracks.get_mut(t) {
+            for c in tr.clips.iter_mut().flatten() {
+                // Stopping también cuenta: un stop Immediate debe poder cancelar
+                // un stop ya encolado (consistente con ClipEngine::queue_stop).
+                if matches!(c.state, ClipState::Playing | ClipState::Triggered | ClipState::Recording
+                    | ClipState::Overdubbing | ClipState::Stopping | ClipState::RecQueued) {
+                    c.state = if q == Quantize::Immediate { ClipState::Empty } else { ClipState::Stopping };
+                }
+            }
+        }
+    }
+
+    /// Detiene de inmediato todos los clips activos de una pista.
+    ///
+    /// Se usa al armar grabación para imponer la regla de Session View:
+    /// una pista, una voz. Inspirado en la semántica de hybrid tracks y
+    /// clip launching de MAGDA (GPL-3); no se copia código, solo la regla
+    /// de comportamiento.
+    fn stop_track_now(&mut self, t: usize) {
+        if let Some(tr) = self.tracks.get_mut(t) {
+            for c in tr.clips.iter_mut().flatten() {
+                if matches!(
+                    c.state,
+                    ClipState::Playing
+                        | ClipState::Triggered
+                        | ClipState::Recording
+                        | ClipState::Overdubbing
+                        | ClipState::Stopping
+                        | ClipState::RecQueued
+                ) {
+                    c.state = ClipState::Empty;
+                }
+            }
+        }
+    }
+
+    pub fn launch_scene(&mut self, s: usize) {
+        for t in 0..self.tracks.len() { self.launch_clip(t, s); }
+        self.selected_scene = s;
+    }
+
+    pub fn stop_all(&mut self) {
+        for t in 0..self.tracks.len() { self.stop_track(t); }
+        // Stop All también detiene el transporte. El siguiente Play
+        // arranca limpio en 1.1 (el motor pone global_ticks = 0).
+        self.playing = false;
+        self.recording = false;
+    }
+
+    /// Reductor central: cualquier ControlCmd (ya resuelto) muta el estado.
+    pub fn apply_control(&mut self, cmd: ControlCmd) {
+        match cmd {
+            ControlCmd::LaunchClip { track, scene } => { let t = self.resolve_track(track); let s = self.resolve_scene(scene); self.launch_clip(t, s); }
+            ControlCmd::StopClip { track } => { let t = self.resolve_track(track); self.stop_track(t); }
+            ControlCmd::CreateClip { track, scene, bars } => {
+                let t = self.resolve_track(track);
+                let s = self.resolve_scene(scene);
+                let q = self.quantize;
+                let mut empezar_a_grabar = false;
+                if let Some(tr) = self.tracks.get_mut(t) {
+                    if let Some(slot) = tr.clips.get_mut(s) {
+                        // Nunca pisar un clip existente: el pad solo crea en vacío.
+                        if slot.is_none() {
+                            // Pista ya armada + pad en ranura vacía = arma la
+                            // grabación (RecQueued → cuenta atrás en la frontera).
+                            empezar_a_grabar = tr.arm;
+                            *slot = Some(Clip {
+                                name: format!("Clip {}", s + 1),
+                                loop_bars: bars.clamp(1, 64),
+                                quantize: q,
+                                ..Default::default()
+                            });
+                            tr.arm = true;
+                        }
+                    }
+                }
+                self.selected_track = t;
+                self.selected_scene = s;
+                self.selected_clip = Some((t, s));
+                if empezar_a_grabar && !self.recording {
+                    self.apply_control(ControlCmd::Record);
+                }
+            }
+            ControlCmd::LaunchScene { scene } => { let s = self.resolve_scene(scene); self.launch_scene(s); }
+            ControlCmd::StopAll => self.stop_all(),
+            ControlCmd::Play => self.playing = true,
+            ControlCmd::Stop => self.playing = false,
+            ControlCmd::Record => {
+                // Arm obligatorio para ARMAR la grabacion; desarmar siempre se
+                // permite. Conducta de Session View: Rec solo actua si la pista
+                // destino esta armada. Referencia de comportamiento: SceneStack
+                // ("Record only enabled when the selected track is armed");
+                // concepto reimplementado, no codigo copiado.
+                let (rt, _, _) = self.record_target();
+                let armed = self.tracks.get(rt).map(|tr| tr.arm).unwrap_or(false);
+                if armed || self.recording {
+                    self.recording = !self.recording;
+                }
+                let (t, s, _) = self.record_target();
+                if self.recording {
+                    // Al armar: crea el clip si el slot está vacío y arranca el
+                    // transporte (como el launcher de Bitwig).
+                    let q = self.quantize;
+
+                    // Una pista, una voz: si ya había un clip sonando/grabando
+                    // en esta pista, se detiene de inmediato antes de armar el
+                    // nuevo destino. Regla de Session View inspirada en MAGDA
+                    // (GPL-3): hybrid tracks + clip launching.
+                    self.stop_track_now(t);
+
+                    if let Some(tr) = self.tracks.get_mut(t) {
+                        if let Some(slot) = tr.clips.get_mut(s) {
+                            if slot.is_none() {
+                                *slot = Some(Clip {
+                                    name: format!("Rec {}", s + 1), loop_bars: 8, quantize: q,
+                                    ..Default::default()
+                                });
+                            }
+                            // Con quantize ≠ Immediate la captura espera la
+                            // frontera: el audio abre la puerta en ese tick.
+                            if let Some(c) = slot.as_mut() {
+                                c.state = if q == Quantize::Immediate {
+                                    ClipState::Recording
+                                } else {
+                                    ClipState::RecQueued
+                                };
+                            }
+                        }
+                    }
+                    self.playing = true;
+                    self.selected_clip = Some((t, s));
+                } else if let Some(tr) = self.tracks.get_mut(t) {
+                    // Al desarmar, el clip grabado pasa a reproducirse.
+                    if let Some(Some(c)) = tr.clips.get_mut(s) {
+                        if matches!(c.state,
+                            ClipState::Recording | ClipState::RecQueued | ClipState::Overdubbing)
+                        {
+                            c.state = ClipState::Playing;
+                        }
+                    }
+                }
+            }
+            ControlCmd::TapTempo => {} // los timestamps se miden en el hilo de UI (Fase 2)
+            ControlCmd::SetTempo { bpm } => self.tempo = (bpm as f64).clamp(20.0, 666.0),
+            ControlCmd::SetVolume { track, value } => { let t = self.resolve_track(track); if let Some(tr) = self.tracks.get_mut(t) { tr.volume = value.clamp(0.0, 1.0); } }
+            ControlCmd::SetPan { track, value } => { let t = self.resolve_track(track); if let Some(tr) = self.tracks.get_mut(t) { tr.pan = value.clamp(-1.0, 1.0); } }
+            ControlCmd::SetMasterVol { value } => self.master_volume = value.clamp(0.0, 1.0),
+            ControlCmd::ToggleMute { track } => { let t = self.resolve_track(track); if let Some(tr) = self.tracks.get_mut(t) { tr.mute = !tr.mute; } }
+            ControlCmd::ToggleSolo { track } => { let t = self.resolve_track(track); if let Some(tr) = self.tracks.get_mut(t) { tr.solo = !tr.solo; } }
+            ControlCmd::ToggleArm { track } => { let t = self.resolve_track(track); if let Some(tr) = self.tracks.get_mut(t) { tr.arm = !tr.arm; } }
+            ControlCmd::SelectTrack { delta } => self.selected_track = clamp_idx(self.selected_track as i32 + delta as i32, self.tracks.len()),
+            ControlCmd::SelectScene { delta } => self.selected_scene = clamp_idx(self.selected_scene as i32 + delta as i32, self.scenes.len()),
+            ControlCmd::SelectClip { track, scene } => {
+                let t = self.resolve_track(track); let s = self.resolve_scene(scene);
+                self.selected_track = t; self.selected_scene = s; self.selected_clip = Some((t, s));
+            }
+            ControlCmd::DeviceParam { param, value } => {
+                if (param as usize) < 8 { self.device_params[param as usize] = value.clamp(0.0, 1.0); }
+            }
+            ControlCmd::SetMode { mode } => self.ctrl_mode = mode,
+            ControlCmd::SetSend { track, send, value } => {
+                let t = self.resolve_track(track);
+                if let Some(tr) = self.tracks.get_mut(t) {
+                    if (send as usize) < 4 { tr.sends[send as usize] = value.clamp(0.0, 1.0); }
+                }
+            }
+            ControlCmd::FillToggle => self.fill_mode = !self.fill_mode,
+            ControlCmd::GrooveToggle => self.groove_enabled = !self.groove_enabled,
+            // Las notas en vivo no mutan el estado: van directas al audio.
+            ControlCmd::LiveNoteOn { .. } | ControlCmd::LiveNoteOff { .. } |
+            ControlCmd::LivePitchBend { .. } | ControlCmd::LiveModWheel { .. } |
+            ControlCmd::SelectPluginParam { .. } => {} // solo feedback visual
+            // Fase 3G: setear valor de parámetro del plugin.
+            ControlCmd::SetPluginParam { track, param_idx, value } => {
+                if let Some(tr) = self.tracks.get_mut(track as usize) {
+                    if let Some((_, _, v)) = tr.plugin_params.get_mut(param_idx as usize) {
+                        *v = value.clamp(0.0, 1.0);
+                    }
+                }
+            }
+            ControlCmd::LivePadOn { .. } | ControlCmd::LivePadOff { .. } => {}
+            ControlCmd::ToggleMetronome => { self.metronome = !self.metronome; }
+            // Fase 4: el motor de Caja consume estos comandos.
+            ControlCmd::CajaPattern { .. } | ControlCmd::CajaStep { .. } | ControlCmd::CajaBpm { .. } => {}
+        }
+    }
+}
+
+// Límite duro del modelo (el banco POD del audio es de tamaño fijo).
+impl SessionState {
+    pub fn push_track(&mut self, t: Track) -> bool {
+        if self.tracks.len() >= MAX_TRACKS { return false; }
+        self.tracks.push(t); true
+    }
+    pub fn push_scene(&mut self, s: Scene) -> bool {
+        if self.scenes.len() >= MAX_SCENES { return false; }
+        self.scenes.push(s); true
+    }
+    /// Elimina una escena y desplaza a la izquierda los clips de todas las
+    /// pistas (clips es un array indexado por escena). false si es la ultima.
+    pub fn remove_scene(&mut self, idx: usize) -> bool {
+        if self.scenes.len() <= 1 || idx >= self.scenes.len() { return false; }
+        self.scenes.remove(idx);
+        for tr in self.tracks.iter_mut() {
+            for s in idx..MAX_SCENES - 1 {
+                tr.clips[s] = tr.clips[s + 1].take();
+            }
+            tr.clips[MAX_SCENES - 1] = None;
+        }
+        if self.selected_scene >= self.scenes.len() {
+            self.selected_scene = self.scenes.len() - 1;
+        }
+        self.selected_clip = match self.selected_clip {
+            Some((_t, s)) if s == idx => None,
+            Some((t, s)) if s > idx => Some((t, s - 1)),
+            other => other,
+        };
+        true
+    }
+
+    pub fn set_clip(&mut self, t: usize, s: usize, c: Clip) {
+        if let Some(tr) = self.tracks.get_mut(t) {
+            if let Some(slot) = tr.clips.get_mut(s) { *slot = Some(c); }
+        }
+    }
+}
+
+#[cfg(test)]
+mod create_clip_state_tests {
+    use super::*;
+
+    #[test]
+    fn crear_en_slot_vacio_selecciona_y_arma() {
+        let mut st = SessionState::default();
+        assert!(st.tracks[2].clips[3].is_none());
+        st.apply_control(ControlCmd::CreateClip { track: 2, scene: 3, bars: 4 });
+        let c = st.tracks[2].clips[3].as_ref().expect("clip creado");
+        assert_eq!(c.loop_bars, 4);
+        assert!(st.tracks[2].arm);
+        assert_eq!(st.selected_clip, Some((2, 3)));
+        // Crear no arranca el transporte: solo prepara el slot.
+        assert!(!st.playing);
+    }
+
+    #[test]
+    fn crear_no_pisa_un_clip_existente() {
+        let mut st = SessionState::default();
+        st.set_clip(1, 1, Clip { name: "Mío".into(), loop_bars: 8, ..Default::default() });
+        st.apply_control(ControlCmd::CreateClip { track: 1, scene: 1, bars: 2 });
+        let c = st.tracks[1].clips[1].as_ref().unwrap();
+        assert_eq!(c.name, "Mío");
+        assert_eq!(c.loop_bars, 8);
+    }
+
+    #[test]
+    fn crear_resuelve_los_cursores() {
+        let mut st = SessionState::default();
+        st.selected_track = 4;
+        st.selected_scene = 6;
+        st.apply_control(ControlCmd::CreateClip {
+            track: TRACK_CURSOR, scene: SCENE_CURSOR, bars: 2,
+        });
+        assert!(st.tracks[4].clips[6].is_some());
+    }
+}
+
+#[cfg(test)]
+mod una_ranura_por_pista_tests {
+    use super::*;
+
+    fn clip(name: &str) -> Clip {
+        Clip { name: name.into(), quantize: Quantize::Immediate, ..Default::default() }
+    }
+
+    #[test]
+    fn lanzar_otro_clip_de_la_misma_pista_detiene_el_anterior() {
+        let mut st = SessionState::default();
+        st.quantize = Quantize::Immediate;
+        st.set_clip(0, 0, clip("A"));
+        st.set_clip(0, 1, clip("B"));
+        st.launch_clip(0, 0);
+        assert_eq!(st.tracks[0].clips[0].as_ref().unwrap().state, ClipState::Playing);
+        st.launch_clip(0, 1);
+        assert_eq!(st.tracks[0].clips[1].as_ref().unwrap().state, ClipState::Playing);
+        assert_eq!(st.tracks[0].clips[0].as_ref().unwrap().state, ClipState::Empty);
+    }
+
+    #[test]
+    fn cambiar_una_pista_no_toca_las_demas_de_la_escena() {
+        let mut st = SessionState::default();
+        st.quantize = Quantize::Immediate;
+        for t in 0..3 {
+            st.set_clip(t, 1, clip("escena2"));
+            st.set_clip(t, 2, clip("escena3"));
+        }
+        st.launch_scene(1);
+        st.launch_clip(0, 2);
+        assert_eq!(st.tracks[0].clips[2].as_ref().unwrap().state, ClipState::Playing);
+        assert_eq!(st.tracks[0].clips[1].as_ref().unwrap().state, ClipState::Empty);
+        for t in 1..3 {
+            assert_eq!(st.tracks[t].clips[1].as_ref().unwrap().state, ClipState::Playing);
+        }
+    }
+
+    #[test]
+    fn con_quantize_el_anterior_queda_stopping() {
+        let mut st = SessionState::default();
+        st.quantize = Quantize::One;
+        st.set_clip(0, 0, clip("A"));
+        st.set_clip(0, 1, clip("B"));
+        st.launch_clip(0, 0);
+        st.launch_clip(0, 1);
+        assert_eq!(st.tracks[0].clips[0].as_ref().unwrap().state, ClipState::Stopping);
+    }
+
+    #[test]
+    fn lanzar_un_slot_vacio_no_detiene_lo_que_suena() {
+        let mut st = SessionState::default();
+        st.quantize = Quantize::Immediate;
+        st.set_clip(0, 0, clip("A"));
+        st.launch_clip(0, 0);
+        st.launch_clip(0, 5);
+        assert_eq!(st.tracks[0].clips[0].as_ref().unwrap().state, ClipState::Playing);
+    }
+}
+
+#[cfg(test)]
+mod rec_queued_tests {
+    use super::*;
+
+    #[test]
+    fn record_con_quantize_queda_en_cola() {
+        let mut st = SessionState::default();
+        st.quantize = Quantize::One;
+        st.apply_control(ControlCmd::Record);
+        let (t, s, _) = st.record_target();
+        let c = st.tracks[t].clips[s].as_ref().unwrap();
+        assert_eq!(c.state, ClipState::RecQueued);
+        assert!(st.recording, "queda armado aunque aún no capture");
+        assert!(st.playing);
+    }
+
+    #[test]
+    fn record_inmediato_graba_ya() {
+        let mut st = SessionState::default();
+        st.quantize = Quantize::Immediate;
+        st.apply_control(ControlCmd::Record);
+        let (t, s, _) = st.record_target();
+        assert_eq!(st.tracks[t].clips[s].as_ref().unwrap().state, ClipState::Recording);
+    }
+
+    #[test]
+    fn desarmar_pasa_el_clip_a_playing() {
+        let mut st = SessionState::default();
+        st.quantize = Quantize::One;
+        st.apply_control(ControlCmd::Record);
+        st.apply_control(ControlCmd::Record);
+        let (t, s, _) = st.record_target();
+        assert_eq!(st.tracks[t].clips[s].as_ref().unwrap().state, ClipState::Playing);
+        assert!(!st.recording);
+    }
+
+    #[test]
+    fn stop_cancela_la_grabacion_en_cola() {
+        let mut st = SessionState::default();
+        st.quantize = Quantize::One;
+        st.apply_control(ControlCmd::Record);
+        let (t, s, _) = st.record_target();
+        st.stop_track(t);
+        assert_eq!(st.tracks[t].clips[s].as_ref().unwrap().state, ClipState::Stopping);
+    }
+}

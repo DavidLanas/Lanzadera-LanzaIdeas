@@ -804,6 +804,7 @@ impl SessionShared {
             }
         }
         s.playing = false;
+        s.recording = false;
         self.edit(|st| *st = s);
         for (t, sc) in midi { self.sync_midi(t, sc); }
         for (t, sc, p) in loads { self.request_load(t, sc, p); }

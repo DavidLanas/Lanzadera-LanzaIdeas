@@ -44,3 +44,13 @@ vst3 = ["dep:vst3-host", "clap"]
 
 [dev-dependencies]
 assert_no_alloc = "1.1"
+
+# Estos ejemplos usan vst3_slot / clap_host, que solo existen con las features: sin ellas
+# `cargo test --workspace` los saltaba con error en vez de omitirlos.
+[[example]]
+name = "vst3_note_probe"
+required-features = ["vst3"]
+
+[[example]]
+name = "plugin_gui_probe"
+required-features = ["vst3"]

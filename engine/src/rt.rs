@@ -25,6 +25,7 @@ pub struct RtStore {
     active_scene: [AtomicU8;  MAX_TRACKS], // 0xFF = sin clip activo
     peak:         [AtomicU32; MAX_TRACKS + 1], // f32 bits; último = master
     groove_step:    AtomicU8,  // step actual del motor de Caja (0..15, 255=parado)
+    groove_peak: AtomicU32, // f32 bits; pico del Groove
 }
 
 impl RtStore {
@@ -35,6 +36,7 @@ impl RtStore {
             active_scene: std::array::from_fn(|_| AtomicU8::new(0xFF)),
             peak:         std::array::from_fn(|_| AtomicU32::new(0)),
             groove_step:    AtomicU8::new(255),
+            groove_peak: AtomicU32::new(0),
         }
     }
     pub fn set_clip_state(&self, t: usize, s: usize, st: ClipState) {
@@ -54,6 +56,8 @@ impl RtStore {
     pub fn peak(&self, t: usize) -> f32 { f32::from_bits(self.peak[t].load(Ordering::Relaxed)) }
     pub fn set_groove_step(&self, step: u8) { self.groove_step.store(step, Ordering::Relaxed); }
     pub fn groove_step(&self) -> u8 { self.groove_step.load(Ordering::Relaxed) }
+    pub fn set_groove_peak(&self, v: f32) { self.groove_peak.store(v.to_bits(), Ordering::Relaxed); }
+    pub fn groove_peak(&self) -> f32 { f32::from_bits(self.groove_peak.load(Ordering::Relaxed)) }
 }
 
 #[cfg(test)]

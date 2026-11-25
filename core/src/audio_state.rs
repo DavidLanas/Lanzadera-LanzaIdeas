@@ -29,6 +29,7 @@ pub struct TrackAudio {
     pub hpf_hz: f32,
     pub lpf_hz: f32,
     pub sends: [f32; 4],
+    pub mono: bool,
     pub active_clip: Option<ClipAudioRef>,
 }
 
@@ -38,7 +39,7 @@ impl TrackAudio {
         eq_low: 0.0, eq_mid: 0.0, eq_high: 0.0,
         eq_mid_f: 1000.0, eq_mid_q: 0.7,
         hpf_on: false, lpf_on: false,
-        hpf_hz: 20.0, lpf_hz: 20000.0, sends: [0.0; 4], active_clip: None,
+        hpf_hz: 20.0, lpf_hz: 20000.0, sends: [0.0; 4], mono: false, active_clip: None,
     };
 }
 impl Default for TrackAudio { fn default() -> Self { Self::EMPTY } }
@@ -73,6 +74,10 @@ pub struct SessionAudio {
     pub tempo: f64,
     pub playing: bool,
     pub master_volume: f32,
+    /// Master solo del Groove Machine.
+    pub groove_master: f32,
+    /// Contador de grabaciones iniciadas (ver SessionState::rec_seq).
+    pub rec_seq: u32,
     pub quantize: Quantize, // global (stops del launcher)
     pub fill_mode: bool,    // hook Fase 4 (occurrence de Caja)
     pub metronome: bool,
@@ -93,7 +98,7 @@ impl Default for SessionAudio {
     fn default() -> Self {
         SessionAudio {
             tracks: [TrackAudio::EMPTY; MAX_TRACKS], track_count: 0, any_solo: false,
-            tempo: 120.0, playing: false, master_volume: 0.8,
+            tempo: 120.0, playing: false, master_volume: 0.8, groove_master: 1.0, rec_seq: 0,
             quantize: Quantize::One, fill_mode: false, metronome: false,
             recording: false, rec_track: 0, rec_scene: 0, rec_loop_ticks: 3840,
             rec_q_ticks: 0,
@@ -111,6 +116,7 @@ impl SessionAudio {
             recording: s.recording, rec_track: rt as u8, rec_scene: rs as u8, rec_loop_ticks: rl,
             rec_q_ticks: s.quantize.ticks() as u32,
             tempo: s.tempo, playing: s.playing, master_volume: s.master_volume,
+            groove_master: s.groove_master, rec_seq: s.rec_seq,
             quantize: s.quantize, fill_mode: s.fill_mode, metronome: s.metronome,
             ..Default::default()
         };
@@ -139,7 +145,7 @@ impl SessionAudio {
                 eq_low: tr.eq_low, eq_mid: tr.eq_mid, eq_high: tr.eq_high,
                 eq_mid_f: tr.eq_mid_f, eq_mid_q: tr.eq_mid_q,
                 hpf_on: tr.hpf_on, lpf_on: tr.lpf_on, hpf_hz: tr.hpf_hz, lpf_hz: tr.lpf_hz,
-                sends: tr.sends, active_clip: active,
+                sends: tr.sends, mono: tr.mono, active_clip: active,
             };
             out.any_solo |= tr.solo;
         }

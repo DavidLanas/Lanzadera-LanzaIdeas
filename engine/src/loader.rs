@@ -126,13 +126,40 @@ fn compute_peaks(data: &[f32], ch: usize, buckets: usize) -> Vec<f32> {
     }
     out
 }
+/// Latencia de grabación a compensar, en frames. Prioridad: variable de entorno, preferencias,
+/// y por último una estimación automática de un buffer.
+fn rec_latency_frames(sample_rate: u32) -> usize {
+    let ms = std::env::var("LANZADERA_REC_LATENCY_MS").ok().and_then(|v| v.parse::<f32>().ok())
+        .or(lanzadera_core::config::get().rec_latency_ms)
+        .unwrap_or_else(|| {
+            let buf = std::env::var("LANZADERA_BUFFER").ok().and_then(|v| v.parse::<u32>().ok())
+                .filter(|b| *b > 0).unwrap_or(256);
+            // 1 buffer: punto medio entre no compensar (el loop sonaba atrasado) y compensar
+            // dos buffers (sonaba adelantado). Se afina en Preferencias → Audio.
+            1.0 * buf as f32 * 1000.0 / sample_rate.max(1) as f32
+        });
+    ((ms.max(0.0) / 1000.0) * sample_rate as f32) as usize
+}
+
 fn drain_rec_slot(shared: &SessionShared) {
     let taken = {
         let mut slot = crate::audio_io::REC_SLOT.lock().unwrap_or_else(|e| e.into_inner());
         slot.take()
     };
 
-    let Some((t, s, clip)) = taken else { return };
+    let Some((t, s, mut clip)) = taken else { return };
+
+    // Compensación de latencia de ida y vuelta (buffer de entrada + de salida): lo que se
+    // captura llega con ese retraso respecto a lo que el músico oyó y tocó. Como el clip es
+    // un loop, se desplaza esa cantidad para que caiga en tiempo (lo que sonó al final de la
+    // toma aparece en el arranque del loop siguiente).
+    let lat_frames = rec_latency_frames(clip.sample_rate);
+    let ch_n = clip.channels.max(1) as usize;
+    if lat_frames > 0 && lat_frames * ch_n < clip.samples.len() {
+        clip.samples.rotate_left(lat_frames * ch_n);
+        println!("[record] latencia compensada: {} muestras ({:.1} ms)",
+            lat_frames, lat_frames as f32 * 1000.0 / clip.sample_rate.max(1) as f32);
+    }
 
     let denom = (clip.sample_rate as usize * clip.channels as usize).max(1);
     let secs = clip.samples.len() / denom;
