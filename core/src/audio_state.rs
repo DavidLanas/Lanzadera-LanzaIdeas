@@ -125,7 +125,7 @@ impl SessionAudio {
             for (si, slot) in tr.clips.iter().enumerate() {
                 if let Some(c) = slot {
                     out.clips[ti * MAX_SCENES + si] = ClipMeta {
-                        exists: true, launch_mode: c.launch_mode, quantize: c.quantize,
+                        exists: !matches!(c.state, ClipState::Recording | ClipState::RecQueued | ClipState::Overdubbing), launch_mode: c.launch_mode, quantize: c.quantize,
                         follow_action: c.follow_action, follow_bars: c.follow_bars,
                         loop_bars: c.loop_bars.max(1), loop_count: c.loop_count,
                         probability: c.probability,
@@ -155,5 +155,39 @@ impl SessionAudio {
     #[inline]
     pub fn clip_meta(&self, t: usize, s: usize) -> ClipMeta {
         self.clips[t * MAX_SCENES + s]
+    }
+}
+
+#[cfg(test)]
+mod rec_clip_no_launch_tests {
+    use super::*;
+    use crate::control::ControlCmd;
+
+    #[test]
+    fn un_clip_que_se_graba_no_es_lanzable_por_el_motor() {
+        let mut st = SessionState::default();
+        st.tracks[0].arm = true;
+        st.quantize = crate::Quantize::One;
+        st.apply_control(ControlCmd::Record);
+        let (t, s, _) = st.record_target();
+        let audio = SessionAudio::from_state(&st);
+        assert!(audio.recording);
+        assert!(!audio.clip_meta(t, s).exists, "RecQueued no debe lanzarse como reproduccion");
+        st.apply_control(ControlCmd::Record);
+        let audio2 = SessionAudio::from_state(&st);
+        assert!(audio2.clip_meta(t, s).exists, "al desarmar vuelve a ser lanzable");
+    }
+
+    #[test]
+    fn lanzar_escena_con_pista_armada_deja_el_clip_en_espera() {
+        let mut st = SessionState::default();
+        st.tracks[1].arm = true;
+        st.quantize = crate::Quantize::One;
+        st.apply_control(ControlCmd::LaunchScene { scene: 0 });
+        assert!(st.recording);
+        let (t, s, _) = st.record_target();
+        assert_eq!((t, s), (1, 0));
+        let audio = SessionAudio::from_state(&st);
+        assert!(!audio.clip_meta(t, s).exists);
     }
 }

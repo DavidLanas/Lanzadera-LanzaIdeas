@@ -531,7 +531,8 @@ impl Renderer {
         // La identidad del clip que se graba se fija al empezar: el cursor de grabación
         // (rec_track / rec_scene) sigue a la selección y cambia, por ejemplo, al lanzar otro
         // clip de la pista.
-        if audio.recording && self.rec_clip.is_none() {
+        let armed_now = audio.recording && self.rec_clip.is_none();
+        if armed_now {
             self.rec_clip = Some((audio.rec_track as usize, audio.rec_scene as usize));
         }
         // Feedback del estado de grabación hacia la GUI y los LEDs.
@@ -573,7 +574,7 @@ impl Renderer {
         // anterior. Regla "una pista, una voz", inspirada en MAGDA (GPL-3).
         // Además fijamos el origen de ticks para que las notas entren en 0.1.
         let mut force_stop_track: Option<usize> = None;
-        if rec_live && !old_rec_on {
+        if (rec_live && !old_rec_on) || armed_now {
             force_stop_track = Some(audio.rec_track as usize);
             let now = self.engine.global_ticks();
             self.rec_origin_ticks = if rec_q > 0 { (now / rec_q as u64) * rec_q as u64 } else { now };
