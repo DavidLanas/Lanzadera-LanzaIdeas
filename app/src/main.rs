@@ -291,7 +291,7 @@ impl eframe::App for LanzaderaApp {
     if lanzadera_engine::clap_gui::has_pending_request() { ctx.request_repaint(); }
 
     // request_restart del plugin → tu mecanismo existente de reinicio.
-    for track in 0..lanzadera_core::MAX_TRACKS {
+    for track in 0..lanzadera_engine::clap_gui::MAX_PLUGIN_SLOTS {
         if lanzadera_engine::clap_services::take_restart(track) {
             self.shared.audio_restart.store(true, std::sync::atomic::Ordering::Relaxed);
         }

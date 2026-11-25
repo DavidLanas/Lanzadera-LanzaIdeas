@@ -26,6 +26,7 @@ pub struct ActiveClip {
     pub scene: u8,
     pub playhead: u32,  // ticks dentro del loop
     pub loop_ticks: u32,
+    pub loop_start_sec: f32,
     pub repeat_left: u8, // u8::MAX = infinito
     pub state: ClipState,
     pub launch_mode: LaunchMode, // Fase 2: Gate/Repeat lo leen del clip activo
@@ -339,6 +340,7 @@ impl ClipEngine {
         self.active[t] = Some(ActiveClip {
             track: t as u8, scene: s as u8, playhead, loop_ticks, repeat_left,
             state: ClipState::Playing, launch_mode: meta.launch_mode, follow: meta.follow_action,
+            loop_start_sec: meta.loop_start_sec,
         just_started: true,
 });
         self.pending[t] = None;

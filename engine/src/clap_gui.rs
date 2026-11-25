@@ -33,6 +33,23 @@ use std::sync::Mutex;
 
 use lanzadera_core::MAX_TRACKS;
 
+/// Máximo de huecos de plugin con GUI: 1 instrumento + 8 Note FX + 8 FX por pista.
+/// Esquema de ids: 0..31 instrumento · nfx_gui_id(t,i) Note FX · fx_gui_id(t,i) FX.
+pub const CHAIN_MAX: usize = 8;
+pub const MAX_PLUGIN_SLOTS: usize = MAX_TRACKS * (1 + 2 * CHAIN_MAX);
+pub fn nfx_gui_id(t: usize, i: usize) -> usize {
+    MAX_TRACKS + (t * CHAIN_MAX + i).min(MAX_TRACKS * CHAIN_MAX - 1)
+}
+pub fn fx_gui_id(t: usize, i: usize) -> usize {
+    MAX_TRACKS + MAX_TRACKS * CHAIN_MAX + (t * CHAIN_MAX + i).min(MAX_TRACKS * CHAIN_MAX - 1)
+}
+/// Pista propietaria de un id de plugin (instrumento, Note FX o FX).
+pub fn gui_id_track(id: usize) -> usize {
+    if id < MAX_TRACKS { return id; }
+    let off = id - MAX_TRACKS;
+    (off % (MAX_TRACKS * CHAIN_MAX)) / CHAIN_MAX
+}
+
 /// Pista cuya GUI hay que abrir/cerrar. La UI encola; el hilo principal consume.
 pub static GUI_TOGGLE: Mutex<Option<usize>> = Mutex::new(None);
 
@@ -43,17 +60,17 @@ pub static GUI_CLOSED: Mutex<Vec<(usize, bool)>> = Mutex::new(Vec::new());
 #[derive(Clone, Copy)]
 pub struct GuiState {
     /// El plugin de esa pista expone la extension GUI.
-    pub avail: [bool; MAX_TRACKS],
+    pub avail: [bool; MAX_PLUGIN_SLOTS],
     /// La GUI de esa pista esta abierta ahora mismo.
-    pub open: [bool; MAX_TRACKS],
+    pub open: [bool; MAX_PLUGIN_SLOTS],
     /// La GUI de esta pista ya colgo una vez esta sesion: no reintentar.
-    pub broken: [bool; MAX_TRACKS],
+    pub broken: [bool; MAX_PLUGIN_SLOTS],
 }
 
 pub static GUI_STATE: Mutex<GuiState> = Mutex::new(GuiState {
-    avail: [false; MAX_TRACKS],
-    open: [false; MAX_TRACKS],
-    broken: [false; MAX_TRACKS],
+    avail: [false; MAX_PLUGIN_SLOTS],
+    open: [false; MAX_PLUGIN_SLOTS],
+    broken: [false; MAX_PLUGIN_SLOTS],
 });
 
 /// Mensaje para mostrar en la barra de estado de la UI (errores de GUI /
@@ -93,7 +110,7 @@ pub fn any_open() -> bool {
 
 /// Estado para la UI: (tiene_gui, esta_abierta).
 pub fn state(track: usize) -> (bool, bool) {
-    if track >= MAX_TRACKS { return (false, false); }
+    if track >= MAX_PLUGIN_SLOTS { return (false, false); }
     GUI_STATE.lock().map(|s| (s.avail[track], s.open[track])).unwrap_or((false, false))
 }
 
@@ -144,18 +161,18 @@ pub fn ack_closed(instance: &mut crate::clap_host::Instance, track: usize, was_d
 
 pub fn set_avail(track: usize, v: bool) {
     if let Ok(mut s) = GUI_STATE.lock() {
-        if track < MAX_TRACKS { s.avail[track] = v; }
+        if track < MAX_PLUGIN_SLOTS { s.avail[track] = v; }
     }
 }
 
 pub fn set_open(track: usize, v: bool) {
     if let Ok(mut s) = GUI_STATE.lock() {
-        if track < MAX_TRACKS { s.open[track] = v; }
+        if track < MAX_PLUGIN_SLOTS { s.open[track] = v; }
     }
 }
 pub fn set_broken(track: usize, v: bool) {
     if let Ok(mut s) = GUI_STATE.lock() {
-        if track < MAX_TRACKS { s.broken[track] = v; }
+        if track < MAX_PLUGIN_SLOTS { s.broken[track] = v; }
     }
 }
 pub fn is_broken(track: usize) -> bool {

@@ -2055,6 +2055,20 @@ impl SessionView {
                         self.browser_show_all = false;
                         self.browser_list = None;
                     }
+                    if cur_path.is_some() {
+                        let gui_id = if target == BrowserTarget::NoteFx {
+                            lanzadera_engine::clap_gui::nfx_gui_id(t, 0)
+                        } else {
+                            lanzadera_engine::clap_gui::fx_gui_id(t, 0)
+                        };
+                        let (has_gui, gui_open) = lanzadera_engine::clap_gui::state(gui_id);
+                        if ui.add_enabled(has_gui, egui::Button::new(if gui_open { "🖥 Cerrar" } else { "🖥 Interfaz" }))
+                            .on_hover_text("Abrir o cerrar la interfaz de este plugin")
+                            .clicked()
+                        {
+                            lanzadera_engine::clap_gui::request_toggle(gui_id);
+                        }
+                    }
                     if cur_path.is_some() && ui.small_button("✕").on_hover_text("Quitar").clicked() {
                         if target == BrowserTarget::NoteFx { shared.set_note_fx(t, None, None); }
                         else { shared.set_fx(t, None, None); }

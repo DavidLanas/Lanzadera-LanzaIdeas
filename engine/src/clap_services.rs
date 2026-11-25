@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use lanzadera_core::MAX_TRACKS;
+use crate::clap_gui::MAX_PLUGIN_SLOTS;
 
 // ── Identidad de hilos (RT-safe: thread-local, sin locks ni alloc) ──
 thread_local! {
@@ -29,33 +29,33 @@ fn wake() {
 }
 
 // ── Flags por pista ──
-static CALLBACK: [AtomicBool; MAX_TRACKS] = [const { AtomicBool::new(false) }; MAX_TRACKS];
-static RESTART:  [AtomicBool; MAX_TRACKS] = [const { AtomicBool::new(false) }; MAX_TRACKS];
-static PROCESS:  [AtomicBool; MAX_TRACKS] = [const { AtomicBool::new(false) }; MAX_TRACKS];
-static DIRTY:    [AtomicBool; MAX_TRACKS] = [const { AtomicBool::new(false) }; MAX_TRACKS];
+static CALLBACK: [AtomicBool; MAX_PLUGIN_SLOTS] = [const { AtomicBool::new(false) }; MAX_PLUGIN_SLOTS];
+static RESTART:  [AtomicBool; MAX_PLUGIN_SLOTS] = [const { AtomicBool::new(false) }; MAX_PLUGIN_SLOTS];
+static PROCESS:  [AtomicBool; MAX_PLUGIN_SLOTS] = [const { AtomicBool::new(false) }; MAX_PLUGIN_SLOTS];
+static DIRTY:    [AtomicBool; MAX_PLUGIN_SLOTS] = [const { AtomicBool::new(false) }; MAX_PLUGIN_SLOTS];
 
 pub fn request_callback(track: usize) {
-    if track < MAX_TRACKS { CALLBACK[track].store(true, Ordering::Release); }
+    if track < MAX_PLUGIN_SLOTS { CALLBACK[track].store(true, Ordering::Release); }
     wake();
 }
 pub fn request_restart(track: usize) {
-    if track < MAX_TRACKS { RESTART[track].store(true, Ordering::Release); }
+    if track < MAX_PLUGIN_SLOTS { RESTART[track].store(true, Ordering::Release); }
     wake();
 }
 pub fn request_process(track: usize) {
-    if track < MAX_TRACKS { PROCESS[track].store(true, Ordering::Release); }
+    if track < MAX_PLUGIN_SLOTS { PROCESS[track].store(true, Ordering::Release); }
 }
 pub fn mark_dirty(track: usize) {
-    if track < MAX_TRACKS { DIRTY[track].store(true, Ordering::Release); }
+    if track < MAX_PLUGIN_SLOTS { DIRTY[track].store(true, Ordering::Release); }
 }
 pub fn take_restart(track: usize) -> bool {
-    track < MAX_TRACKS && RESTART[track].swap(false, Ordering::AcqRel)
+    track < MAX_PLUGIN_SLOTS && RESTART[track].swap(false, Ordering::AcqRel)
 }
 pub fn take_dirty(track: usize) -> bool {
-    track < MAX_TRACKS && DIRTY[track].swap(false, Ordering::AcqRel)
+    track < MAX_PLUGIN_SLOTS && DIRTY[track].swap(false, Ordering::AcqRel)
 }
 fn take_callback(track: usize) -> bool {
-    track < MAX_TRACKS && CALLBACK[track].swap(false, Ordering::AcqRel)
+    track < MAX_PLUGIN_SLOTS && CALLBACK[track].swap(false, Ordering::AcqRel)
 }
 
 // ── Timers ──
@@ -144,7 +144,7 @@ pub fn clear_track(track: usize) {
     if let Ok(mut t) = TIMERS.lock() { t.retain(|e| e.track != track); }
     #[cfg(target_os = "linux")]
     if let Ok(mut v) = fds::FDS.lock() { v.retain(|e| e.track != track); }
-    if track < MAX_TRACKS {
+    if track < MAX_PLUGIN_SLOTS {
         CALLBACK[track].store(false, Ordering::Relaxed);
         RESTART[track].store(false, Ordering::Relaxed);
         PROCESS[track].store(false, Ordering::Relaxed);

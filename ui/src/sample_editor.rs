@@ -1,7 +1,11 @@
-//! Editor de muestra (lote C3): onda grande con zoom, seleccion y operaciones.
-//! Reutiliza el modulo waveform; las operaciones viven en el motor (no en RT).
+//! Editor de muestra (lote C3): onda grande con zoom, seleccion, operaciones
+//! (gain / normalizar / reversa / silenciar / fades / recorte) y control del
+//! loop (offset de inicio y longitud = loop parcial dentro del archivo).
+//! Las operaciones viven en engine/src/sample_edit.rs y escriben un WAV nuevo:
+//! el original no se toca.
 use std::sync::Arc;
 use egui::{pos2, vec2, Color32, Rect, Sense, Stroke};
+use lanzadera_engine::sample_edit::SampleOp;
 use lanzadera_engine::shared::SessionShared;
 use crate::theme::T;
 use crate::waveform;
@@ -37,11 +41,13 @@ impl SampleEditor {
         if !self.open { return; }
         let Some((t, s)) = self.target else { return };
         let mut open = true;
-        let mut op = None;
+        let mut op: Option<SampleOp> = None;
+        // (offset en segundos, barras opcionales) pedidos por los botones de loop.
+        let mut loop_cmd: Option<(f32, Option<u8>)> = None;
         egui::Window::new("Editor de muestra")
             .open(&mut open)
-            .default_size([900.0, 430.0])
-            .min_size([520.0, 280.0])
+            .default_size([920.0, 480.0])
+            .min_size([540.0, 300.0])
             .resizable(true)
             .show(ctx, |ui| {
                 let Some(sd) = shared.samples.load(t, s) else {
@@ -52,19 +58,26 @@ impl SampleEditor {
                 let frames = sd.data.len() / ch;
                 if frames == 0 { ui.label("Muestra vacia."); return; }
                 let secs = frames as f64 / sd.sample_rate.max(1) as f64;
-                let loop_bars = {
+                let (tempo, lstart, lbars) = {
                     let st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
-                    st.tracks.get(t).and_then(|tr| tr.clips.get(s)).and_then(|c| c.as_ref())
-                        .map(|c| c.loop_bars.max(1)).unwrap_or(1)
+                    let tempo = st.tempo.max(20.0);
+                    let (ls, lb) = st.tracks.get(t).and_then(|tr| tr.clips.get(s)).and_then(|c| c.as_ref())
+                        .map(|c| (c.loop_start_sec, c.loop_bars.max(1))).unwrap_or((0.0, 1));
+                    (tempo, ls, lb)
                 };
+                let bar_secs = 240.0 / tempo;
+                let loop_secs = lbars as f64 * bar_secs;
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(format!("Pista {} · Escena {}", t + 1, s + 1))
                         .strong().color(T.accent_gold));
+                    ui.label(egui::RichText::new(format!("{:.2} s · {} ch · {} Hz", secs, ch, sd.sample_rate))
+                        .size(11.0).color(T.text_dim));
                     ui.label(egui::RichText::new(format!(
-                        "{:.2} s · {} ch · {} Hz · loop {} compases", secs, ch, sd.sample_rate, loop_bars))
+                        "Loop: empieza en {:.2} s · {} comp. ({:.2} s)", lstart, lbars, loop_secs))
                         .size(11.0).color(T.text_dim));
                 });
                 ui.separator();
+                // Fila 1: zoom + gain + operaciones globales.
                 ui.horizontal_wrapped(|ui| {
                     ui.label("Zoom");
                     ui.add_sized(vec2(120.0, 20.0), egui::Slider::new(&mut self.zoom, 1.0..=64.0)
@@ -75,18 +88,61 @@ impl SampleEditor {
                     ui.add_sized(vec2(150.0, 20.0), egui::Slider::new(&mut self.gain_db, -24.0..=24.0)
                         .suffix(" dB"));
                     if ui.button("Aplicar").on_hover_text("Escribe un WAV nuevo y recarga el clip").clicked() {
-                        op = Some(lanzadera_engine::sample_edit::SampleOp::Gain(
-                            (10.0f32).powf(self.gain_db / 20.0)));
+                        op = Some(SampleOp::Gain((10.0f32).powf(self.gain_db / 20.0)));
                     }
-                    if ui.button("Normalizar").clicked() {
-                        op = Some(lanzadera_engine::sample_edit::SampleOp::Normalize);
+                    if ui.button("Normalizar").clicked() { op = Some(SampleOp::Normalize); }
+                    if ui.button("Reversa").clicked() { op = Some(SampleOp::Reverse); }
+                });
+                // Fila 2: operaciones sobre la selección + región de loop.
+                let sel_range = self.sel.map(|(s0, s1)| (s0.min(s1), s0.max(s1)))
+                    .filter(|(lo, hi)| hi - lo > 0.001);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Selección:");
+                    match sel_range {
+                        Some((lo, hi)) => {
+                            ui.label(egui::RichText::new(format!(
+                                "{:.3} → {:.3} s", lo * secs as f32, hi * secs as f32))
+                                .size(10.0).color(T.text_dim));
+                            if ui.button("Silenciar").clicked() { op = Some(SampleOp::Silence(lo, hi)); }
+                            if ui.button("Fade in").clicked() { op = Some(SampleOp::FadeIn(lo, hi)); }
+                            if ui.button("Fade out").clicked() { op = Some(SampleOp::FadeOut(lo, hi)); }
+                            if ui.button("✂ Recortar")
+                                .on_hover_text("El archivo queda solo con la selección; el loop se reajusta y el offset vuelve a 0")
+                                .clicked()
+                            {
+                                op = Some(SampleOp::Trim(lo, hi));
+                                self.sel = None;
+                            }
+                            ui.separator();
+                            if ui.button("⤓ Inicio loop = sel.")
+                                .on_hover_text("El loop empieza donde empieza la selección: loop parcial dentro del archivo")
+                                .clicked()
+                            {
+                                loop_cmd = Some((lo * secs as f32, None));
+                            }
+                            if ui.button("Loop = selección")
+                                .on_hover_text("Offset y longitud del loop = selección (longitud redondeada a compases)")
+                                .clicked()
+                            {
+                                let sel_secs = (hi - lo) as f64 * secs;
+                                let bars = ((sel_secs / bar_secs).round().max(1.0) as i64).clamp(1, 255) as u8;
+                                loop_cmd = Some((lo * secs as f32, Some(bars)));
+                            }
+                        }
+                        None => {
+                            ui.label(egui::RichText::new("arrastra sobre la onda para seleccionar")
+                                .size(10.0).color(T.text_dim));
+                        }
                     }
-                    if ui.button("Reversa").clicked() {
-                        op = Some(lanzadera_engine::sample_edit::SampleOp::Reverse);
+                    if lstart > 0.0 {
+                        if ui.button("Offset 0").on_hover_text("El loop vuelve al principio del archivo").clicked() {
+                            loop_cmd = Some((0.0, None));
+                        }
                     }
                 });
                 ui.add_space(4.0);
 
+                // ── Onda ──
                 let zoom = self.zoom.clamp(1.0, 64.0);
                 let span = 1.0 / zoom;
                 self.scroll = self.scroll.clamp(0.0, (1.0 - span).max(0.0));
@@ -94,8 +150,6 @@ impl SampleEditor {
                 let b = (a + span).min(1.0);
                 let w = ui.available_width().max(80.0);
                 let (rect, resp) = ui.allocate_exact_size(vec2(w, 210.0), Sense::click_and_drag());
-
-                // Rueda = zoom alrededor del puntero.
                 if resp.hovered() {
                     let dy = ui.input(|i| i.raw_scroll_delta.y);
                     if dy.abs() > 0.5 {
@@ -125,13 +179,32 @@ impl SampleEditor {
                 let f1 = (((b * frames as f32) as usize).max(f0 + 1)).min(frames);
                 let cols = (rect.width() as usize).clamp(1, 2048);
                 let peaks = waveform::overview_from_samples(&sd.data[f0 * ch..f1 * ch], ch, cols);
-                let lt = (loop_bars as u32 * lanzadera_core::TICKS_PER_BAR as u32).max(1);
+                // Playhead real, mapeado al offset del loop.
+                let lt = (lbars as u32 * lanzadera_core::TICKS_PER_BAR as u32).max(1);
                 let head = if shared.rt.active_scene(t) == Some(s as u8) {
                     let p = shared.rt.playhead(t) as f32 / lt as f32;
-                    if p >= a && p <= b { Some((p - a) / span) } else { None }
+                    let file_pos = lstart as f64 + p as f64 * loop_secs;
+                    let fr = (file_pos / secs).clamp(0.0, 1.0) as f32;
+                    if fr >= a && fr <= b { Some((fr - a) / span) } else { None }
                 } else { None };
                 let p = ui.painter_at(rect);
                 waveform::paint(&p, rect, &peaks, head, &waveform::WaveStyle::default());
+                // Región del loop sombreada (offset + compases).
+                let ls_f = (lstart as f64 / secs).clamp(0.0, 1.0) as f32;
+                let le_f = ((lstart as f64 + loop_secs) / secs).clamp(0.0, 1.0) as f32;
+                if le_f > a && ls_f < b {
+                    let x0 = rect.left() + ((ls_f - a) / span).clamp(0.0, 1.0) * rect.width();
+                    let x1 = rect.left() + ((le_f - a) / span).clamp(0.0, 1.0) * rect.width();
+                    if x1 > x0 {
+                        p.rect_filled(Rect::from_min_max(pos2(x0, rect.top()), pos2(x1, rect.bottom())),
+                            0.0, Color32::from_rgba_unmultiplied(230, 190, 80, 26));
+                        p.line_segment([pos2(x0, rect.top()), pos2(x0, rect.bottom())],
+                            Stroke::new(1.5, T.accent_gold));
+                        p.line_segment([pos2(x1, rect.top()), pos2(x1, rect.bottom())],
+                            Stroke::new(1.0, T.accent_gold));
+                    }
+                }
+                // Selección.
                 if let Some((s0, s1)) = self.sel {
                     let lo = s0.min(s1);
                     let hi = s0.max(s1);
@@ -142,6 +215,7 @@ impl SampleEditor {
                             0.0, Color32::from_rgba_unmultiplied(120, 190, 255, 45));
                     }
                 }
+                // Regla de tiempo.
                 for k in 0..=8 {
                     let f = a + (b - a) * k as f32 / 8.0;
                     let x = rect.left() + rect.width() * k as f32 / 8.0;
@@ -158,7 +232,7 @@ impl SampleEditor {
                     let lo = s0.min(s1) * secs as f32;
                     let hi = s0.max(s1) * secs as f32;
                     ui.label(egui::RichText::new(format!(
-                        "Seleccion: {:.3} s → {:.3} s  ({:.3} s) · doble clic la limpia", lo, hi, hi - lo))
+                        "Selección: {:.3} s → {:.3} s  ({:.3} s) · doble clic la limpia", lo, hi, hi - lo))
                         .size(10.0).color(T.text_dim));
                 }
                 if !self.msg.is_empty() {
@@ -166,6 +240,18 @@ impl SampleEditor {
                 }
             });
         self.open = open;
+        if let Some((start, bars)) = loop_cmd {
+            shared.edit(|st| {
+                if let Some(Some(c)) = st.tracks.get_mut(t).and_then(|tr| tr.clips.get_mut(s)) {
+                    c.loop_start_sec = start;
+                    if let Some(b) = bars { c.loop_bars = b; }
+                }
+            });
+            self.msg = match bars {
+                Some(b) => format!("Loop: empieza en {:.2} s · {} compases", start, b),
+                None => format!("Inicio del loop: {:.2} s", start),
+            };
+        }
         if let Some(o) = op {
             self.msg = match lanzadera_engine::sample_edit::apply(shared, t, s, o) {
                 Ok(m) => format!("Aplicado: {}", m),

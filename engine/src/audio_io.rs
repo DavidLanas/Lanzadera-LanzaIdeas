@@ -157,18 +157,26 @@ impl AudioHandle {
         for (t, destroyed) in crate::clap_gui::take_closed() {
             if let Some((_, inst)) = self.instances.iter_mut().find(|(i, _)| *i == t) {
                 crate::clap_gui::ack_closed(inst, t, destroyed);
+            } else if let Some((_, inst)) = self.fx_instances.iter_mut().find(|(i, _)| *i == t) {
+                crate::clap_gui::ack_closed(inst, t, destroyed);
             }
         }
         // GUI CLAP embebidas: cierre por la X y resizes del plugin.
         crate::clap_services::poll(&mut self.instances);
         crate::clap_services::poll(&mut self.fx_instances);
         crate::clap_gui::poll_embedded(&mut self.instances, &mut self.clap_embed);
+        crate::clap_gui::poll_embedded(&mut self.fx_instances, &mut self.clap_embed);
 
         // GUI VST3: run loop del plugin + cierre por la X.
         #[cfg(feature = "vst3")]
         for t in self.vst3_gui.poll(&self.vst3_handles) {
             crate::clap_gui::set_open(t, false);
             println!("[gui] pista {}: el usuario cerro la ventana VST3", t + 1);
+        }
+        #[cfg(feature = "vst3")]
+        for id in self.vst3_gui.poll(&self.fx_vst3_handles) {
+            crate::clap_gui::set_open(id, false);
+            println!("[gui] FX pista {}: el usuario cerro la ventana VST3", crate::clap_gui::gui_id_track(id) + 1);
         }
 
         let Some(t) = crate::clap_gui::take_request() else { return };
@@ -185,18 +193,44 @@ impl AudioHandle {
             }
             return;
         }
-
-        let Some((_, inst)) = self.instances.iter_mut().find(|(i, _)| *i == t) else {
-            crate::clap_gui::notify(format!("[gui] pista {} no tiene plugin cargado", t + 1));
-            return;
-        };
-        match crate::clap_gui::toggle(inst, t, &title, &mut self.clap_embed) {
-            Ok(()) => {
-                let (_, open) = crate::clap_gui::state(t);
-                println!("[gui] pista {}: {}", t + 1, if open { "abierta" } else { "cerrada" });
+        // ── VST3 FX (pseudo-id del hueco) ──
+        #[cfg(feature = "vst3")]
+        if let Some((_, plugin)) = self.fx_vst3_handles.iter().find(|(i, _)| *i == t) {
+            let pista = crate::clap_gui::gui_id_track(t);
+            match self.vst3_gui.toggle(t, plugin) {
+                Ok(open) => {
+                    crate::clap_gui::set_open(t, open);
+                    println!("[gui] FX pista {}: {}", pista + 1, if open { "abierta (VST3)" } else { "cerrada (VST3)" });
+                }
+                Err(e) => crate::clap_gui::notify(format!("[gui] FX pista {}: {}", pista + 1, e)),
             }
-            Err(e) => crate::clap_gui::notify(format!("[gui] pista {}: {}", t + 1, e)),
+            return;
         }
+
+        if let Some((_, inst)) = self.instances.iter_mut().find(|(i, _)| *i == t) {
+            match crate::clap_gui::toggle(inst, t, &title, &mut self.clap_embed) {
+                Ok(()) => {
+                    let (_, open) = crate::clap_gui::state(t);
+                    println!("[gui] pista {}: {}", t + 1, if open { "abierta" } else { "cerrada" });
+                }
+                Err(e) => crate::clap_gui::notify(format!("[gui] pista {}: {}", t + 1, e)),
+            }
+            return;
+        }
+        if let Some((_, inst)) = self.fx_instances.iter_mut().find(|(i, _)| *i == t) {
+            let pista = crate::clap_gui::gui_id_track(t);
+            let kind = if t >= crate::clap_gui::fx_gui_id(0, 0) { "FX" } else { "Note FX" };
+            let ftitle = format!("Lanzadera · {} pista {}", kind, pista + 1);
+            match crate::clap_gui::toggle(inst, t, &ftitle, &mut self.clap_embed) {
+                Ok(()) => {
+                    let (_, open) = crate::clap_gui::state(t);
+                    println!("[gui] {} pista {}: {}", kind, pista + 1, if open { "abierta" } else { "cerrada" });
+                }
+                Err(e) => crate::clap_gui::notify(format!("[gui] {} pista {}: {}", kind, pista + 1, e)),
+            }
+            return;
+        }
+        crate::clap_gui::notify(format!("[gui] pista {} no tiene plugin cargado", crate::clap_gui::gui_id_track(t) + 1));
     }
 }
 
@@ -206,10 +240,12 @@ impl Drop for AudioHandle {
         // 0) Cerrar las GUI abiertas ANTES de soltar nada: la ventana del
         //    plugin debe destruirse mientras la instancia sigue viva.
         crate::clap_gui::close_all(&mut self.instances, &mut self.clap_embed);
-        for t in 0..MAX_TRACKS { crate::clap_services::clear_track(t); }
+        crate::clap_gui::close_all(&mut self.fx_instances, &mut self.clap_embed);
+        for t in 0..crate::clap_gui::MAX_PLUGIN_SLOTS { crate::clap_services::clear_track(t); }
         #[cfg(feature = "vst3")]
         {
             for (t, _) in self.vst3_handles.iter() { crate::clap_gui::set_open(*t, false); }
+            for (id, _) in self.fx_vst3_handles.iter() { crate::clap_gui::set_open(*id, false); }
         }
         // 1) Soltar el stream dropea el Renderer, que devuelve los procesadores.
         self.stream.take();
@@ -790,9 +826,13 @@ impl Renderer {
                         let df = sd.data.len() / ch;
                         if df > 0 {
                             let loop_frames = (a.loop_ticks as f64 * spt).max(1.0);
-                            let eff = loop_frames.min(df as f64);
-                            let p = pos % eff;
-                            let i0 = p as usize;
+                        // Loop parcial: empieza en loop_start_sec y envuelve al llegar al final
+                        // del archivo. Asi el clip puede loopear menos de lo que dura el WAV.
+                        let start_f = ((a.loop_start_sec as f64 * sd.sample_rate as f64) as usize)
+                            .min(df.saturating_sub(1));
+                        let eff = loop_frames.min((df - start_f) as f64).max(1.0);
+                        let p = start_f as f64 + (pos % eff);
+                        let i0 = (p as usize).min(df - 1);
                             let i1 = (i0 + 1) % df;
                             let fr = (p - i0 as f64) as f32;
                             if ch == 1 {
@@ -1482,15 +1522,16 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
                     crate::clap_gui::notify(format!("⚠ Note FX pista {}: los Note FX VST3 aún no se procesan; usa la versión CLAP", t + 1));
                 } else {
                     #[cfg(feature = "clap")]
-                    match clap_host::load(&path, id.as_deref(), sample_rate, MAX_BLOCK as u32, MAX_TRACKS + t) {
+                    match clap_host::load(&path, id.as_deref(), sample_rate, MAX_BLOCK as u32, crate::clap_gui::nfx_gui_id(t, 0)) {
                         Ok((mut inst, proc, name, _params)) => {
                             println!("[lanzadera] Note FX pista {}: {}", t + 1, name);
+                        crate::clap_gui::probe(&mut inst, crate::clap_gui::nfx_gui_id(t, 0));
                             if let Some(bytes) = state.as_deref().and_then(lanzadera_core::b64::decode) {
                                 let _ = clap_host::load_state(&mut inst, &bytes);
                             }
                             loaded.push((t, 1, path.clone()));
                             note_fx[t] = Some(proc);
-                            fx_instances.push((MAX_TRACKS + t, inst));
+                            fx_instances.push((crate::clap_gui::nfx_gui_id(t, 0), inst));
                         }
                         Err(e) => crate::clap_gui::notify(format!("⚠ Note FX pista {}: {}", t + 1, e)),
                     }
@@ -1506,11 +1547,13 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
                                 crate::clap_gui::notify(format!("⚠ FX pista {}: «{}» es un instrumento, no un efecto", t + 1, slot.name));
                             } else {
                                 println!("[lanzadera] FX VST3 pista {}: {}", t + 1, slot.name);
+                        crate::clap_gui::set_avail(crate::clap_gui::fx_gui_id(t, 0), slot.has_editor);
+                        crate::clap_gui::set_open(crate::clap_gui::fx_gui_id(t, 0), false);
                                 if let Some(bytes) = state.as_deref().and_then(lanzadera_core::b64::decode) {
                                     if let Ok(mut pl) = slot.plugin.lock() { let _ = pl.load_state(&bytes); }
                                 }
                                 loaded.push((t, 2, path.clone()));
-                                fx_vst3_handles.push((t, slot.plugin.clone()));
+                                fx_vst3_handles.push((crate::clap_gui::fx_gui_id(t, 0), slot.plugin.clone()));
                                 fx_vst3[t] = Some(slot);
                             }
                         }
@@ -1518,15 +1561,16 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
                     }
                 } else {
                     #[cfg(feature = "clap")]
-                    match clap_host::load(&path, id.as_deref(), sample_rate, MAX_BLOCK as u32, 2 * MAX_TRACKS + t) {
+                    match clap_host::load(&path, id.as_deref(), sample_rate, MAX_BLOCK as u32, crate::clap_gui::fx_gui_id(t, 0)) {
                         Ok((mut inst, proc, name, _params)) => {
                             println!("[lanzadera] FX CLAP pista {}: {}", t + 1, name);
+                        crate::clap_gui::probe(&mut inst, crate::clap_gui::fx_gui_id(t, 0));
                             if let Some(bytes) = state.as_deref().and_then(lanzadera_core::b64::decode) {
                                 let _ = clap_host::load_state(&mut inst, &bytes);
                             }
                             loaded.push((t, 2, path.clone()));
                             fx_clap[t] = Some(proc);
-                            fx_instances.push((2 * MAX_TRACKS + t, inst));
+                            fx_instances.push((crate::clap_gui::fx_gui_id(t, 0), inst));
                         }
                         Err(e) => crate::clap_gui::notify(format!("⚠ FX CLAP pista {}: {}", t + 1, e)),
                     }
