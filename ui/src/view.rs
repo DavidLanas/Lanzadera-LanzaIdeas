@@ -201,6 +201,7 @@ pub struct SessionView {
     pub audio_modal: Option<(usize, usize)>,
     pub audio_path_input: String,
     pub roll: PianoRoll,
+    pub sample_editor: crate::sample_editor::SampleEditor,
     pub plugin_path_input: String,
     pub browser_open: bool,
     pub browser_list: Option<Vec<(String, String, String)>>,
@@ -285,6 +286,7 @@ impl Default for SessionView {
             audio_modal: None,
             audio_path_input: String::new(),
             roll: PianoRoll::default(),
+            sample_editor: crate::sample_editor::SampleEditor::default(),
             plugin_path_input: String::new(),
             browser_open: false,
             browser_list: None,
@@ -579,6 +581,7 @@ impl SessionView {
         }
 
         self.audio_modal_window(ctx, shared);
+        self.sample_editor.show(ctx, shared);
         // ── Fase 1: menús, atajos y diálogos de proyecto ──
         self.project_tick(ctx, shared);
         self.poll_scan();
@@ -1966,6 +1969,9 @@ impl SessionView {
                         ui.label(egui::RichText::new(format!("🎵 {}", trunc(p, 26))).size(10.0).color(T.text_dim));
                     }
                     if ui.button("📂 Cargar audio…").clicked() { open_modal = Some((t, s, c.audio_path.clone())); }
+                    if c.audio_path.is_some() && ui.button("✂ Editar muestra").clicked() {
+                        self.sample_editor.open_for(t, s);
+                    }
                     if ui.button("🎹 Piano Roll").clicked() { open_roll = Some((t, s)); }
                     if changed { clip_edit = Some((t, s, c)); }
                 } else {

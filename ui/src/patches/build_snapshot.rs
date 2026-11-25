@@ -33,7 +33,8 @@ fn snapshot_clip(c: &Clip) -> ClipSnapshot {
         progress: 0.0,
         loop_bars: c.loop_bars,
         quantize_bars: quantize_to_bars(&c.quantize),
-        peaks: generate_peaks(&c.midi_notes),
+        peaks: crate::waveform::overview_from_notes(&c.midi_notes,
+            c.loop_bars.max(1) as u32 * lanzadera_core::TICKS_PER_BAR as u32, 64),
         follow_icon: follow_icon(&c.follow_action),
     }
 }
@@ -75,6 +76,7 @@ fn quantize_to_bars(q: &Quantize) -> u8 {
     }
 }
 
+#[allow(dead_code)]
 fn generate_peaks(notes: &[MidiNote]) -> Vec<f32> {
     if notes.is_empty() { return Vec::new(); }
     const BUCKETS: usize = 64;

@@ -72,3 +72,4 @@ pub use rt::RtStore;
 pub mod caja_drums;
 pub mod groove;
 pub mod groove_kit;
+pub mod sample_edit;

@@ -114,13 +114,31 @@ pub fn overview_from_samples(data: &[f32], channels: usize, buckets: usize) -> V
 pub fn overview_from_notes(notes: &[lanzadera_core::MidiNote], loop_ticks: u32, buckets: usize) -> Vec<f32> {
     let n = buckets.max(1);
     let mut out = vec![0.0f32; n];
-    let lt = loop_ticks.max(1) as u64;
+    if notes.is_empty() { return out; }
+    let lt = loop_ticks.max(1) as f32;
+    // 1) Ataque: el bucket donde cae el onset recibe la velocidad plena, aunque
+    //    la nota sea mas corta que el bucket.
     for note in notes {
-        let st = note.tick_start as u64 % lt;
-        let a = st * n as u64 / lt;
-        let b = ((st + note.tick_dur.max(1) as u64) * n as u64 / lt).max(a + 1).min(n as u64);
+        let st = (note.tick_start as f32) % lt;
+        let bi = (((st / lt) * n as f32) as usize).min(n - 1);
         let v = note.vel as f32 / 127.0;
-        for k in a as usize..b as usize { if v > out[k] { out[k] = v; } }
+        if v > out[bi] { out[bi] = v; }
+    }
+    // 2) Cola: caida exponencial dentro de la duracion. Asi cada nota dibuja un
+    //    pico con cola (como una onda real) en vez de un bloque plano a tope.
+    for (b, slot) in out.iter_mut().enumerate() {
+        let t = (b as f32 + 0.5) * lt / n as f32;
+        let mut v = 0.0f32;
+        for note in notes {
+            let st = (note.tick_start as f32) % lt;
+            let dur = note.tick_dur.max(1) as f32;
+            let mut dt = t - st;
+            if dt < 0.0 { dt += lt; }
+            if dt >= dur { continue; }
+            let a = (note.vel as f32 / 127.0) * (-4.0 * (dt / dur)).exp();
+            if a > v { v = a; }
+        }
+        if v > *slot { *slot = v; }
     }
     out
 }

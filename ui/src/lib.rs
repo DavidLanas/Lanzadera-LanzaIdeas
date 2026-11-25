@@ -15,3 +15,4 @@ pub mod plugin_window;
 // ── Patches Lanzadera ──
 pub mod patches;
 pub mod waveform;
+pub mod sample_editor;
