@@ -39,8 +39,22 @@ struct LanzaderaApp {
 
 impl LanzaderaApp {
     fn midi_connect(&mut self, profile: MidiProfile, port: &str) -> String {
-        if self.legacy_midi && matches!(profile, MidiProfile::KeyLab | MidiProfile::Mk3) {
-            return "Ya conectado con --midi; no lo conectes tambien desde Preferencias".to_string();
+        if self.legacy_midi {
+            let lp = port.to_lowercase();
+            let es_puerto_legacy = lp.contains("keylab") || lp.contains("maschine")
+                || lp.contains("mikro") || lp.contains("virtual raw midi");
+            if matches!(profile, MidiProfile::KeyLab | MidiProfile::Mk3) || es_puerto_legacy {
+                return "Ya conectado con --midi; no lo conectes tambien desde Preferencias".to_string();
+            }
+        }
+        if profile == MidiProfile::Generic {
+            let lp = port.to_lowercase();
+            let integrado = self.midi_entries.iter()
+                .any(|e| matches!(e.profile, MidiProfile::KeyLab | MidiProfile::Mk3));
+            if integrado && (lp.contains("keylab") || lp.contains("maschine")
+                || lp.contains("mikro") || lp.contains("virtual raw midi")) {
+                return "Ese puerto ya lo usa el controlador integrado (KeyLab/MK3)".to_string();
+            }
         }
         if self.midi_entries.iter().any(|e| e.port == port) {
             return format!("{} ya está conectado", profile.label());
