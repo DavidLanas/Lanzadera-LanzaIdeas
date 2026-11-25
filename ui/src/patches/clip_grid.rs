@@ -232,10 +232,11 @@ fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize
         );
 
         if !x.peaks.is_empty() {
-            let wv = Rect::from_min_max(
-                Pos2::new(rect.left() + 26.0, rect.top() + 20.0),
-                Pos2::new(rect.right() - 4.0, rect.bottom() - 14.0),
-            );
+            let wv_l = rect.left() + 24.0;
+        let wv_t = rect.top() + 18.0;
+        let wv_r = (rect.right() - 4.0).max(wv_l + 10.0);
+        let wv_b = (rect.bottom() - 12.0).max(wv_t + 10.0);
+        let wv = Rect::from_min_max(Pos2::new(wv_l, wv_t), Pos2::new(wv_r, wv_b));
             let wc = Color32::from_rgb(
                 x.color.r().saturating_add(90),
                 x.color.g().saturating_add(90),

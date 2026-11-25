@@ -54,7 +54,7 @@ pub fn paint(p: &egui::Painter, rect: Rect, peaks: &[f32], head: Option<f32>, st
         for i in i0..i1 {
             if peaks[i] > pk { pk = peaks[i]; }
         }
-        let h = (pk.clamp(0.0, 1.0) * half).max(0.5);
+        let h = (pk.clamp(0.0, 1.0).sqrt() * half).max(0.5);
         let x = rect.left() + (c as f32 + 0.5) * w / cols as f32;
         p.line_segment([pos2(x, mid - h), pos2(x, mid + h)], Stroke::new(1.0, st.wave));
     }
@@ -105,6 +105,22 @@ pub fn overview_from_samples(data: &[f32], channels: usize, buckets: usize) -> V
             }
         }
         out[b] = m;
+    }
+    out
+}
+
+/// Envolvente de un clip MIDI: velocidad maxima de las notas que caen en cada
+/// bucket del loop. Permite dibujar el clip aunque no tenga audio.
+pub fn overview_from_notes(notes: &[lanzadera_core::MidiNote], loop_ticks: u32, buckets: usize) -> Vec<f32> {
+    let n = buckets.max(1);
+    let mut out = vec![0.0f32; n];
+    let lt = loop_ticks.max(1) as u64;
+    for note in notes {
+        let st = note.tick_start as u64 % lt;
+        let a = st * n as u64 / lt;
+        let b = ((st + note.tick_dur.max(1) as u64) * n as u64 / lt).max(a + 1).min(n as u64);
+        let v = note.vel as f32 / 127.0;
+        for k in a as usize..b as usize { if v > out[k] { out[k] = v; } }
     }
     out
 }

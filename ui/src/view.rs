@@ -1313,7 +1313,8 @@ impl SessionView {
             for (si, slot) in tr.clips.iter_mut().enumerate() {
                 let Some(c) = slot.as_mut() else { continue };
                 if let Some(sd) = shared.samples.load(ti, si) {
-                    if !sd.peaks.is_empty() { c.peaks = sd.peaks.clone(); }
+                    let mx = sd.peaks.iter().fold(0.0f32, |a, &b| a.max(b));
+                    if mx > 0.0005 || c.peaks.is_empty() { c.peaks = sd.peaks.clone(); }
                 }
             }
         }
@@ -1923,8 +1924,9 @@ impl SessionView {
                     changed |= ui.add(egui::Slider::new(&mut c.probability, 0.0..=1.0).text("Probabilidad")).changed();
                     ui.separator();
                 // C2: vista de ondas del clip (picos del loader + playhead).
-                if c.audio_path.is_some() {
-                    if let Some(sd) = shared.samples.load(t, s) {
+                if c.audio_path.is_some() || !c.midi_notes.is_empty() {
+                    if let Some(sd) = shared.samples.load(t, s)
+                        .filter(|sd| sd.peaks.iter().any(|&p| p > 0.0005) || c.midi_notes.is_empty()) {
                         let lt = (c.loop_bars.max(1) as u32 * TICKS_PER_BAR as u32).max(1);
                         let head = if shared.rt.active_scene(t) == Some(s as u8) {
                             Some((shared.rt.playhead(t) as f32 / lt as f32).clamp(0.0, 1.0))
@@ -1942,6 +1944,22 @@ impl SessionView {
                         ui.label(egui::RichText::new(format!(
                             "{:.2} s · {} ch · {} muestras · pico {:.2}",
                             secs, ch, frames, pmax)).size(9.0).color(T.text_dim));
+                    }
+                }
+                // Clip MIDI (o audio mudo): envolvente de las notas.
+                if !c.midi_notes.is_empty() {
+                    let audio_ok = shared.samples.load(t, s)
+                        .map(|sd| sd.peaks.iter().any(|&p| p > 0.0005))
+                        .unwrap_or(false);
+                    if !audio_ok {
+                        let lt = (c.loop_bars.max(1) as u32 * TICKS_PER_BAR as u32).max(1);
+                        let head = if shared.rt.active_scene(t) == Some(s as u8) {
+                            Some((shared.rt.playhead(t) as f32 / lt as f32).clamp(0.0, 1.0))
+                        } else { None };
+                        let pk = crate::waveform::overview_from_notes(&c.midi_notes, lt, 256);
+                        crate::waveform::view(ui, &pk, 72.0, head);
+                        ui.label(egui::RichText::new(format!("MIDI · {} notas", c.midi_notes.len()))
+                            .size(9.0).color(T.text_dim));
                     }
                 }
                     if let Some(p) = &c.audio_path {

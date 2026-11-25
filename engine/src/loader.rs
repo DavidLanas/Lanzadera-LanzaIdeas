@@ -163,6 +163,15 @@ fn drain_rec_slot(shared: &SessionShared) {
             lat_frames, lat_frames as f32 * 1000.0 / clip.sample_rate.max(1) as f32);
     }
 
+    // Una toma completamente muda (p. ej. grabar MIDI sin nada en la entrada)
+    // no debe convertirse en clip de audio: pisaria la onda MIDI y cambiaria
+    // la longitud del clip. Se descarta y se devuelve el buffer al pool.
+    let take_peak = clip.samples.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+    if take_peak < 0.0005 {
+        println!("[record] toma descartada por silencio ({} muestras)", clip.samples.len());
+        crate::audio_record::recycle_buffer(clip.samples);
+        return;
+    }
     let denom = (clip.sample_rate as usize * clip.channels as usize).max(1);
     let secs = clip.samples.len() / denom;
     let wav_path = format!("/tmp/lanzadera_rec_{}_{}.wav", t, s);
