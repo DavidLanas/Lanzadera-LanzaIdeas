@@ -16,7 +16,7 @@
 //! documentados en Lemon Studio (MIT) y nxtakt (Rust, MIT).
 //! El cálculo de posición de teclas negras sigue el estándar de piano físico.
 
-use egui::{pos2, vec2, Align2, Color32, FontId, Key, Rect, Rounding, Sense, Stroke};
+use egui::{pos2, vec2, Align2, Color32, CursorIcon, FontId, Key, Rect, Rounding, Sense, Stroke};
 use lanzadera_core::{MidiNote, TICKS_PER_BAR};
 use lanzadera_engine::shared::SessionShared;
 use crate::theme::T;
@@ -48,6 +48,7 @@ pub struct PianoRoll {
     pub scroll_key: u8, pub n_rows: u8, pub quant: u32,
     pub sel: Vec<usize>, pub follow_head: bool,
     drag: Option<MoveDrag>, band: Option<BandDrag>, h_scroll_offset: f32,
+    focus_notes_on_open: bool,
 }
 
 impl Default for PianoRoll {
@@ -55,7 +56,8 @@ impl Default for PianoRoll {
         PianoRoll { open: false, target: None, mode: RollMode::Draw,
             px_per_tick: 0.12, row_h: 14.0, scroll_key: 36, n_rows: VISIBLE_ROWS,
             quant: 120, sel: Vec::new(), follow_head: false,
-            drag: None, band: None, h_scroll_offset: 0.0 }
+            drag: None, band: None, h_scroll_offset: 0.0,
+            focus_notes_on_open: false }
     }
 }
 
@@ -63,6 +65,7 @@ impl PianoRoll {
     pub fn open_for(&mut self, t: usize, s: usize) {
         self.open = true; self.target = Some((t, s));
         self.sel.clear(); self.drag = None; self.band = None;
+        self.focus_notes_on_open = true;
     }
 
     pub fn show(&mut self, ctx: &egui::Context, shared: &SessionShared) {
@@ -87,6 +90,10 @@ impl PianoRoll {
             if i.modifiers.ctrl && i.raw_scroll_delta.y != 0.0 {
                 let factor = if i.raw_scroll_delta.y > 0.0 { 1.12 } else { 1.0 / 1.12 };
                 self.px_per_tick = (self.px_per_tick * factor).clamp(0.03, 0.9);
+            } else if !i.modifiers.ctrl && i.raw_scroll_delta.y != 0.0 {
+                let delta = if i.raw_scroll_delta.y > 0.0 { 2i32 } else { -2i32 };
+                let max_k = 127i32 - self.n_rows as i32 + 1;
+                self.scroll_key = (self.scroll_key as i32 + delta).clamp(0, max_k.max(0)) as u8;
             }
         });
 
@@ -137,6 +144,11 @@ impl PianoRoll {
             });
 
         if close { self.open = false; }
+        if self.focus_notes_on_open {
+            self.focus_on_notes(&notes);
+            self.focus_notes_on_open = false;
+        }
+
         if changed {
             shared.edit(|st| {
                 if let Some(tr) = st.tracks.get_mut(t) {
@@ -211,18 +223,24 @@ impl PianoRoll {
         });
     }
 
+    fn top_key(&self) -> i32 {
+        self.scroll_key as i32 + self.n_rows as i32 - 1
+    }
     fn row_y_full(&self, rect: Rect, key: u8) -> f32 {
-        rect.top() + (127 - key as i32).max(0) as f32 * self.row_h
+        rect.top() + (self.top_key() - key as i32) as f32 * self.row_h
     }
     fn key_at_full(&self, rect: Rect, y: f32) -> u8 {
         let row = ((y - rect.top()) / self.row_h).floor() as i32;
-        (127 - row).clamp(0, 127) as u8
+        (self.top_key() - row).clamp(0, 127) as u8
     }
 
     fn paint_notes(&self, ui: &egui::Ui, rect: Rect, notes: &[MidiNote],
         loop_ticks: u32, t: usize, s: usize, shared: &SessionShared) {
         let p = ui.painter_at(rect); let px = self.px_per_tick;
-        for key in 0u8..=127 {
+        let top = self.top_key();
+        let bottom = self.scroll_key as i32;
+        for key in (bottom..=top).rev() {
+            let key = key as u8;
             let y = self.row_y_full(rect, key);
             if y + self.row_h < rect.top() || y > rect.bottom() { continue; }
             let col = if is_black(key) { T.piano_black }
@@ -296,6 +314,9 @@ impl PianoRoll {
         let key = self.key_at_full(rect, pos.y);
         let hit = notes.iter().position(|n| n.note == key
             && tk >= n.tick_start as f32 && tk < (n.tick_start + n.tick_dur) as f32);
+        let edge_hit = notes.iter().enumerate().find_map(|(i, n)| self.note_resize_edge(rect, pos, n).map(|e| (i, e)));
+        let hover_resize = edge_hit.is_some() || self.drag.as_ref().map(|d| d.resize).unwrap_or(false);
+        if hover_resize { resp.ctx.set_cursor_icon(CursorIcon::ResizeHorizontal); }
 
         if resp.drag_started() || (resp.clicked() && self.drag.is_none() && self.band.is_none()) {
             match self.mode {
@@ -303,15 +324,22 @@ impl PianoRoll {
                     notes.remove(i); self.sel.retain(|&x| x != i); changed = true;
                 } }
                 RollMode::Draw => {
-                    if let Some(i) = hit {
+                    let target = hit.or(edge_hit.map(|(i, _)| i));
+                    if let Some(i) = target {
                         if !self.sel.contains(&i) { self.sel = vec![i]; }
                         let n = notes[i];
-                        let end_x = rect.left() + (n.tick_start + n.tick_dur) as f32 * px;
-                        let resize = (pos.x - end_x).abs() < 7.0;
-                        self.drag = Some(MoveDrag { resize, start_x: pos.x, start_y: pos.y,
-                            orig: if resize { vec![(i, n.tick_start, n.tick_dur, n.note)] }
-                                  else { self.sel.iter().filter_map(|&j| notes.get(j)
-                                      .map(|nn| (j, nn.tick_start, nn.tick_dur, nn.note))).collect() } });
+                        let edge = edge_hit.filter(|(ei, _)| *ei == i).map(|(_, e)| e)
+                            .or_else(|| self.note_resize_edge(rect, pos, &n));
+                        if let Some(resize_end) = edge {
+                            // resize: start_x negative => resize start edge
+                            let sx = if resize_end { pos.x } else { -(pos.x.abs() + 1.0) };
+                            self.drag = Some(MoveDrag { resize: true, start_x: sx, start_y: pos.y,
+                                orig: vec![(i, n.tick_start, n.tick_dur, n.note)] });
+                        } else {
+                            self.drag = Some(MoveDrag { resize: false, start_x: pos.x, start_y: pos.y,
+                                orig: self.sel.iter().filter_map(|&j| notes.get(j)
+                                    .map(|nn| (j, nn.tick_start, nn.tick_dur, nn.note))).collect() });
+                        }
                     } else {
                         let start = ((tk / q as f32).floor() as u32 * q).min(loop_ticks.saturating_sub(1));
                         notes.push(MidiNote { tick_start: start, tick_dur: q, note: key,
@@ -320,14 +348,19 @@ impl PianoRoll {
                     }
                 }
                 RollMode::Select => {
-                    if let Some(i) = hit {
+                    let target = hit.or(edge_hit.map(|(i, _)| i));
+                    if let Some(i) = target {
                         if !resp.ctx.input(|inp| inp.modifiers.shift) {
                             if !self.sel.contains(&i) { self.sel = vec![i]; }
-                        } else {
+                        } else if hit.is_some() {
                             if self.sel.contains(&i) { self.sel.retain(|&x| x != i); }
                             else { self.sel.push(i); }
                         }
-                        self.drag = Some(MoveDrag { resize: false, start_x: pos.x, start_y: pos.y,
+                        let n = notes[i];
+                        let edge = edge_hit.filter(|(ei, _)| *ei == i).map(|(_, e)| e)
+                            .or_else(|| self.note_resize_edge(rect, pos, &n));
+                        let (resize, sx) = if let Some(end) = edge { (true, if end { pos.x } else { -(pos.x.abs() + 1.0) }) } else { (false, pos.x) };
+                        self.drag = Some(MoveDrag { resize, start_x: sx, start_y: pos.y,
                             orig: self.sel.iter().filter_map(|&j| notes.get(j)
                                 .map(|nn| (j, nn.tick_start, nn.tick_dur, nn.note))).collect() });
                     } else {
@@ -352,12 +385,22 @@ impl PianoRoll {
                 }
             }
             if let Some(d) = self.drag.clone() {
-                let dt_ticks = ((pos.x - d.start_x) / px / q as f32).round() as i32 * q as i32;
+                let resize_start = d.resize && d.start_x < 0.0;
+                let sx = if resize_start { -(d.start_x + 1.0) } else { d.start_x };
+                let dt_ticks = ((pos.x - sx) / px / q as f32).round() as i32 * q as i32;
                 let dt_semis = ((d.start_y - pos.y) / self.row_h).round() as i32;
                 for (i, st0, du0, note0) in &d.orig {
                     if let Some(n) = notes.get_mut(*i) {
-                        if d.resize { n.tick_dur = ((*du0 as i32 + dt_ticks).max(q as i32)) as u32; }
-                        else {
+                        if d.resize {
+                            if resize_start {
+                                let new_start = (*st0 as i32 + dt_ticks).clamp(0, *st0 as i32 + *du0 as i32 - q as i32);
+                                let end = *st0 as i32 + *du0 as i32;
+                                n.tick_start = new_start.max(0) as u32;
+                                n.tick_dur = (end - n.tick_start as i32).max(q as i32) as u32;
+                            } else {
+                                n.tick_dur = ((*du0 as i32 + dt_ticks).max(q as i32)) as u32;
+                            }
+                        } else {
                             n.tick_start = (*st0 as i32 + dt_ticks).max(0) as u32;
                             n.note = (*note0 as i32 + dt_semis).clamp(0, 127) as u8;
                         }
@@ -376,8 +419,11 @@ impl PianoRoll {
     fn paint_keyboard(&self, ui: &egui::Ui, rect: Rect) {
         let p = ui.painter_at(rect);
         p.rect_filled(rect, Rounding::ZERO, T.panel.gamma_multiply(0.95));
-        for key in 0u8..=127 {
-            let y = rect.top() + (127 - key as i32).max(0) as f32 * self.row_h;
+        let top = self.top_key();
+        let bottom = self.scroll_key as i32;
+        for key in (bottom..=top).rev() {
+            let key = key as u8;
+            let y = self.row_y_full(rect, key);
             if y + self.row_h < rect.top() || y > rect.bottom() { continue; }
             let black = is_black(key); let c_note = key % 12 == 0;
             if black {
@@ -394,6 +440,31 @@ impl PianoRoll {
                     Stroke::new(0.5, Color32::from_gray(55)));
             }
         }
+    }
+
+    fn focus_on_notes(&mut self, notes: &[MidiNote]) {
+        if notes.is_empty() { return; }
+        let min_n = notes.iter().map(|n| n.note).min().unwrap_or(60);
+        let max_n = notes.iter().map(|n| n.note).max().unwrap_or(72);
+        let center = ((min_n as i32 + max_n as i32) / 2).clamp(0, 127) as u8;
+        let half = (self.n_rows / 2).max(1) as i32;
+        self.scroll_key = (center as i32 - half).clamp(0, 127 - self.n_rows as i32 + 1).max(0) as u8;
+        let min_t = notes.iter().map(|n| n.tick_start).min().unwrap_or(0) as f32;
+        self.h_scroll_offset = (min_t * self.px_per_tick - 40.0).max(0.0);
+    }
+
+    fn note_resize_edge(&self, rect: Rect, pos: egui::Pos2, note: &MidiNote) -> Option<bool> {
+        let px = self.px_per_tick;
+        let start_x = rect.left() + note.tick_start as f32 * px;
+        let end_x = start_x + (note.tick_dur as f32 * px).max(3.0);
+        let y = self.row_y_full(rect, note.note);
+        let note_rect = Rect::from_min_size(pos2(start_x, y), vec2((note.tick_dur as f32 * px).max(3.0), self.row_h));
+        if !note_rect.expand(3.0).contains(pos) { return None; }
+        let near_start = (pos.x - start_x).abs() <= 6.0;
+        let near_end = (pos.x - end_x).abs() <= 6.0;
+        if near_end { Some(true) } // true = resize end
+        else if near_start { Some(false) } // false = resize start
+        else { None }
     }
 
     fn paint_velocity(&self, ui: &egui::Ui, rect: Rect, notes: &[MidiNote]) {

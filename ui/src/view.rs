@@ -21,6 +21,9 @@ pub enum BrowserMode { Clap, Vst3 }
 /// A qué ranura de la pista va el plugin que se elige en el browser.
 #[derive(Clone, Copy, PartialEq)]
 pub enum BrowserTarget { Instrument, NoteFx, Fx }
+/// Pestaña del browser global integrado.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BrowserTab { Files, Instruments, NoteFx, Fx }
 /// Pestañas de la ventana de Preferencias.
 #[derive(Clone, Copy, PartialEq)]
 pub enum PrefsTab { Plugins, Midi, Audio, Apariencia }
@@ -68,6 +71,16 @@ pub struct WindowState {
     pub inspector_visible: bool,
     pub browser_visible: bool,
     pub mixer_visible: bool,
+    pub clip_launch_pos: Option<egui::Pos2>,
+    pub groove_pos: Option<egui::Pos2>,
+    pub inspector_pos: Option<egui::Pos2>,
+    pub browser_pos: Option<egui::Pos2>,
+    pub mixer_pos: Option<egui::Pos2>,
+    pub clip_launch_size: Option<egui::Vec2>,
+    pub groove_size: Option<egui::Vec2>,
+    pub inspector_size: Option<egui::Vec2>,
+    pub browser_size: Option<egui::Vec2>,
+    pub mixer_size: Option<egui::Vec2>,
 }
 
 impl Default for WindowState {
@@ -78,6 +91,16 @@ impl Default for WindowState {
             inspector_visible: true,
             browser_visible: false,
             mixer_visible: false,
+            clip_launch_pos: None,
+            groove_pos: None,
+            inspector_pos: None,
+            browser_pos: None,
+            mixer_pos: None,
+            clip_launch_size: None,
+            groove_size: None,
+            inspector_size: None,
+            browser_size: None,
+            mixer_size: None,
         }
     }
 }
@@ -111,6 +134,14 @@ impl Default for InspectorFocus {
     fn default() -> Self {
         InspectorFocus::None
     }
+}
+
+/// Portapapeles de clip para copiar/pegar/cortar en el grid.
+#[derive(Clone)]
+pub struct ClipClipboard {
+    pub clip: lanzadera_core::Clip,
+    pub midi: Option<std::sync::Arc<lanzadera_engine::midi::MidiNoteData>>,
+    pub sample: Option<std::sync::Arc<lanzadera_engine::shared::SampleData>>,
 }
 
 pub struct SessionView {
@@ -204,6 +235,8 @@ pub struct SessionView {
     pub sample_editor: crate::sample_editor::SampleEditor,
     pub plugin_path_input: String,
     pub browser_open: bool,
+    pub browser_tab: BrowserTab,
+    pub browser_plugin_filter: String,
     pub browser_list: Option<Vec<(String, String, String)>>,
     pub browser_mode: BrowserMode,
     pub browser_target: BrowserTarget,
@@ -212,6 +245,10 @@ pub struct SessionView {
     pub plugin_windows: PluginWindows,
     pub pending_native_gui: Vec<usize>,
     pub groove_sequencer_open: bool,
+    /// Portapapeles interno de clips (copiar/pegar/cortar).
+    pub clip_clipboard: Option<ClipClipboard>,
+    /// Frames restantes para forzar posición de ventanas tras cargar layout.
+    pub window_layout_apply_frames: u8,
 }
 
 impl Default for SessionView {
@@ -289,6 +326,8 @@ impl Default for SessionView {
             sample_editor: crate::sample_editor::SampleEditor::default(),
             plugin_path_input: String::new(),
             browser_open: false,
+            browser_tab: BrowserTab::Files,
+            browser_plugin_filter: String::new(),
             browser_list: None,
             browser_mode: BrowserMode::Clap,
             browser_target: BrowserTarget::Instrument,
@@ -297,6 +336,8 @@ impl Default for SessionView {
             plugin_windows: PluginWindows::default(),
             pending_native_gui: Vec::new(),
             groove_sequencer_open: false,
+            clip_clipboard: None,
+            window_layout_apply_frames: 0,
         }
     }
 }
@@ -541,6 +582,7 @@ impl SessionView {
             .show(ctx, |_ui| {});
 
         // Clip Launch: grid + mixer + piano roll.
+        ctx.data_mut(|d| d.insert_temp(egui::Id::new("clip_clipboard_has"), self.clip_clipboard.is_some()));
         self.roll.show(ctx, shared);
         if self.windows.clip_launch_visible {
             self.clip_launch_window(ctx, shared, audio_on);
@@ -564,10 +606,9 @@ impl SessionView {
         shared.groove_sub_mode.store(sub_mode, std::sync::atomic::Ordering::Relaxed);
         shared.mk3_chords_mode.store(self.groove_chords, std::sync::atomic::Ordering::Relaxed);
 
-        // Browser global.
+        // Browser global integrado (archivos + plugins).
         if self.windows.browser_visible {
             self.global_browser_window(ctx, shared);
-            self.browser_window(ctx, shared);
         }
 
         // Mixer como ventana independiente.
@@ -638,6 +679,7 @@ impl SessionView {
 
     /// Escritura real del proyecto. Devuelve true si se guardó bien.
     fn project_save_now(&mut self, shared: &SessionShared) -> bool {
+        self.sync_window_layout_to_state(shared);
         let path = self.project_path.clone();
         match shared.save_to_file(&path) {
             Ok(()) => {
@@ -655,6 +697,7 @@ impl SessionView {
     }
 
     fn write_autosave(&mut self, shared: &SessionShared) {
+        self.sync_window_layout_to_state(shared);
         if let Some((a, o)) = Self::autosave_paths() {
             if let Some(dir) = a.parent() { let _ = std::fs::create_dir_all(dir); }
             if shared.autosave_to_file(&a.to_string_lossy()).is_ok() {
@@ -668,6 +711,7 @@ impl SessionView {
             Ok(()) => {
                 self.project_path = path.clone();
                 self.push_recent(&path);
+                self.apply_window_layout_from_state(shared);
                 // Reinicia el audio para cargar los plugins (instrumento, Note FX, FX) del proyecto.
                 lanzadera_engine::state_ctl::skip_capture_on_next_restart();
                 shared.audio_restart.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -680,6 +724,7 @@ impl SessionView {
 
     fn project_new(&mut self, shared: &SessionShared) {
         shared.new_project();
+        self.apply_window_layout_from_state(shared);
         lanzadera_engine::state_ctl::skip_capture_on_next_restart();
         shared.audio_restart.store(true, std::sync::atomic::Ordering::Relaxed);
         self.project_path = "sin_titulo.lanzadera".into();
@@ -691,6 +736,46 @@ impl SessionView {
     fn autosave_paths() -> Option<(std::path::PathBuf, std::path::PathBuf)> {
         let dir = Self::config_dir()?.join("autosave");
         Some((dir.join("autosave.lanzadera"), dir.join("autosave.origin")))
+    }
+
+    fn apply_window_layout_from_state(&mut self, shared: &SessionShared) {
+        let wl = { shared.state.lock().unwrap_or_else(|e| e.into_inner()).window_layout.clone() };
+        self.windows.clip_launch_visible = wl.clip_launch;
+        self.windows.groove_machine_visible = wl.groove_machine;
+        self.windows.inspector_visible = wl.inspector;
+        self.windows.browser_visible = wl.browser;
+        self.windows.mixer_visible = wl.mixer;
+        self.windows.clip_launch_pos = wl.clip_launch_pos.map(|p| egui::pos2(p[0], p[1]));
+        self.windows.groove_pos = wl.groove_pos.map(|p| egui::pos2(p[0], p[1]));
+        self.windows.inspector_pos = wl.inspector_pos.map(|p| egui::pos2(p[0], p[1]));
+        self.windows.browser_pos = wl.browser_pos.map(|p| egui::pos2(p[0], p[1]));
+        self.windows.mixer_pos = wl.mixer_pos.map(|p| egui::pos2(p[0], p[1]));
+        self.windows.clip_launch_size = wl.clip_launch_size.map(|s| egui::vec2(s[0], s[1]));
+        self.windows.groove_size = wl.groove_size.map(|s| egui::vec2(s[0], s[1]));
+        self.windows.inspector_size = wl.inspector_size.map(|s| egui::vec2(s[0], s[1]));
+        self.windows.browser_size = wl.browser_size.map(|s| egui::vec2(s[0], s[1]));
+        self.windows.mixer_size = wl.mixer_size.map(|s| egui::vec2(s[0], s[1]));
+    }
+
+    fn sync_window_layout_to_state(&self, shared: &SessionShared) {
+        let wl = lanzadera_core::session::WindowLayoutState {
+            clip_launch: self.windows.clip_launch_visible,
+            groove_machine: self.windows.groove_machine_visible,
+            inspector: self.windows.inspector_visible,
+            browser: self.windows.browser_visible,
+            mixer: self.windows.mixer_visible,
+            clip_launch_pos: self.windows.clip_launch_pos.map(|p| [p.x, p.y]),
+            groove_pos: self.windows.groove_pos.map(|p| [p.x, p.y]),
+            inspector_pos: self.windows.inspector_pos.map(|p| [p.x, p.y]),
+            browser_pos: self.windows.browser_pos.map(|p| [p.x, p.y]),
+            mixer_pos: self.windows.mixer_pos.map(|p| [p.x, p.y]),
+            clip_launch_size: self.windows.clip_launch_size.map(|s| [s.x, s.y]),
+            groove_size: self.windows.groove_size.map(|s| [s.x, s.y]),
+            inspector_size: self.windows.inspector_size.map(|s| [s.x, s.y]),
+            browser_size: self.windows.browser_size.map(|s| [s.x, s.y]),
+            mixer_size: self.windows.mixer_size.map(|s| [s.x, s.y]),
+        };
+        shared.edit(|st| st.window_layout = wl);
     }
 
     fn clear_autosave() {
@@ -933,26 +1018,154 @@ impl SessionView {
         }
     }
 
-    /// Ctrl+N / Ctrl+O / Ctrl+S / Ctrl+Shift+S. El atajo con más modificadores se consulta primero.
+    /// Atajos globales estilo DAW. Se ignoran si hay un campo de texto con foco.
     fn handle_shortcuts(&mut self, ctx: &egui::Context, shared: &SessionShared) {
         use egui::{Key, KeyboardShortcut, Modifiers};
-        let (save_as, save, open, new) = ctx.input_mut(|i| {
+        let wants_text = ctx.wants_keyboard_input();
+        let roll_open = self.roll.open;
+        let (save_as, save, open, new, copy, paste, cut, dup, del) = ctx.input_mut(|i| {
             let sa = i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::S));
             let s = i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::S));
             let o = i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::O));
             let n = i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::N));
-            (sa, s, o, n)
+            let clip_shortcuts = !wants_text && !roll_open;
+            let copy = clip_shortcuts && i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::C));
+            let paste = clip_shortcuts && i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::V));
+            let cut = clip_shortcuts && i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::X));
+            let dup = clip_shortcuts && i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::D));
+            let del = clip_shortcuts && (i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace));
+            (sa, s, o, n, copy, paste, cut, dup, del)
         });
         if new { self.request_action(shared, PendingAction::New); }
         if open { self.request_action(shared, PendingAction::Open); }
         if save_as { self.spawn_file_dialog(DialogKind::Save); }
         else if save { self.project_save_or_ask(shared); }
-        // Título de la ventana = nombre del proyecto.
+
+        if copy { self.copy_selected_clip(shared); }
+        if cut { self.cut_selected_clip(shared); }
+        if paste { self.paste_clip(shared); }
+        if dup { self.duplicate_selected_clip(shared); }
+        if del { self.delete_selected_clip(shared); }
+
         let title = format!("{}{} — Lanzadera", self.project_name(), if self.dirty { " *" } else { "" });
         if title != self.last_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.last_title = title;
         }
+    }
+
+    fn selected_clip_slot(&self, shared: &SessionShared) -> Option<(usize, usize)> {
+        shared.state.lock().unwrap_or_else(|e| e.into_inner()).selected_clip
+    }
+
+    fn copy_selected_clip(&mut self, shared: &SessionShared) {
+        let Some((t, s)) = self.selected_clip_slot(shared) else { return; };
+        let clip = {
+            let st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.tracks.get(t).and_then(|tr| tr.clips.get(s)).and_then(|c| c.clone())
+        };
+        let Some(clip) = clip else { self.msg = "No hay clip para copiar".into(); return; };
+        self.clip_clipboard = Some(ClipClipboard {
+            clip,
+            midi: shared.notes.load(t, s),
+            sample: shared.samples.load(t, s),
+        });
+        self.msg = "Clip copiado".into();
+    }
+
+    fn cut_selected_clip(&mut self, shared: &SessionShared) {
+        let Some((t, s)) = self.selected_clip_slot(shared) else { return; };
+        let has = { shared.state.lock().unwrap_or_else(|e| e.into_inner())
+            .tracks.get(t).and_then(|tr| tr.clips.get(s)).map(|c| c.is_some()).unwrap_or(false) };
+        if !has { self.msg = "No hay clip para cortar".into(); return; }
+        self.copy_selected_clip(shared);
+        self.delete_clip_at(shared, t, s);
+        self.msg = "Clip cortado".into();
+    }
+
+    fn paste_clip(&mut self, shared: &SessionShared) {
+        let Some(cb) = self.clip_clipboard.clone() else { self.msg = "Portapapeles vacío".into(); return; };
+        let (t, s) = {
+            let st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            st.selected_clip.unwrap_or((st.selected_track, st.selected_scene))
+        };
+        self.write_clip_to_slot(shared, t, s, cb.clip, cb.midi, cb.sample, true);
+        self.msg = format!("Clip pegado en P{}·E{}", t + 1, s + 1);
+    }
+
+    fn duplicate_selected_clip(&mut self, shared: &SessionShared) {
+        let Some((t, s)) = self.selected_clip_slot(shared) else { return; };
+        let (clip, midi, sample) = {
+            let st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            let clip = st.tracks.get(t).and_then(|tr| tr.clips.get(s)).and_then(|c| c.clone());
+            (clip, shared.notes.load(t, s), shared.samples.load(t, s))
+        };
+        let Some(clip) = clip else { self.msg = "No hay clip para duplicar".into(); return; };
+        let target = shared.edit(|st| {
+            st.tracks.get_mut(t).and_then(|tr| tr.clips.iter().position(|x| x.is_none()))
+        });
+        let Some(ds) = target else { self.msg = "No hay escena vacía en la pista".into(); return; };
+        self.write_clip_to_slot(shared, t, ds, clip, midi, sample, true);
+        shared.apply_control(ControlCmd::SelectClip { track: t as u8, scene: ds as u8 });
+        self.msg = format!("Clip duplicado en P{}·E{}", t + 1, ds + 1);
+    }
+
+    fn delete_selected_clip(&mut self, shared: &SessionShared) {
+        let Some((t, s)) = self.selected_clip_slot(shared) else { return; };
+        let has = { shared.state.lock().unwrap_or_else(|e| e.into_inner())
+            .tracks.get(t).and_then(|tr| tr.clips.get(s)).map(|c| c.is_some()).unwrap_or(false) };
+        if !has { return; }
+        self.delete_clip_at(shared, t, s);
+        self.msg = "Clip eliminado".into();
+    }
+
+    fn delete_clip_at(&self, shared: &SessionShared, t: usize, s: usize) {
+        shared.apply_control(ControlCmd::StopClip { track: t as u8 });
+        shared.edit(|st| {
+            if let Some(tr) = st.tracks.get_mut(t) {
+                if let Some(slot) = tr.clips.get_mut(s) { *slot = None; }
+            }
+            if st.selected_clip == Some((t, s)) { st.selected_clip = None; }
+        });
+        shared.sync_midi(t, s);
+        shared.samples.clear(t, s);
+    }
+
+    fn write_clip_to_slot(
+        &self, shared: &SessionShared, t: usize, s: usize, mut clip: lanzadera_core::Clip,
+        midi: Option<std::sync::Arc<lanzadera_engine::midi::MidiNoteData>>,
+        sample: Option<std::sync::Arc<lanzadera_engine::shared::SampleData>>,
+        stop_target: bool,
+    ) {
+        if stop_target { shared.apply_control(ControlCmd::StopClip { track: t as u8 }); }
+        clip.state = lanzadera_core::ClipState::Empty;
+        shared.edit(|st| {
+            if let Some(tr) = st.tracks.get_mut(t) {
+                if let Some(slot) = tr.clips.get_mut(s) { *slot = Some(clip); }
+            }
+            st.selected_track = t; st.selected_scene = s; st.selected_clip = Some((t, s));
+        });
+        if let Some(m) = midi { shared.notes.store(t, s, m); } else { shared.notes.clear(t, s); }
+        if let Some(sd) = sample { shared.samples.store(t, s, sd); } else { shared.samples.clear(t, s); }
+        shared.sync_midi(t, s);
+    }
+
+    fn move_or_copy_clip(&mut self, shared: &SessionShared, st_t: usize, st_s: usize, dt: usize, ds: usize, copy: bool) {
+        if st_t == dt && st_s == ds { return; }
+        let (clip, midi, sample) = {
+            let st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            let clip = st.tracks.get(st_t).and_then(|tr| tr.clips.get(st_s)).and_then(|c| c.clone());
+            (clip, shared.notes.load(st_t, st_s), shared.samples.load(st_t, st_s))
+        };
+        let Some(clip) = clip else { return; };
+        self.write_clip_to_slot(shared, dt, ds, clip, midi, sample, true);
+        if !copy {
+            self.delete_clip_at(shared, st_t, st_s);
+            self.msg = format!("Clip movido a P{}·E{}", dt + 1, ds + 1);
+        } else {
+            self.msg = format!("Clip copiado a P{}·E{}", dt + 1, ds + 1);
+        }
+        shared.apply_control(ControlCmd::SelectClip { track: dt as u8, scene: ds as u8 });
     }
 
     fn menu_bar(&mut self, ui: &mut egui::Ui, _ctx: &egui::Context, shared: &SessionShared) {
@@ -1002,16 +1215,16 @@ impl SessionView {
             });
 
             ui.menu_button("Edición", |ui| {
-                for (lbl, fase) in [
-                    ("Deshacer          Ctrl+Z", "Fase 7"),
-                    ("Rehacer            Ctrl+Y", "Fase 7"),
-                    ("Copiar clip       Ctrl+C", "Fase 7"),
-                    ("Pegar clip        Ctrl+V", "Fase 7"),
-                    ("Duplicar           Ctrl+D", "Fase 7"),
-                ] {
-                    ui.add_enabled(false, egui::Button::new(lbl))
-                        .on_disabled_hover_text(format!("Llega en la {}", fase));
-                }
+                if ui.button("Copiar clip       Ctrl+C").clicked() { self.copy_selected_clip(shared); ui.close_menu(); }
+                if ui.button("Cortar clip       Ctrl+X").clicked() { self.cut_selected_clip(shared); ui.close_menu(); }
+                if ui.button("Pegar clip        Ctrl+V").clicked() { self.paste_clip(shared); ui.close_menu(); }
+                if ui.button("Duplicar           Ctrl+D").clicked() { self.duplicate_selected_clip(shared); ui.close_menu(); }
+                if ui.button("Eliminar            Supr").clicked() { self.delete_selected_clip(shared); ui.close_menu(); }
+                ui.separator();
+                ui.add_enabled(false, egui::Button::new("Deshacer          Ctrl+Z"))
+                    .on_disabled_hover_text("Pendiente: historial de undo/redo");
+                ui.add_enabled(false, egui::Button::new("Rehacer            Ctrl+Y"))
+                    .on_disabled_hover_text("Pendiente: historial de undo/redo");
             });
 
             ui.menu_button("Ver", |ui| {
@@ -1091,6 +1304,11 @@ impl SessionView {
                         ("Ctrl+O", "Abrir proyecto"),
                         ("Ctrl+S", "Guardar"),
                         ("Ctrl+Mayús+S", "Guardar como…"),
+                        ("Ctrl+C / Ctrl+X / Ctrl+V", "Copiar / cortar / pegar clip"),
+                        ("Ctrl+D", "Duplicar clip seleccionado"),
+                        ("Supr / Retroceso", "Eliminar clip seleccionado"),
+                        ("Alt + arrastrar clip", "Copiar clip a otra ranura"),
+                        ("Arrastrar clip", "Mover clip a otra ranura"),
                         ("D / S / C", "Piano roll: dibujar / seleccionar / cortar"),
                         ("Ctrl+A", "Piano roll: seleccionar todo"),
                         ("Supr", "Piano roll: borrar la selección"),
@@ -1163,12 +1381,46 @@ impl SessionView {
                     cmds.push(ControlCmd::Record);
                 }
 
-                // Metrónomo
-                if transport_btn(ui, "⏱", metronome, T.accent_gold) {
+                // Metrónomo (click izq: on/off, click der: menú de modo/subdivisión)
+                let metro_resp = ui.add(egui::Button::new(egui::RichText::new("⏱").size(13.0))
+                    .fill(if metronome { T.accent_gold.gamma_multiply(0.55) } else { T.panel_raised })
+                    .min_size(vec2(36.0, 26.0)));
+                if metro_resp.clicked() {
                     cmds.push(ControlCmd::ToggleMetronome);
                 }
+                metro_resp.context_menu(|ui| {
+                    let (mut mode, mut subdiv) = {
+                        let st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+                        (st.metronome_mode, st.metronome_subdiv)
+                    };
+                    ui.label(egui::RichText::new("Metrónomo").strong());
+                    ui.separator();
+                    ui.label("Modo");
+                    ui.radio_value(&mut mode, 0, "Siempre");
+                    ui.radio_value(&mut mode, 1, "Solo count-in de grabación");
+                    ui.radio_value(&mut mode, 2, "Apagado");
+                    ui.separator();
+                    ui.label("Subdivisión");
+                    ui.radio_value(&mut subdiv, 0, "1/4");
+                    ui.radio_value(&mut subdiv, 1, "1/8");
+                    ui.radio_value(&mut subdiv, 2, "1/16");
+                    ui.radio_value(&mut subdiv, 3, "1/32");
+                    let mut changed = false;
+                    let (cur_mode, cur_sub) = { let st = shared.state.lock().unwrap_or_else(|e| e.into_inner()); (st.metronome_mode, st.metronome_subdiv) };
+                    if mode != cur_mode || subdiv != cur_sub { changed = true; }
+                    if changed {
+                        shared.edit(|st| {
+                            st.metronome_mode = mode;
+                            st.metronome_subdiv = subdiv;
+                            st.metronome = mode != 2;
+                        });
+                    }
+                });
                 if metronome {
-                    ui.label(egui::RichText::new("MET").size(9.0).color(T.accent_gold));
+                    let (mode, subdiv) = { let st = shared.state.lock().unwrap_or_else(|e| e.into_inner()); (st.metronome_mode, st.metronome_subdiv) };
+                    let sfx = match subdiv { 2 => "1/16", 3 => "1/32", 1 => "1/8", _ => "1/4" };
+                    let mfx = match mode { 1 => "REC", 2 => "OFF", _ => "ON" };
+                    ui.label(egui::RichText::new(format!("MET {} {}", mfx, sfx)).size(9.0).color(T.accent_gold));
                 }
 
                 ui.separator();
@@ -1286,13 +1538,43 @@ impl SessionView {
             (crate::patches::build_snapshot::build_snapshot(&st), st.scenes.len())
         };
         snapshot.scene_count = n_scenes.max(1);
+        // Mapear índice visible -> índice real (Groove se renderiza como fila especial).
+        let (groove_idx, vis_to_real): (Option<usize>, Vec<usize>) = {
+            let st = shared.state.lock().unwrap();
+            let gi = st.tracks.iter().position(|t| t.name.eq_ignore_ascii_case("Groove"));
+            let map = st.tracks.iter().enumerate()
+                .filter(|(i, _)| Some(*i) != gi)
+                .map(|(i, _)| i)
+                .collect();
+            (gi, map)
+        };
+
         // El estado REAL lo publica el ClipEngine via rt, no SessionState.
-        // Sin esto la celda se queda en Triggered y parpadea para siempre.
         if _audio_on {
             use crate::patches::session_snapshot::ClipStateView;
-            for (ti, tr) in snapshot.tracks.iter_mut().enumerate() {
+            for (vi, tr) in snapshot.tracks.iter_mut().enumerate() {
+                let Some(&ti) = vis_to_real.get(vi) else { continue; };
                 let active = shared.rt.active_scene(ti);
                 for (si, slot) in tr.clips.iter_mut().enumerate() {
+                    let Some(c) = slot.as_mut() else { continue };
+                    c.state = match shared.rt.clip_state(ti, si) {
+                        ClipState::Empty => ClipStateView::Empty,
+                        ClipState::Triggered => ClipStateView::Triggered,
+                        ClipState::Playing => ClipStateView::Playing,
+                        ClipState::Stopping => ClipStateView::Stopping,
+                        ClipState::Recording => ClipStateView::Recording,
+                        ClipState::Overdubbing => ClipStateView::Overdubbing,
+                        ClipState::RecQueued => ClipStateView::RecQueued,
+                    };
+                    let lt = (c.loop_bars.max(1) as u32 * TICKS_PER_BAR as u32).max(1);
+                    c.progress = if active == Some(si as u8) {
+                        (shared.rt.playhead(ti) as f32 / lt as f32).clamp(0.0, 1.0)
+                    } else { 0.0 };
+                }
+            }
+            if let (Some(g), Some(ti)) = (&mut snapshot.groove, groove_idx) {
+                let active = shared.rt.active_scene(ti);
+                for (si, slot) in g.clips.iter_mut().enumerate() {
                     let Some(c) = slot.as_mut() else { continue };
                     c.state = match shared.rt.clip_state(ti, si) {
                         ClipState::Empty => ClipStateView::Empty,
@@ -1312,9 +1594,19 @@ impl SessionView {
         }
 
         // C2b: picos REALES del audio (el snapshot no ve el SampleStore).
-        for (ti, tr) in snapshot.tracks.iter_mut().enumerate() {
+        for (vi, tr) in snapshot.tracks.iter_mut().enumerate() {
+            let Some(&ti) = vis_to_real.get(vi) else { continue; };
             for (si, slot) in tr.clips.iter_mut().enumerate() {
                 let Some(c) = slot.as_mut() else { continue };
+                if let Some(sd) = shared.samples.load(ti, si) {
+                    let mx = sd.peaks.iter().fold(0.0f32, |a, &b| a.max(b));
+                    if mx > 0.0005 || c.peaks.is_empty() { c.peaks = sd.peaks.clone(); }
+                }
+            }
+        }
+        if let (Some(g), Some(ti)) = (&mut snapshot.groove, groove_idx) {
+            for (si, slot) in g.clips.iter_mut().enumerate() {
+                let Some(c) = slot.as_mut() else { continue; };
                 if let Some(sd) = shared.samples.load(ti, si) {
                     let mx = sd.peaks.iter().fold(0.0f32, |a, &b| a.max(b));
                     if mx > 0.0005 || c.peaks.is_empty() { c.peaks = sd.peaks.clone(); }
@@ -1326,38 +1618,60 @@ impl SessionView {
 
         use lanzadera_core::control::ControlCmd;
         use lanzadera_core::clip::Quantize;
+        let map_t = |vt: usize| -> usize { vis_to_real.get(vt).copied().unwrap_or(vt) };
 
         if let Some(t) = actions.select_track {
+            let t = map_t(t);
             shared.edit(|st| { st.selected_track = t; });
             self.inspector_focus = InspectorFocus::Track;
         }
         if let Some((t, s)) = actions.select_clip {
+            let t = map_t(t);
             shared.apply_control(ControlCmd::SelectClip { track: t as u8, scene: s as u8 });
             self.inspector_focus = InspectorFocus::Clip;
         }
         if let Some((t, s)) = actions.create_clip {
+            let t = map_t(t);
             shared.apply_control(ControlCmd::CreateClip { track: t as u8, scene: s as u8, bars: 8 });
             self.inspector_focus = InspectorFocus::Clip;
         }
+        if let Some((t, s)) = actions.create_and_record_clip {
+            let t = map_t(t);
+            shared.apply_control(ControlCmd::CreateClip { track: t as u8, scene: s as u8, bars: 8 });
+            // CreateClip en pista armada ya arma RecQueued; Record lo inicia según estado actual.
+            shared.apply_control(ControlCmd::Record);
+            self.inspector_focus = InspectorFocus::Clip;
+        }
         if let Some((t, s)) = actions.launch_clip {
-            shared.apply_control(ControlCmd::LaunchClip { track: t as u8, scene: s as u8 });
+            let t = map_t(t);
+            // El cuerpo del clip ya no lanza; mantenemos la acción por compatibilidad.
+            shared.apply_control(ControlCmd::SelectClip { track: t as u8, scene: s as u8 });
+            self.inspector_focus = InspectorFocus::Clip;
         }
         if let Some((t, s)) = actions.toggle_clip {
+            let t = map_t(t);
+            // Botón de estado: play/stop del clip, o arm/rec según el flujo del core.
             shared.apply_control(ControlCmd::LaunchClip { track: t as u8, scene: s as u8 });
+            shared.apply_control(ControlCmd::SelectClip { track: t as u8, scene: s as u8 });
+            self.inspector_focus = InspectorFocus::Clip;
         }
         if let Some(si) = actions.launch_scene {
             shared.apply_control(ControlCmd::LaunchScene { scene: si as u8 });
         }
         if let Some(t) = actions.toggle_arm {
+            let t = map_t(t);
             shared.apply_control(ControlCmd::ToggleArm { track: t as u8 });
         }
         if let Some(t) = actions.toggle_mute {
+            let t = map_t(t);
             shared.apply_control(ControlCmd::ToggleMute { track: t as u8 });
         }
         if let Some(t) = actions.toggle_solo {
+            let t = map_t(t);
             shared.apply_control(ControlCmd::ToggleSolo { track: t as u8 });
         }
         if let Some(t) = actions.stop_track {
+            let t = map_t(t);
             shared.apply_control(ControlCmd::StopClip { track: t as u8 });
         }
         if actions.stop_all {
@@ -1373,6 +1687,7 @@ impl SessionView {
             shared.edit(|st| st.quantize = q_enum);
         }
         if let Some((t, s)) = actions.delete_clip {
+            let t = map_t(t);
             shared.apply_control(ControlCmd::StopClip { track: t as u8 });
             shared.edit(|st| {
                 if let Some(tr) = st.tracks.get_mut(t) {
@@ -1385,6 +1700,7 @@ impl SessionView {
             shared.samples.clear(t, s);
         }
         if let Some((t, s)) = actions.duplicate_clip {
+            let t = map_t(t);
             let target = shared.edit(|st| {
                 if let Some(tr) = st.tracks.get_mut(t) {
                     let copy = tr.clips.get(s).and_then(|c| c.clone());
@@ -1397,19 +1713,47 @@ impl SessionView {
                 }
                 None
             });
-            if let Some(s2) = target { shared.sync_midi(t, s2); }
+            if let Some(s2) = target {
+                if let Some(m) = shared.notes.load(t, s) { shared.notes.store(t, s2, m); }
+                if let Some(sd) = shared.samples.load(t, s) { shared.samples.store(t, s2, sd); }
+                shared.sync_midi(t, s2);
+            }
+        }
+        if let Some((st_t, st_s, dt, ds, copy)) = actions.move_clip {
+            self.move_or_copy_clip(shared, map_t(st_t), st_s, map_t(dt), ds, copy);
+        }
+        if let Some((t, s)) = actions.copy_clip {
+            let t = map_t(t);
+            shared.apply_control(ControlCmd::SelectClip { track: t as u8, scene: s as u8 });
+            self.copy_selected_clip(shared);
+        }
+        if let Some((t, s)) = actions.cut_clip {
+            let t = map_t(t);
+            shared.apply_control(ControlCmd::SelectClip { track: t as u8, scene: s as u8 });
+            self.cut_selected_clip(shared);
+        }
+        if let Some((t, s)) = actions.paste_clip {
+            let t = map_t(t);
+            shared.apply_control(ControlCmd::SelectClip { track: t as u8, scene: s as u8 });
+            self.paste_clip(shared);
         }
         if let Some((t, s)) = actions.open_piano_roll {
+            let t = map_t(t);
             self.roll.open_for(t, s);
             shared.apply_control(ControlCmd::SelectClip { track: t as u8, scene: s as u8 });
             self.inspector_focus = InspectorFocus::Clip;
         }
         if let Some((t, s)) = actions.open_audio_modal {
+            let t = map_t(t);
             self.audio_modal = Some((t, s));
             self.audio_path_input.clear();
         }
         if let Some((t, s, path)) = actions.load_file {
+            let t = map_t(t);
             shared.request_load(t, s, path);
+        }
+        if let Some(scene) = actions.export_groove_to_scene {
+            self.export_groove_to_clip_launch(shared, scene);
         }
         if actions.add_scene {
             let ok = shared.edit(|st| {
@@ -2012,14 +2356,16 @@ impl SessionView {
                     lanzadera_engine::clap_gui::request_toggle(t);
                 }
                 if lanzadera_engine::CLAP_ENABLED && ui.button("🔍 CLAP").on_hover_text("Elegir instrumento CLAP").clicked() {
-                    self.browser_open = true;
+                    self.windows.browser_visible = true;
+                    self.browser_tab = BrowserTab::Instruments;
                     self.browser_target = BrowserTarget::Instrument;
                     self.browser_mode = BrowserMode::Clap;
                     self.browser_show_all = false;
                     self.browser_list = None;
                 }
                 if lanzadera_engine::VST3_ENABLED && ui.button("🔍 VST3").on_hover_text("Elegir instrumento VST3").clicked() {
-                    self.browser_open = true;
+                    self.windows.browser_visible = true;
+                    self.browser_tab = BrowserTab::Instruments;
                     self.browser_target = BrowserTarget::Instrument;
                     self.browser_mode = BrowserMode::Vst3;
                     self.browser_show_all = false;
@@ -2043,7 +2389,12 @@ impl SessionView {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(lbl).size(11.0).strong());
                 if ui.button(format!("＋ {}", lbl)).on_hover_text("Añadir plugin a la cadena").clicked() {
-                    self.browser_open = true;
+                    self.windows.browser_visible = true;
+                    self.browser_tab = match target {
+                        BrowserTarget::NoteFx => BrowserTab::NoteFx,
+                        BrowserTarget::Fx => BrowserTab::Fx,
+                        BrowserTarget::Instrument => BrowserTab::Instruments,
+                    };
                     self.browser_target = target;
                     self.browser_mode = if lanzadera_engine::CLAP_ENABLED { BrowserMode::Clap } else { BrowserMode::Vst3 };
                     self.browser_show_all = false;
@@ -2465,99 +2816,6 @@ impl SessionView {
         ui.label(egui::RichText::new("Se aplica al soltar el control y se recuerda al reiniciar.").size(10.0).color(T.text_dim));
     }
 
-    fn browser_window(&mut self, ctx: &egui::Context, shared: &SessionShared) {
-        if !self.browser_open { return; }
-        if self.browser_list.is_none() { self.browser_rescan(); }
-        use lanzadera_core::PluginKind;
-        let t = { shared.state.lock().unwrap().selected_track };
-        let mut open = self.browser_open;
-        let mut chosen: Option<(String, String)> = None;
-        let target = self.browser_target;
-        let (win_title, want) = match target {
-            BrowserTarget::Instrument => ("Instrumentos", PluginKind::Instrument),
-            BrowserTarget::NoteFx => ("Note FX", PluginKind::NoteFx),
-            BrowserTarget::Fx => ("FX", PluginKind::Fx),
-        };
-        let mut switch_mode: Option<BrowserMode> = None;
-        let mut rescan = false;
-        egui::Window::new(win_title).open(&mut open).default_size([460.0, 400.0])
-            .collapsible(false).show(ctx, |ui| {
-                ui.label(egui::RichText::new(format!("Destino: Pista {} · {}", t + 1, win_title)).color(T.text_dim));
-                ui.horizontal(|ui| {
-                    if lanzadera_engine::CLAP_ENABLED
-                        && ui.selectable_label(self.browser_mode == BrowserMode::Clap, "CLAP").clicked() {
-                        switch_mode = Some(BrowserMode::Clap);
-                    }
-                    if lanzadera_engine::VST3_ENABLED
-                        && ui.selectable_label(self.browser_mode == BrowserMode::Vst3, "VST3").clicked() {
-                        switch_mode = Some(BrowserMode::Vst3);
-                    }
-                    ui.checkbox(&mut self.browser_show_all, "Mostrar todos")
-                        .on_hover_text("Incluye plugins de otro tipo. Los que no declaran su tipo (?) siempre se muestran.");
-                });
-                if let Some(list) = &self.browser_list {
-                    if list.is_empty() {
-                        ui.label(match self.browser_mode {
-                            BrowserMode::Clap => "Sin plugins en ~/.clap, ~/.local/lib/clap, /usr/lib/clap ni /usr/local/lib/clap",
-                            BrowserMode::Vst3 => "Sin plugins en ~/.vst3, /usr/lib/vst3 ni /usr/local/lib/vst3 (o en $VST3_PATH)",
-                        });
-                    } else {
-                        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                            let mut shown = 0usize;
-                            for (path, id, name) in list {
-                                let kind = self.browser_kinds.get(&(path.clone(), id.clone()))
-                                    .copied().unwrap_or(PluginKind::Unknown);
-                                if !(self.browser_show_all || kind == want || kind == PluginKind::Unknown) { continue; }
-                                shown += 1;
-                                ui.horizontal(|ui| {
-                                    if ui.button("➕").clicked() { chosen = Some((path.clone(), id.clone())); }
-                                    ui.vertical(|ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.label(egui::RichText::new(name).strong());
-                                            ui.label(egui::RichText::new(kind.label()).size(9.0).color(T.accent_gold));
-                                        });
-                                        ui.label(egui::RichText::new(trunc(path, 50)).size(9.0).color(T.text_dim));
-                                    });
-                                });
-                            }
-                            if shown == 0 {
-                                ui.label(egui::RichText::new("Ninguno de este tipo. Activa «Mostrar todos».").color(T.text_dim));
-                            }
-                        });
-                    }
-                }
-                if self.browser_list.is_none() { ui.label("⏳ Escaneando plugins…"); }
-                if ui.button("⟳ Re-escanear").clicked() { rescan = true; }
-            });
-        self.browser_open = open;
-        if let Some(m) = switch_mode { self.browser_mode = m; self.browser_list = None; }
-        if rescan { self.browser_list = None; }
-        if let Some((path, id)) = chosen {
-            match target {
-                BrowserTarget::Instrument => {
-                    shared.set_plugin(t, Some(path), Some(id));
-                    self.msg = "Cargando plugin (reiniciando audio)…".into();
-                }
-                BrowserTarget::NoteFx => {
-                    let has_instr = shared.state.lock().unwrap().tracks.get(t)
-                        .map(|tr| tr.plugin_path.is_some()).unwrap_or(false);
-                    shared.set_note_fx(t, Some(path), Some(id));
-                    self.msg = if has_instr {
-                        format!("Cargando Note FX en Pista {} (reiniciando audio)…", t + 1)
-                    } else {
-                        format!("Pista {} no tiene instrumento plugin: el Note FX no se aplicará hasta que cargues uno", t + 1)
-                    };
-                }
-                BrowserTarget::Fx => {
-                    shared.set_fx(t, Some(path), Some(id));
-                    self.msg = format!("Cargando FX en Pista {} (reiniciando audio)…", t + 1);
-                }
-            }
-            self.browser_open = false;
-            self.browser_list = None;
-        }
-    }
-
     // ── Modal de carga de audio ────────────────────────────────────────────
     fn audio_modal_window(&mut self, ctx: &egui::Context, shared: &SessionShared) {
         let mut open = self.audio_modal.is_some();
@@ -2675,15 +2933,16 @@ impl SessionView {
 
     fn clip_launch_window(&mut self, ctx: &egui::Context, shared: &Arc<SessionShared>, audio_on: bool) {
         let mut open = self.windows.clip_launch_visible;
-        egui::Window::new("🎹 Clip Launch")
+        let mut win = egui::Window::new("🎹 Clip Launch")
             .open(&mut open)
-            .default_size([980.0, 560.0])
+            .default_size(self.windows.clip_launch_size.unwrap_or(egui::vec2(980.0, 560.0)))
             .min_size([320.0, 200.0])
             .max_size([8000.0, 8000.0])
             .constrain(false)
             .resizable(true)
-            .frame(Self::window_frame())
-            .show(ctx, |ui| {
+            .frame(Self::window_frame());
+        if let Some(p) = self.windows.clip_launch_pos { win = win.default_pos(p); }
+        let resp = win.show(ctx, |ui| {
                 // Barra de herramientas del grid: +/− pistas
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new("SESSION").size(11.0).strong().color(T.accent_gold));
@@ -2721,21 +2980,26 @@ impl SessionView {
                     |ui| { self.clip_grid(ui, ctx, shared, audio_on); },
                 );
             });
+        if let Some(r) = resp {
+            self.windows.clip_launch_pos = Some(r.response.rect.min);
+            self.windows.clip_launch_size = Some(r.response.rect.size());
+        }
         self.windows.clip_launch_visible = open;
     }
 
     fn groove_machine_window(&mut self, ctx: &egui::Context, shared: &Arc<SessionShared>) {
         let mut open = self.windows.groove_machine_visible;
 
-        egui::Window::new("🥁 Groove Machine")
+        let mut win = egui::Window::new("🥁 Groove Machine")
             .open(&mut open)
             .constrain(false)
             .max_size([8000.0, 8000.0])
-            .default_size([880.0, 540.0])
+            .default_size(self.windows.groove_size.unwrap_or(egui::vec2(880.0, 540.0)))
             .min_size([520.0, 300.0])
             .resizable(true)
-            .frame(Self::window_frame())
-            .show(ctx, |ui| {
+            .frame(Self::window_frame());
+        if let Some(p) = self.windows.groove_pos { win = win.default_pos(p); }
+        let resp = win.show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.groove_tab, GrooveTab::Pad, "Pad");
                     ui.selectable_value(&mut self.groove_tab, GrooveTab::Mixer, "Mixer");
@@ -2795,6 +3059,12 @@ impl SessionView {
                                 ui.selectable_value(&mut self.groove_preset_selected, p.clone(), p.as_str());
                             }
                         });
+                    if ui.button("📤 A Clip Launch")
+                        .on_hover_text("Exportar el patrón Groove actual como MIDI a la escena seleccionada")
+                        .clicked() {
+                        let scene = shared.state.lock().unwrap_or_else(|e| e.into_inner()).selected_scene;
+                        self.export_groove_to_clip_launch(shared, scene);
+                    }
                     if ui.button("📂 Cargar").clicked() && !self.groove_preset_selected.is_empty() {
                         match shared.load_groove_preset(&self.groove_preset_selected) {
                             Ok(()) => self.msg = format!("Preset cargado: {}", self.groove_preset_selected),
@@ -3165,12 +3435,63 @@ impl SessionView {
                 }
             });
 
+        if let Some(r) = resp {
+            self.windows.groove_pos = Some(r.response.rect.min);
+            self.windows.groove_size = Some(r.response.rect.size());
+        }
         // Si el usuario cierra la ventana con la X, apagamos el motor.
         if !open {
             shared.caja_sched.enabled.store(false, std::sync::atomic::Ordering::Relaxed);
         }
 
         self.windows.groove_machine_visible = open;
+    }
+
+    fn export_groove_to_clip_launch(&mut self, shared: &SessionShared, scene: usize) {
+        // Exporta Groove a MIDI temporal y lo importa como clip en una pista Groove dedicada.
+        let mid_path = match shared.groove.export_midi(false, true) {
+            Ok(p) => p,
+            Err(e) => { self.msg = format!("⚠ No se pudo exportar Groove: {}", e); return; }
+        };
+        let (mut notes, bars) = match lanzadera_engine::midi_file::parse_midi(&mid_path.to_string_lossy()) {
+            Ok(n) => n,
+            Err(e) => { self.msg = format!("⚠ No se pudo leer MIDI de Groove: {}", e); return; }
+        };
+        if notes.is_empty() {
+            self.msg = "⚠ El patrón Groove no tiene notas para exportar".into();
+            return;
+        }
+        let loop_bars = bars.max(self.groove_snap.as_ref().map(|s| s.pattern.bars.max(1) as u8).unwrap_or(4));
+        notes.sort_by_key(|n| (n.tick_start, n.note));
+
+        let (track, sc) = shared.edit(|st| {
+            let idx = if let Some(i) = st.tracks.iter().position(|t| t.name == "Groove") { i } else {
+                let mut tr = lanzadera_core::Track::default();
+                tr.name = "Groove".into();
+                tr.kind = lanzadera_core::TrackKind::Instrument;
+                tr.color = [240, 170, 60];
+                let _ = st.push_track(tr);
+                st.tracks.len().saturating_sub(1)
+            };
+            let mut sc = scene;
+            if let Some(tr) = st.tracks.get_mut(idx) {
+                sc = scene.min(tr.clips.len().saturating_sub(1));
+                let mut c = lanzadera_core::Clip::default();
+                c.name = format!("Groove S{}", sc + 1);
+                c.loop_bars = loop_bars;
+                c.midi_notes = notes;
+                c.color = [240, 170, 60];
+                if let Some(slot) = tr.clips.get_mut(sc) { *slot = Some(c); }
+            }
+            st.selected_track = idx;
+            st.selected_scene = sc;
+            st.selected_clip = Some((idx, sc));
+            (idx, sc)
+        });
+        shared.sync_midi(track, sc);
+        shared.samples.clear(track, sc);
+        self.inspector_focus = InspectorFocus::Clip;
+        self.msg = format!("Groove exportado a Clip Launch: P{}·E{}", track + 1, sc + 1);
     }
 
     fn groove_pad_tab(&mut self, ui: &mut egui::Ui, shared: &Arc<SessionShared>) {
@@ -3259,6 +3580,40 @@ impl SessionView {
                 }
             });
         });
+
+        // ── FX globales creativos del bus Groove (fader horizontal) ──
+        ui.add_space(8.0);
+        ui.separator();
+        ui.label(egui::RichText::new("FX GLOBALES · bus Groove").color(T.accent_gold).size(12.0).strong());
+        let (mut fx_pitch, mut fx_filter, mut fx_perform) = {
+            let st = shared.state.lock().unwrap();
+            (st.groove_fx_pitch, st.groove_fx_filter, st.groove_fx_perform)
+        };
+        let mut cmds: Vec<ControlCmd> = Vec::new();
+        egui::Grid::new("gm_global_fx").num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
+            ui.label(egui::RichText::new("PITCH").size(11.0).color(T.text_bright));
+            let pitch_txt = if fx_pitch < 0.48 { "Tape stop" } else if fx_pitch > 0.52 { "Varispeed +" } else { "Neutro" };
+            let r = ui.add(egui::Slider::new(&mut fx_pitch, 0.0..=1.0).text(pitch_txt).show_value(false));
+            if r.changed() { cmds.push(ControlCmd::SetGrooveFxPitch { value: fx_pitch }); }
+            if r.double_clicked() { fx_pitch = 0.5; cmds.push(ControlCmd::SetGrooveFxPitch { value: 0.5 }); }
+            ui.end_row();
+
+            ui.label(egui::RichText::new("MOD").size(11.0).color(T.text_bright));
+            let filt_txt = if fx_filter < 0.48 { "LPF" } else if fx_filter > 0.52 { "HPF" } else { "Neutro" };
+            let r = ui.add(egui::Slider::new(&mut fx_filter, 0.0..=1.0).text(filt_txt).show_value(false));
+            if r.changed() { cmds.push(ControlCmd::SetGrooveFxFilter { value: fx_filter }); }
+            if r.double_clicked() { fx_filter = 0.5; cmds.push(ControlCmd::SetGrooveFxFilter { value: 0.5 }); }
+            ui.end_row();
+
+            ui.label(egui::RichText::new("PERFORM").size(11.0).color(T.text_bright));
+            let perf_txt = if fx_perform < 0.01 { "Off" } else if fx_perform < 0.34 { "Delay 1/8" } else if fx_perform < 0.67 { "Delay 1/16" } else { "Stutter 1/32" };
+            let r = ui.add(egui::Slider::new(&mut fx_perform, 0.0..=1.0).text(perf_txt).show_value(false));
+            if r.changed() { cmds.push(ControlCmd::SetGrooveFxPerform { value: fx_perform }); }
+            if r.double_clicked() { fx_perform = 0.0; cmds.push(ControlCmd::SetGrooveFxPerform { value: 0.0 }); }
+            ui.end_row();
+        });
+        for c in cmds { shared.apply_control(c); }
+        ui.label(egui::RichText::new("PITCH: tape stop/varispeed · MOD: filtro resonante LPF↔HPF · PERFORM: delay/stutter sync").size(9.0).color(T.text_dim));
     }
 
     fn groove_mixer_tab(&mut self, ui: &mut egui::Ui, shared: &Arc<SessionShared>) {
@@ -3668,135 +4023,254 @@ impl SessionView {
     fn global_browser_window(&mut self, ctx: &egui::Context, shared: &Arc<SessionShared>) {
         let mut open = self.windows.browser_visible;
 
-        egui::Window::new("📁 Browser")
+        let mut win = egui::Window::new("📁 Browser")
             .open(&mut open)
             .constrain(false)
             .max_size([8000.0, 8000.0])
-            .default_size([380.0, 560.0])
-            .min_size([280.0, 360.0])
+            .default_size(self.windows.browser_size.unwrap_or(egui::vec2(560.0, 560.0)))
+            .min_size([420.0, 360.0])
             .resizable(true)
-            .frame(Self::window_frame())
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if ui.button("🏠").clicked() {
-                        self.browser_path = std::path::PathBuf::from(
-                            std::env::var("HOME").unwrap_or_else(|_| "/".into())
-                        );
-                    }
-                    if ui.button("⬆").clicked() {
-                        if let Some(parent) = self.browser_path.parent() {
-                            self.browser_path = parent.to_path_buf();
-                        }
-                    }
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.browser_filter)
-                            .desired_width(140.0)
-                            .hint_text("filtrar")
-                    );
-                    ui.checkbox(&mut self.browser_favorites_only, "⭐");
-                });
-
-                ui.label(egui::RichText::new(self.browser_path.display().to_string()).color(T.text_dim).size(10.0));
-                ui.separator();
-
-                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                    let Ok(entries) = std::fs::read_dir(&self.browser_path) else {
-                        ui.label("No se pudo leer la carpeta.");
-                        return;
-                    };
-
-                    let mut items: Vec<_> = entries.flatten().collect();
-                    items.sort_by_key(|e| (e.path().is_file(), e.file_name()));
-
-                    for entry in items {
-                        let path = entry.path();
-                        let name = entry.file_name().to_string_lossy().to_string();
-
-                        if !self.browser_filter.is_empty()
-                            && !name.to_lowercase().contains(&self.browser_filter.to_lowercase())
-                        {
-                            continue;
-                        }
-
-                        if self.browser_favorites_only {
-                            // TODO: base de favoritos. Por ahora no filtra nada.
-                        }
-
-                        if path.is_dir() {
-                            if ui.button(format!("📁 {}", name)).clicked() {
-                                self.browser_path = path;
-                            }
-                        } else if is_midi_file(&path) {
-                            // Un .mid se carga por la misma cola que el audio;
-                            // el loader decide segun la extension.
-                            let label = format!("🎼 {}", name);
-                            let resp = ui.dnd_drag_source(
-                                egui::Id::new(("browser_midi", &path)),
-                                BrowserFile(path.to_string_lossy().into_owned()),
-                                move |ui| ui.button(label),
-                            ).inner;
-                            if resp.clicked() {
-                                let (track, scene) = {
-                                    let st = shared.state.lock().unwrap();
-                                    (st.selected_track, st.selected_scene)
-                                };
-                                if let Ok(mut q) = shared.load_queue.lock() {
-                                    q.push_back(lanzadera_engine::shared::LoadRequest {
-                                        track,
-                                        scene,
-                                        path: path.to_string_lossy().to_string(),
-                                    });
-                                }
-                            }
-                        } else if is_audio_file(&path) {
-                            // Fuente de arrastre: el boton sigue funcionando con
-                            // click (carga en la celda seleccionada) y ademas se
-                            // puede arrastrar a cualquier celda del grid.
-                            let label = format!("🎵 {}", name);
-                            let resp = ui.dnd_drag_source(
-                                egui::Id::new(("browser_audio", &path)),
-                                BrowserFile(path.to_string_lossy().into_owned()),
-                                move |ui| ui.button(label),
-                            ).inner;
-                            if resp.clicked() {
-                                let (track, scene) = {
-                                    let st = shared.state.lock().unwrap();
-                                    (st.selected_track, st.selected_scene)
-                                };
-
-                                let req = lanzadera_engine::shared::LoadRequest {
-                                    track,
-                                    scene,
-                                    path: path.to_string_lossy().to_string(),
-                                };
-
-                                if let Ok(mut q) = shared.load_queue.lock() {
-                                    q.push_back(req);
-                                }
-
-                                shared.rescan.store(true, std::sync::atomic::Ordering::Relaxed);
-                                self.msg = format!("Cargando {} en Pista {} · Escena {}", name, track + 1, scene + 1);
-                            }
-                        }
-                    }
-                });
+            .frame(Self::window_frame());
+        if let Some(p) = self.windows.browser_pos { win = win.default_pos(p); }
+        let resp = win.show(ctx, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.selectable_value(&mut self.browser_tab, BrowserTab::Files, "📂 Directorio");
+                ui.selectable_value(&mut self.browser_tab, BrowserTab::Instruments, "🎹 Instrumentos");
+                ui.selectable_value(&mut self.browser_tab, BrowserTab::NoteFx, "🎼 Note FX");
+                ui.selectable_value(&mut self.browser_tab, BrowserTab::Fx, "🎛 FX");
             });
+            ui.separator();
 
+            match self.browser_tab {
+                BrowserTab::Files => self.browser_files_tab(ui, shared),
+                BrowserTab::Instruments => self.browser_plugins_tab(ui, shared, BrowserTarget::Instrument),
+                BrowserTab::NoteFx => self.browser_plugins_tab(ui, shared, BrowserTarget::NoteFx),
+                BrowserTab::Fx => self.browser_plugins_tab(ui, shared, BrowserTarget::Fx),
+            }
+        });
+
+        if let Some(r) = resp {
+            self.windows.browser_pos = Some(r.response.rect.min);
+            self.windows.browser_size = Some(r.response.rect.size());
+        }
         self.windows.browser_visible = open;
+    }
+
+    fn browser_files_tab(&mut self, ui: &mut egui::Ui, shared: &Arc<SessionShared>) {
+        ui.horizontal(|ui| {
+            if ui.button("🏠").clicked() {
+                self.browser_path = std::path::PathBuf::from(
+                    std::env::var("HOME").unwrap_or_else(|_| "/".into())
+                );
+            }
+            if ui.button("⬆").clicked() {
+                if let Some(parent) = self.browser_path.parent() {
+                    self.browser_path = parent.to_path_buf();
+                }
+            }
+            ui.add(
+                egui::TextEdit::singleline(&mut self.browser_filter)
+                    .desired_width(180.0)
+                    .hint_text("filtrar archivos")
+            );
+            ui.checkbox(&mut self.browser_favorites_only, "⭐");
+        });
+
+        ui.label(egui::RichText::new(self.browser_path.display().to_string()).color(T.text_dim).size(10.0));
+        ui.separator();
+
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            let Ok(entries) = std::fs::read_dir(&self.browser_path) else {
+                ui.label("No se pudo leer la carpeta.");
+                return;
+            };
+
+            let mut items: Vec<_> = entries.flatten().collect();
+            items.sort_by_key(|e| (e.path().is_file(), e.file_name()));
+
+            for entry in items {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+
+                if !self.browser_filter.is_empty()
+                    && !name.to_lowercase().contains(&self.browser_filter.to_lowercase())
+                {
+                    continue;
+                }
+
+                if self.browser_favorites_only {
+                    // TODO: base de favoritos. Por ahora no filtra nada.
+                }
+
+                if path.is_dir() {
+                    if ui.button(format!("📁 {}", name)).clicked() {
+                        self.browser_path = path;
+                    }
+                } else if is_midi_file(&path) {
+                    let label = format!("🎼 {}", name);
+                    let resp = ui.dnd_drag_source(
+                        egui::Id::new(("browser_midi", &path)),
+                        BrowserFile(path.to_string_lossy().into_owned()),
+                        move |ui| ui.button(label),
+                    ).inner;
+                    if resp.clicked() {
+                        let (track, scene) = {
+                            let st = shared.state.lock().unwrap();
+                            (st.selected_track, st.selected_scene)
+                        };
+                        if let Ok(mut q) = shared.load_queue.lock() {
+                            q.push_back(lanzadera_engine::shared::LoadRequest {
+                                track,
+                                scene,
+                                path: path.to_string_lossy().to_string(),
+                            });
+                        }
+                    }
+                } else if is_audio_file(&path) {
+                    let label = format!("🎵 {}", name);
+                    let resp = ui.dnd_drag_source(
+                        egui::Id::new(("browser_audio", &path)),
+                        BrowserFile(path.to_string_lossy().into_owned()),
+                        move |ui| ui.button(label),
+                    ).inner;
+                    if resp.clicked() {
+                        let (track, scene) = {
+                            let st = shared.state.lock().unwrap();
+                            (st.selected_track, st.selected_scene)
+                        };
+                        let req = lanzadera_engine::shared::LoadRequest {
+                            track,
+                            scene,
+                            path: path.to_string_lossy().to_string(),
+                        };
+                        if let Ok(mut q) = shared.load_queue.lock() {
+                            q.push_back(req);
+                        }
+                        shared.rescan.store(true, std::sync::atomic::Ordering::Relaxed);
+                        self.msg = format!("Cargando {} en Pista {} · Escena {}", name, track + 1, scene + 1);
+                    }
+                }
+            }
+        });
+    }
+
+    fn browser_plugins_tab(&mut self, ui: &mut egui::Ui, shared: &Arc<SessionShared>, target: BrowserTarget) {
+        use lanzadera_core::PluginKind;
+        self.browser_target = target;
+        let want = match target {
+            BrowserTarget::Instrument => PluginKind::Instrument,
+            BrowserTarget::NoteFx => PluginKind::NoteFx,
+            BrowserTarget::Fx => PluginKind::Fx,
+        };
+        let t = { shared.state.lock().unwrap().selected_track };
+
+        if self.browser_list.is_none() && self.scan_rx.is_none() {
+            self.browser_rescan();
+        }
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(format!("Destino: Pista {}", t + 1)).color(T.text_dim));
+            if lanzadera_engine::CLAP_ENABLED
+                && ui.selectable_label(self.browser_mode == BrowserMode::Clap, "CLAP").clicked() {
+                self.browser_mode = BrowserMode::Clap;
+                self.browser_list = None;
+            }
+            if lanzadera_engine::VST3_ENABLED
+                && ui.selectable_label(self.browser_mode == BrowserMode::Vst3, "VST3").clicked() {
+                self.browser_mode = BrowserMode::Vst3;
+                self.browser_list = None;
+            }
+            ui.checkbox(&mut self.browser_show_all, "Mostrar todos");
+            if ui.button("⟳").on_hover_text("Re-escanear plugins").clicked() {
+                self.browser_list = None;
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut self.browser_plugin_filter)
+                .desired_width(220.0)
+                .hint_text("buscar plugin por nombre o ruta"));
+            if ui.small_button("✕").clicked() { self.browser_plugin_filter.clear(); }
+        });
+        ui.separator();
+
+        let mut chosen: Option<(String, String)> = None;
+        if self.scan_rx.is_some() && self.browser_list.is_none() {
+            ui.label("⏳ Escaneando plugins…");
+            if let Some(c) = &self.ctx_cache { c.request_repaint_after(std::time::Duration::from_millis(120)); }
+        }
+        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            let Some(list) = &self.browser_list else { return; };
+            if list.is_empty() {
+                ui.label(match self.browser_mode {
+                    BrowserMode::Clap => "Sin plugins CLAP encontrados.",
+                    BrowserMode::Vst3 => "Sin plugins VST3 encontrados.",
+                });
+                return;
+            }
+            let filter = self.browser_plugin_filter.to_lowercase();
+            let mut shown = 0usize;
+            for (path, id, name) in list {
+                let kind = self.browser_kinds.get(&(path.clone(), id.clone())).copied().unwrap_or(PluginKind::Unknown);
+                if !(self.browser_show_all || kind == want || kind == PluginKind::Unknown) { continue; }
+                if !filter.is_empty() {
+                    let hay = format!("{} {}", name, path).to_lowercase();
+                    if !hay.contains(&filter) { continue; }
+                }
+                shown += 1;
+                ui.horizontal(|ui| {
+                    if ui.button("➕").clicked() { chosen = Some((path.clone(), id.clone())); }
+                    ui.vertical(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(name).strong());
+                            ui.label(egui::RichText::new(kind.label()).size(9.0).color(T.accent_gold));
+                        });
+                        ui.label(egui::RichText::new(trunc(path, 56)).size(9.0).color(T.text_dim));
+                    });
+                });
+            }
+            if shown == 0 {
+                ui.label(egui::RichText::new("Sin resultados para el filtro/tipo actual.").color(T.text_dim));
+            }
+        });
+
+        if let Some((path, id)) = chosen {
+            match target {
+                BrowserTarget::Instrument => {
+                    shared.set_plugin(t, Some(path), Some(id));
+                    self.msg = "Cargando plugin (reiniciando audio)…".into();
+                }
+                BrowserTarget::NoteFx => {
+                    let has_instr = shared.state.lock().unwrap().tracks.get(t)
+                        .map(|tr| tr.plugin_path.is_some()).unwrap_or(false);
+                    shared.set_note_fx(t, Some(path), Some(id));
+                    self.msg = if has_instr {
+                        format!("Cargando Note FX en Pista {} (reiniciando audio)…", t + 1)
+                    } else {
+                        format!("Pista {} sin instrumento: Note FX se aplicará al cargar uno", t + 1)
+                    };
+                }
+                BrowserTarget::Fx => {
+                    shared.set_fx(t, Some(path), Some(id));
+                    self.msg = format!("Cargando FX en Pista {} (reiniciando audio)…", t + 1);
+                }
+            }
+            self.browser_list = None;
+        }
     }
 
     fn global_inspector_window(&mut self, ctx: &egui::Context, shared: &Arc<SessionShared>) {
         let mut open = self.windows.inspector_visible;
 
-        egui::Window::new("🔍 Inspector")
+        let mut win = egui::Window::new("🔍 Inspector")
             .open(&mut open)
             .constrain(false)
             .max_size([8000.0, 8000.0])
-            .default_size([300.0, 560.0])
+            .default_size(self.windows.inspector_size.unwrap_or(egui::vec2(300.0, 560.0)))
             .min_size([240.0, 320.0])
             .resizable(true)
-            .frame(Self::window_frame())
-            .show(ctx, |ui| {
+            .frame(Self::window_frame());
+        if let Some(p) = self.windows.inspector_pos { win = win.default_pos(p); }
+        let resp = win.show(ctx, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 // El inspector sigue el FOCO, no la visibilidad de la ventana GM.
                 // Sin foco explícito se conserva el comportamiento anterior.
@@ -3832,25 +4306,32 @@ impl SessionView {
                 });
             });
 
+        if let Some(r) = resp {
+            self.windows.inspector_pos = Some(r.response.rect.min);
+            self.windows.inspector_size = Some(r.response.rect.size());
+        }
         self.windows.inspector_visible = open;
     }
 
     fn mixer_window(&mut self, ctx: &egui::Context, shared: &Arc<SessionShared>, audio_on: bool) {
         let mut open = self.windows.mixer_visible;
 
-        egui::Window::new("🎚 Mixer")
+        let mut win = egui::Window::new("🎚 Mixer")
             .open(&mut open)
             .constrain(false)
             .max_size([8000.0, 8000.0])
-            .default_size([900.0, 260.0])
+            .default_size(self.windows.mixer_size.unwrap_or(egui::vec2(900.0, 260.0)))
             .min_size([420.0, 160.0])
             .resizable(true)
-            .frame(Self::window_frame())
-            .show(ctx, |ui| {
-                // self.mixer ya trae su ScrollArea::horizontal interno;
-                // la ventana es resizable en ambos ejes gracias a min_size + resizable(true).
-                self.mixer(ui, shared, audio_on);
-            });
+            .frame(Self::window_frame());
+        if let Some(p) = self.windows.mixer_pos { win = win.default_pos(p); }
+        let resp = win.show(ctx, |ui| {
+            self.mixer(ui, shared, audio_on);
+        });
+        if let Some(r) = resp {
+            self.windows.mixer_pos = Some(r.response.rect.min);
+            self.windows.mixer_size = Some(r.response.rect.size());
+        }
 
         self.windows.mixer_visible = open;
     }
@@ -3888,7 +4369,7 @@ fn is_midi_file(path: &std::path::Path) -> bool {
 /// egui exige `Any + Send + Sync`; String lo cumple.
 #[derive(Clone)]
 #[allow(dead_code)]
-struct BrowserFile(String);
+pub struct BrowserFile(pub String);
 
 // ════════════════════════════════════════════════════════════════════════
 //  Fase 4B.2 — Inspector de Groove Machine conectado al modelo real
@@ -4371,19 +4852,28 @@ impl SessionView {
                 shared.chords_all_lock();
                 self.msg = "All lock: kit congelado".to_string();
             }
-            let rate_on = c.rate == 4;
-            if ui
-                .add(egui::Button::new("4c").fill(if rate_on { T.accent } else { T.panel }))
-                .on_hover_text("Re-tirar el dado de todas las celdas cada 4 compases")
-                .clicked()
-            {
-                let bars = shared.chords_toggle_rate(4);
-                self.msg = if bars == 0 {
-                    "4c: OFF".to_string()
-                } else {
-                    "4c: dado cada 4 compases".to_string()
-                };
-            }
+            ui.label(egui::RichText::new("Cambio de muestra").size(10.0).color(T.text_dim));
+            ui.horizontal_wrapped(|ui| {
+                for (bars, lbl) in [(0u8, "Al toque"), (1, "1c"), (2, "2c"), (3, "3c"), (4, "4c")] {
+                    let on = c.rate == bars;
+                    let tip = if bars == 0 {
+                        "Cambia la muestra en cada golpe (dado activo)".to_string()
+                    } else {
+                        format!("Re-tirar el dado cada {} compases", bars)
+                    };
+                    if ui.add(egui::Button::new(lbl).fill(if on { T.accent } else { T.panel }))
+                        .on_hover_text(tip)
+                        .clicked()
+                    {
+                        shared.kit.set_rate(pad, bars);
+                        self.msg = if bars == 0 {
+                            "Muestra: al toque".to_string()
+                        } else {
+                            format!("Muestra: cambia cada {} compases", bars)
+                        };
+                    }
+                }
+            });
             if ui.button("💥 Todos golpe").clicked() {
                 for p in 0..lanzadera_engine::groove_kit::NUM_CELLS as u8 {
                     shared.apply_control(ControlCmd::LivePadOn { pad: p, vel: 100 });

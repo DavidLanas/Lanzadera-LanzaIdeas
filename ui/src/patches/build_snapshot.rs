@@ -7,10 +7,21 @@ use lanzadera_core::clip::{Clip, ClipState as RealClipState, FollowAction, Quant
 use super::session_snapshot::*;
 
 pub fn build_snapshot(state: &SessionState) -> SessionSnapshot {
-    let tracks: Vec<TrackSnapshot> = state.tracks.iter().map(snapshot_track).collect();
-    let scene_count = compute_scene_count(&tracks);
+    let groove_idx = state.tracks.iter().position(|t| t.name.eq_ignore_ascii_case("Groove"));
+    let tracks: Vec<TrackSnapshot> = state.tracks.iter().enumerate()
+        .filter(|(i, _)| Some(*i) != groove_idx)
+        .map(|(_, t)| snapshot_track(t))
+        .collect();
+    let scene_count = compute_scene_count_from_state(state);
     let transport = snapshot_transport(state);
-    SessionSnapshot { tracks, scene_count, transport }
+    let groove = Some(GrooveSnapshotRow {
+        name: "Groove".to_string(),
+        clips: groove_idx
+            .and_then(|i| state.tracks.get(i))
+            .map(|t| (0..scene_count).map(|si| t.clips.get(si).and_then(|c| c.as_ref()).map(snapshot_clip)).collect())
+            .unwrap_or_else(|| vec![None; scene_count]),
+    });
+    SessionSnapshot { tracks, scene_count, transport, groove }
 }
 
 fn snapshot_track(t: &Track) -> TrackSnapshot {
@@ -94,8 +105,8 @@ fn generate_peaks(notes: &[MidiNote]) -> Vec<f32> {
     out
 }
 
-fn compute_scene_count(tracks: &[TrackSnapshot]) -> usize {
-    let max_used = tracks.iter()
+fn compute_scene_count_from_state(state: &SessionState) -> usize {
+    let max_used = state.tracks.iter()
         .flat_map(|t| t.clips.iter().enumerate())
         .filter(|(_, c)| c.is_some())
         .map(|(i, _)| i + 1)

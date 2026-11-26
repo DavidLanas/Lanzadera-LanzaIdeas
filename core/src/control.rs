@@ -38,6 +38,10 @@ pub enum ControlCmd {
     SetMasterVol { value: f32 },
     /// Master SOLO del Groove Machine (el master general afecta a todo).
     SetGrooveMasterVol { value: f32 },
+    /// FX globales del bus Groove (0.0..1.0).
+    SetGrooveFxPitch { value: f32 },
+    SetGrooveFxFilter { value: f32 },
+    SetGrooveFxPerform { value: f32 },
     ToggleMute { track: u8 },
     ToggleSolo { track: u8 },
     ToggleArm { track: u8 },
@@ -118,6 +122,9 @@ const OP_TOGGLE_METRONOME: u32 = 35;
 const OP_CREATE_CLIP: u32 = 36;
 const OP_LIVE_SUSTAIN: u32 = 37;
 const OP_SET_GROOVE_MASTER: u32 = 38;
+const OP_SET_GROOVE_FX_PITCH: u32 = 39;
+const OP_SET_GROOVE_FX_FILTER: u32 = 40;
+const OP_SET_GROOVE_FX_PERFORM: u32 = 41;
 
 #[inline] fn pack_unit(v: f32) -> u32 { (v.clamp(0.0, 1.0) * 16383.0).round() as u32 }
 #[inline] fn unpack_unit(v: u32) -> f32 { v as f32 / 16383.0 }
@@ -141,6 +148,9 @@ impl ControlCmd {
             ControlCmd::SetPan { track, value } => (OP_SET_PAN, track, 0, pack_unit((value.clamp(-1.0, 1.0) + 1.0) * 0.5), track == TRACK_CURSOR, false),
             ControlCmd::SetMasterVol { value } => (OP_SET_MASTER, 0, 0, pack_unit(value), false, false),
             ControlCmd::SetGrooveMasterVol { value } => (OP_SET_GROOVE_MASTER, 0, 0, pack_unit(value), false, false),
+            ControlCmd::SetGrooveFxPitch { value } => (OP_SET_GROOVE_FX_PITCH, 0, 0, pack_unit(value), false, false),
+            ControlCmd::SetGrooveFxFilter { value } => (OP_SET_GROOVE_FX_FILTER, 0, 0, pack_unit(value), false, false),
+            ControlCmd::SetGrooveFxPerform { value } => (OP_SET_GROOVE_FX_PERFORM, 0, 0, pack_unit(value), false, false),
             ControlCmd::ToggleMute { track } => (OP_MUTE, track, 0, 0, track == TRACK_CURSOR, false),
             ControlCmd::ToggleSolo { track } => (OP_SOLO, track, 0, 0, track == TRACK_CURSOR, false),
             ControlCmd::ToggleArm { track } => (OP_ARM, track, 0, 0, track == TRACK_CURSOR, false),
@@ -198,6 +208,9 @@ impl ControlCmd {
             OP_SET_PAN => ControlCmd::SetPan { track, value: unpack_unit(v) * 2.0 - 1.0 },
             OP_SET_MASTER => ControlCmd::SetMasterVol { value: unpack_unit(v) },
             OP_SET_GROOVE_MASTER => ControlCmd::SetGrooveMasterVol { value: unpack_unit(v) },
+            OP_SET_GROOVE_FX_PITCH => ControlCmd::SetGrooveFxPitch { value: unpack_unit(v) },
+            OP_SET_GROOVE_FX_FILTER => ControlCmd::SetGrooveFxFilter { value: unpack_unit(v) },
+            OP_SET_GROOVE_FX_PERFORM => ControlCmd::SetGrooveFxPerform { value: unpack_unit(v) },
             OP_MUTE => ControlCmd::ToggleMute { track },
             OP_SOLO => ControlCmd::ToggleSolo { track },
             OP_ARM => ControlCmd::ToggleArm { track },

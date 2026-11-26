@@ -696,6 +696,7 @@ impl SessionShared {
         s.groove_follow_playhead = follow;
         s.groove_event_mode = self.mk3_event_mode.load(Ordering::Relaxed);
         s.groove_sel_pad = self.groove_sel_pad.load(Ordering::Relaxed).min(24);
+        // window_layout ya vive en SessionState y se guarda tal cual.
 
         // Copia de trabajo: lo que se escribe lleva rutas de audio relativas; el estado
         // vivo conserva rutas absolutas.
@@ -773,6 +774,7 @@ impl SessionShared {
         s.groove_page = 0;
         s.groove_sel_pad = 0;
         s.groove_event_mode = false;
+        s.window_layout = Default::default();
         for tr in s.tracks.iter_mut() {
             for slot in tr.clips.iter_mut() {
                 if let Some(c) = slot { c.state = ClipState::Empty; }

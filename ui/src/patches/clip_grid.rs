@@ -4,14 +4,27 @@ use egui::{vec2, Align2, Color32, FontId, Pos2, Rect, RichText, ScrollArea, Sens
 use super::theme_tokens as theme;
 use super::session_snapshot::*;
 
+/// Payload para arrastrar un clip entre celdas del grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ClipDragPayload {
+    pub track: usize,
+    pub scene: usize,
+}
+
 #[derive(Default, Debug)]
 pub struct ClipGridActions {
     pub toggle_clip: Option<(usize, usize)>,
     pub launch_clip: Option<(usize, usize)>,
     pub select_clip: Option<(usize, usize)>,
+    /// Crear clip vacío de 8 compases (sin iniciar grabación).
     pub create_clip: Option<(usize, usize)>,
+    /// Crear clip vacío en pista armada e iniciar grabación.
+    pub create_and_record_clip: Option<(usize, usize)>,
     pub delete_clip: Option<(usize, usize)>,
     pub duplicate_clip: Option<(usize, usize)>,
+    pub copy_clip: Option<(usize, usize)>,
+    pub cut_clip: Option<(usize, usize)>,
+    pub paste_clip: Option<(usize, usize)>,
     pub open_piano_roll: Option<(usize, usize)>,
     pub open_audio_modal: Option<(usize, usize)>,
     pub load_file: Option<(usize, usize, String)>,
@@ -25,13 +38,18 @@ pub struct ClipGridActions {
     pub launch_scene: Option<usize>,
     pub add_scene: bool,
     pub remove_scene: Option<usize>,
+    /// Mover/copiar clip: (src_track, src_scene, dst_track, dst_scene, copy)
+    pub move_clip: Option<(usize, usize, usize, usize, bool)>,
+    /// Exportar Groove Machine como MIDI a una escena del clip launch.
+    pub export_groove_to_scene: Option<usize>,
 }
 
 pub fn render_session_matrix(ui: &mut Ui, s: &SessionSnapshot, a: &mut ClipGridActions) {
     render_top_bar(ui, &s.transport, a);
     ui.separator();
 
-    let n_tracks = s.tracks.len().max(1);
+    let n_tracks = s.tracks.len() + usize::from(s.groove.is_some());
+    let n_tracks = n_tracks.max(1);
     let n_scenes = s.scene_count.max(1);
 
     let avail = ui.available_size();
@@ -57,6 +75,14 @@ pub fn render_session_matrix(ui: &mut Ui, s: &SessionSnapshot, a: &mut ClipGridA
                     for si in 0..n_scenes {
                         let clip = track.clips.get(si).and_then(|c| c.as_ref());
                         clip_cell(ui, track, clip, ti, si, cell_w, cell_h, a);
+                    }
+                    ui.end_row();
+                }
+
+                if let Some(g) = &s.groove {
+                    groove_track_header(ui, &g.name, header_w, cell_h);
+                    for si in 0..n_scenes {
+                        groove_cell(ui, g.clips.get(si).and_then(|c| c.as_ref()), si, cell_w, cell_h, a);
                     }
                     ui.end_row();
                 }
@@ -170,10 +196,57 @@ fn track_header(ui: &mut Ui, t: &TrackSnapshot, track_idx: usize, w: f32, h: f32
     }
 }
 
-fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize, si: usize, w: f32, h: f32, a: &mut ClipGridActions) {
+fn groove_track_header(ui: &mut Ui, name: &str, w: f32, h: f32) {
+    let (outer, _resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
+    let p = ui.painter();
+    p.rect_filled(outer, 0.0, Color32::from_rgb(28, 24, 20));
+    p.rect_filled(Rect::from_min_size(outer.min, Vec2::new(w, 5.0)), 0.0, Color32::from_rgb(240, 170, 60));
+    p.text(
+        Pos2::new(outer.left() + 6.0, outer.top() + 10.0),
+        Align2::LEFT_TOP,
+        name,
+        FontId::proportional(theme::FONT_MEDIUM),
+        theme::TEXT_COLOR,
+    );
+    p.text(
+        Pos2::new(outer.left() + 6.0, outer.top() + 30.0),
+        Align2::LEFT_TOP,
+        "Groove Machine",
+        FontId::proportional(theme::FONT_SMALL),
+        theme::BADGE_TEXT,
+    );
+}
+
+fn groove_cell(ui: &mut Ui, c: Option<&ClipSnapshot>, si: usize, w: f32, h: f32, a: &mut ClipGridActions) {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
+    let bg = if c.is_some() { Color32::from_rgb(58, 46, 28) } else { theme::SCENE_COL_BG };
+    ui.painter().rect_filled(rect, 4.0, theme::CLIP_BORDER);
+    ui.painter().rect_filled(rect.shrink(1.0), 4.0, bg);
+    let label = c.map(|x| x.name.as_str()).unwrap_or("Exportar MIDI");
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, label,
+        FontId::proportional(theme::FONT_SMALL), theme::TEXT_COLOR);
+    if resp.hovered() {
+        ui.painter().rect_filled(rect.shrink(0.5), 4.0, Color32::from_rgba_unmultiplied(240, 170, 60, 35));
+    }
+    resp.context_menu(|ui| {
+        if ui.button("Exportar Groove a esta escena").clicked() {
+            a.export_groove_to_scene = Some(si);
+            ui.close_menu();
+        }
+    });
+    if resp.double_clicked() {
+        a.export_groove_to_scene = Some(si);
+    }
+}
+
+fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize, si: usize, w: f32, h: f32, a: &mut ClipGridActions) {
     let has_clip = c.is_some();
     let st = c.map(|x| x.state).unwrap_or(ClipStateView::Empty);
+    let drag_id = egui::Id::new(("clip_drag", ti, si));
+    let payload = ClipDragPayload { track: ti, scene: si };
+    let is_drag_source = ui.ctx().is_being_dragged(drag_id);
+
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click_and_drag());
 
     let bg = if !has_clip {
         theme::SCENE_COL_BG
@@ -187,14 +260,15 @@ fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize
         }
     };
 
-    ui.painter().rect_filled(rect, 4.0, theme::CLIP_BORDER);
-    ui.painter().rect_filled(rect.shrink(1.0), 4.0, bg);
+    // Fondo/borde base (el contenido se atenúa si estamos arrastrando esta celda)
+    let alpha_mul = if is_drag_source { 0.35 } else { 1.0 };
+    let paint = |col: Color32| -> Color32 {
+        Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), ((col.a() as f32) * alpha_mul) as u8)
+    };
+    ui.painter().rect_filled(rect, 4.0, paint(theme::CLIP_BORDER));
+    ui.painter().rect_filled(rect.shrink(1.0), 4.0, paint(bg));
 
     let btn = Rect::from_min_size(rect.min + Vec2::new(4.0, 4.0), Vec2::new(18.0, 18.0));
-    // Colores del botón de estado (pedido de uso en vivo):
-    //   amarillo parpadeante = entrando al compás (Triggered / RecQueued)
-    //   rojo fijo            = grabando
-    //   verde fijo           = reproduciendo
     const YELLOW: Color32 = Color32::from_rgb(240, 200, 70);
     const YELLOW_DIM: Color32 = Color32::from_rgb(110, 90, 30);
     const GREEN: Color32 = Color32::from_rgb(72, 210, 130);
@@ -204,12 +278,10 @@ fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize
     let blink_on = (time * 5.0).sin() > 0.0;
     let blinking = has_clip && matches!(st, ClipStateView::Triggered | ClipStateView::RecQueued);
     let (sym, col) = if !has_clip {
-        (if t.armed { "＋" } else { "·" }, theme::GRAY)
+        (if t.armed { "●" } else { "■" }, if t.armed { REC_RED } else { IDLE })
     } else {
         match st {
-            // Clip existente en reposo: gris tenue (antes era blanco y se
-            // confundía con un parpadeo blanco/rojo al grabar).
-            ClipStateView::Empty => ("▶", IDLE),
+            ClipStateView::Empty => ("■", IDLE),
             ClipStateView::Playing => ("▶", GREEN),
             ClipStateView::Stopping => ("■", Color32::from_rgb(240, 152, 72)),
             ClipStateView::Recording | ClipStateView::Overdubbing => ("●", REC_RED),
@@ -219,8 +291,10 @@ fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize
     };
     if blinking { ui.ctx().request_repaint_after(std::time::Duration::from_millis(50)); }
 
-    ui.painter().rect_filled(btn, 2.0, Color32::from_gray(40));
-    ui.painter().text(btn.center(), Align2::CENTER_CENTER, sym, FontId::proportional(12.0), col);
+    // Botón de estado: indicador + control de transporte/grabación.
+    ui.painter().rect_filled(btn, 2.0, paint(Color32::from_gray(36)));
+    ui.painter().rect_stroke(btn, 2.0, Stroke::new(1.0, paint(Color32::from_gray(75))));
+    ui.painter().text(btn.center(), Align2::CENTER_CENTER, sym, FontId::proportional(12.0), paint(col));
 
     if let Some(x) = c {
         ui.painter().text(
@@ -228,29 +302,29 @@ fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize
             Align2::LEFT_TOP,
             &x.name,
             FontId::proportional(theme::FONT_BASE),
-            theme::TEXT_COLOR,
+            paint(theme::TEXT_COLOR),
         );
 
         if !x.peaks.is_empty() {
             let wv_l = rect.left() + 24.0;
-        let wv_t = rect.top() + 18.0;
-        let wv_r = (rect.right() - 4.0).max(wv_l + 10.0);
-        let wv_b = (rect.bottom() - 12.0).max(wv_t + 10.0);
-        let wv = Rect::from_min_max(Pos2::new(wv_l, wv_t), Pos2::new(wv_r, wv_b));
+            let wv_t = rect.top() + 18.0;
+            let wv_r = (rect.right() - 4.0).max(wv_l + 10.0);
+            let wv_b = (rect.bottom() - 12.0).max(wv_t + 10.0);
+            let wv = Rect::from_min_max(Pos2::new(wv_l, wv_t), Pos2::new(wv_r, wv_b));
             let wc = Color32::from_rgb(
                 x.color.r().saturating_add(90),
                 x.color.g().saturating_add(90),
                 x.color.b().saturating_add(90),
             );
             let head = if x.progress > 0.0 { Some(x.progress) } else { None };
-            crate::waveform::paint_cell(ui.painter(), wv, &x.peaks, head, wc);
+            crate::waveform::paint_cell(ui.painter(), wv, &x.peaks, head, paint(wc));
         }
 
         let pr = Rect::from_min_size(Pos2::new(rect.left() + 4.0, rect.bottom() - 10.0), Vec2::new(rect.width() - 8.0, 4.0));
-        ui.painter().rect_filled(pr, 2.0, theme::GRID_LINE);
+        ui.painter().rect_filled(pr, 2.0, paint(theme::GRID_LINE));
         ui.painter().rect_filled(
             Rect::from_min_size(pr.min, Vec2::new(pr.width() * x.progress.clamp(0.0, 1.0), 4.0)),
-            2.0, theme::PROGRESS_FILL,
+            2.0, paint(theme::PROGRESS_FILL),
         );
 
         ui.painter().text(
@@ -258,7 +332,7 @@ fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize
             Align2::RIGHT_TOP,
             format!("{}b Q{}", x.loop_bars, x.quantize_bars),
             FontId::monospace(9.0),
-            theme::BADGE_TEXT,
+            paint(theme::BADGE_TEXT),
         );
 
         if let Some(icon) = x.follow_icon {
@@ -267,7 +341,7 @@ fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize
                 Align2::RIGHT_BOTTOM,
                 icon,
                 FontId::monospace(10.0),
-                theme::BADGE_TEXT,
+                paint(theme::BADGE_TEXT),
             );
         }
     } else if t.armed {
@@ -276,45 +350,92 @@ fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize
             Align2::LEFT_CENTER,
             "●",
             FontId::proportional(theme::FONT_SMALL),
-            theme::RED,
+            paint(theme::RED),
         );
     }
 
-    if resp.hovered() {
+    // Arrastre interno de clips (solo si la celda tiene clip)
+    if has_clip && resp.drag_started_by(egui::PointerButton::Primary) {
+        egui::DragAndDrop::set_payload(ui.ctx(), payload);
+    }
+    let dragging_clip = egui::DragAndDrop::has_payload_of_type::<ClipDragPayload>(ui.ctx());
+    let dragging_file = egui::DragAndDrop::has_payload_of_type::<crate::view::BrowserFile>(ui.ctx());
+
+    if resp.hovered() && !dragging_clip && !dragging_file {
         ui.painter().rect_filled(rect.shrink(0.5), 4.0, Color32::from_rgba_unmultiplied(100, 180, 255, 30));
     }
 
-    // ── Interacciones (lógica original reconectada) ──
-    if resp.double_clicked() && has_clip {
-        a.open_piano_roll = Some((ti, si));
-    } else if resp.clicked() {
-        if let Some(pos) = resp.interact_pointer_pos() {
-            if btn.contains(pos) {
-                if has_clip { a.toggle_clip = Some((ti, si)); }
-                else if t.armed { a.create_clip = Some((ti, si)); }
-            } else {
-                a.select_clip = Some((ti, si));
-                if has_clip { a.launch_clip = Some((ti, si)); }
-                else if t.armed { a.create_clip = Some((ti, si)); }
+    // Destino de drop de clip interno
+    if dragging_clip {
+        let can_drop = ui.rect_contains_pointer(rect);
+        if can_drop {
+            let copy_mode = ui.input(|i| i.modifiers.alt);
+            let stroke_col = if copy_mode { theme::PROGRESS_FILL } else { theme::TEXT_COLOR };
+            ui.painter().rect_stroke(rect.shrink(1.0), 4.0, Stroke::new(2.0, stroke_col));
+            if copy_mode {
+                ui.painter().text(rect.center(), Align2::CENTER_CENTER, "⧉ Copiar", FontId::proportional(theme::FONT_SMALL), stroke_col);
+            }
+            if ui.input(|i| i.pointer.any_released()) {
+                if let Some(src) = egui::DragAndDrop::take_payload::<ClipDragPayload>(ui.ctx()) {
+                    if src.track != ti || src.scene != si {
+                        a.move_clip = Some((src.track, src.scene, ti, si, copy_mode));
+                    }
+                }
             }
         }
     }
 
-    // Menú contextual (click derecho)
+    // ── Interacciones (click/double/right) ──
+    // El cuerpo del clip solo selecciona/enfoca. Play/rec se dispara desde el
+    // botón de estado (esquina superior izquierda). Evita disparar al terminar drag.
+    let clicked = resp.clicked() && !resp.dragged();
+    let double_clicked = resp.double_clicked() && !resp.dragged();
+    if double_clicked {
+        if has_clip {
+            a.open_piano_roll = Some((ti, si));
+        } else {
+            a.select_clip = Some((ti, si));
+            a.create_clip = Some((ti, si));
+        }
+    } else if clicked {
+        if let Some(pos) = resp.interact_pointer_pos() {
+            if btn.contains(pos) {
+                if has_clip {
+                    a.toggle_clip = Some((ti, si));
+                } else if t.armed {
+                    a.create_and_record_clip = Some((ti, si));
+                } else {
+                    a.create_clip = Some((ti, si));
+                }
+            } else {
+                a.select_clip = Some((ti, si));
+            }
+        }
+    }
+
     resp.context_menu(|ui| {
         if has_clip && ui.button("🎹 Piano Roll").clicked() { a.open_piano_roll = Some((ti, si)); ui.close_menu(); }
+        if !has_clip && ui.button("＋ Crear clip").clicked() { a.create_clip = Some((ti, si)); ui.close_menu(); }
         if ui.button("📂 Cargar audio/MIDI…").clicked() { a.open_audio_modal = Some((ti, si)); ui.close_menu(); }
-        if has_clip {
-            if ui.button("🗑 Borrar clip").clicked() { a.delete_clip = Some((ti, si)); ui.close_menu(); }
-            if ui.button("⧉ Duplicar").clicked() { a.duplicate_clip = Some((ti, si)); ui.close_menu(); }
-        }
+        ui.separator();
+        if has_clip && ui.button("Copiar").clicked() { a.copy_clip = Some((ti, si)); ui.close_menu(); }
+        if has_clip && ui.button("Cortar").clicked() { a.cut_clip = Some((ti, si)); ui.close_menu(); }
+        let can_paste = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("clip_clipboard_has")).unwrap_or(false));
+        if ui.add_enabled(can_paste, egui::Button::new("Pegar")).clicked() { a.paste_clip = Some((ti, si)); ui.close_menu(); }
+        if has_clip && ui.button("⧉ Duplicar").clicked() { a.duplicate_clip = Some((ti, si)); ui.close_menu(); }
+        if has_clip && ui.button("🗑 Borrar clip").clicked() { a.delete_clip = Some((ti, si)); ui.close_menu(); }
+        ui.separator();
         if ui.button("◎ Seleccionar").clicked() { a.select_clip = Some((ti, si)); ui.close_menu(); }
     });
 
-    // Drop de archivos externos sobre la celda
-    let dropped = ui.input(|i| i.raw.dropped_files.clone());
-    if resp.hovered() && !dropped.is_empty() {
-        if let Some(f) = dropped.first() {
+    // Drop de archivos externos sobre la celda (browser/OS)
+    let dropped_files = ui.input(|i| i.raw.dropped_files.clone());
+    let browser_hover = dragging_file && ui.rect_contains_pointer(rect);
+    if browser_hover {
+        ui.painter().rect_stroke(rect.shrink(1.0), 4.0, Stroke::new(2.0, theme::PROGRESS_FILL));
+    }
+    if resp.hovered() && !dropped_files.is_empty() {
+        if let Some(f) = dropped_files.first() {
             if let Some(path) = &f.path {
                 a.load_file = Some((ti, si, path.to_string_lossy().into_owned()));
             }

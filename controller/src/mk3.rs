@@ -159,6 +159,7 @@ impl Mk3Bridge {
                 let raw = if value >= 65 { value as i16 - 128 } else { value as i16 };
                 let inc = (-raw).clamp(-8, 8) as i8;
                 if inc == 0 { return; }
+                let fine = if self.shift { 0.25f32 } else { 1.0f32 };
                 if self.groove_active {
                     // ── Groove Machine: encoder contextual al sub-modo ──
                     match self.groove_sub_mode {
@@ -169,14 +170,14 @@ impl Mk3Bridge {
                                 let state = self.drum_cell_param_state[pad as usize];
                                 if state == 1 {
                                     // GAIN: emitir ajuste de volumen
-                                    emit(ControlCmd::SetVolume { track: pad, value: inc as f32 / 127.0 });
+                                    emit(ControlCmd::SetVolume { track: pad, value: inc as f32 / 127.0 * fine });
                                 } else if state == 2 {
                                     // PAN: emitir ajuste de pan
-                                    emit(ControlCmd::SetPan { track: pad, value: inc as f32 / 64.0 });
+                                    emit(ControlCmd::SetPan { track: pad, value: inc as f32 / 64.0 * fine });
                                 }
                             } else {
                                 // Sin sub-modo: cambiar banco de pads (1-8 / 9-16)
-                                emit(ControlCmd::SelectTrack { delta: inc });
+                                emit(ControlCmd::SelectTrack { delta: if self.shift { inc.signum() } else { inc } });
                             }
                         }
                         GrooveSubMode::Step => {
@@ -185,21 +186,21 @@ impl Mk3Bridge {
                         }
                         GrooveSubMode::Mixer => {
                             // Ajustar parámetro de la celda seleccionada
-                            emit(ControlCmd::SetVolume { track: TRACK_CURSOR, value: inc as f32 / 127.0 });
+                            emit(ControlCmd::SetVolume { track: TRACK_CURSOR, value: inc as f32 / 127.0 * fine });
                         }
                         GrooveSubMode::Browser => {
                             // Navegar carpetas/archivos
-                            emit(ControlCmd::SelectTrack { delta: inc });
+                            emit(ControlCmd::SelectTrack { delta: if self.shift { inc.signum() } else { inc } });
                         }
                     }
                 } else {
                     match self.mode {
                         Mk3Mode::Scene => {
                             self.selected_scene = (self.selected_scene as i16 + inc as i16).clamp(0, 31) as u8;
-                            emit(ControlCmd::SelectScene { delta: inc });
+                            emit(ControlCmd::SelectScene { delta: if self.shift { inc.signum() } else { inc } });
                         }
-                        Mk3Mode::StepEdit => emit(ControlCmd::CajaBpm { delta: inc }),
-                        _ => emit(ControlCmd::SelectTrack { delta: inc }),
+                        Mk3Mode::StepEdit => emit(ControlCmd::CajaBpm { delta: if self.shift { inc.signum() } else { inc } }),
+                        _ => emit(ControlCmd::SelectTrack { delta: if self.shift { inc.signum() } else { inc } }),
                     }
                 }
             }
@@ -274,8 +275,8 @@ impl Mk3Bridge {
                             emit(ControlCmd::CajaStep { piece: pad as u8, step: 0 });
                         }
                         GrooveSubMode::Mixer => {
-                            // Seleccionar celda del mixer
-                            emit(ControlCmd::SelectClip { track: pad as u8, scene: SCENE_CURSOR });
+                            // Seleccionar celda del mixer de batería: el foco de Groove lo
+                            // gestiona el handler principal; no movemos el mixer general.
                         }
                         GrooveSubMode::Browser => {
                             // Navegar carpetas (encoder hace el trabajo pesado)

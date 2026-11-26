@@ -249,7 +249,11 @@ pub fn connect_mk3(
                     shared.mk3_vel_req.store(d, Ordering::Relaxed);
                     return;
                 }
-                if swing_mode != 0 { shared.groove.bump(swing_mode, inc * 2); return; }
+                if swing_mode != 0 {
+                    let step = if b.shift_held() { 1 } else { 2 };
+                    shared.groove.bump(swing_mode, inc * step);
+                    return;
+                }
                 // ── CHORDS: el encoder regula el parámetro asignado ──
                 // Se edita igual con el parámetro bloqueado o libre.
                 if chords {
@@ -563,6 +567,11 @@ pub fn connect_mk3(
                     let sub = shared.groove_sub_mode.load(Ordering::Relaxed);
                     if sub == 1 || sub == 2 {
                         shared.groove_sel_pad.store(pad as u8, Ordering::Relaxed);
+                        if sub == 2 {
+                            // Mixer de batería: el foco se queda en la celda de Groove,
+                            // no debe mover el track seleccionado del mixer principal.
+                            return;
+                        }
                     }
                 }
             }

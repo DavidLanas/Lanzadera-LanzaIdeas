@@ -6,11 +6,13 @@ use egui::{pos2, vec2, Align2, Color32, FontId, Rect, Rounding, Sense, Stroke};
 use crate::theme::T;
 
 /// Knob de arrastre vertical. Doble click → valor por defecto.
+/// Shift = ajuste fino (encoder fino).
 pub fn knob(ui: &mut egui::Ui, value: &mut f32, min: f32, max: f32, default: f32, label: &str) -> bool {
     let (rect, resp) = ui.allocate_exact_size(vec2(40.0, 50.0), Sense::click_and_drag());
     let mut changed = false;
     if resp.dragged() {
-        *value = (*value - resp.drag_delta().y * (max - min) / 150.0).clamp(min, max);
+        let fine = if ui.input(|i| i.modifiers.shift) { 0.15 } else { 1.0 };
+        *value = (*value - resp.drag_delta().y * (max - min) / 150.0 * fine).clamp(min, max);
         changed = true;
     }
     if resp.double_clicked() { *value = default; changed = true; }
@@ -35,11 +37,13 @@ pub fn knob(ui: &mut egui::Ui, value: &mut f32, min: f32, max: f32, default: f32
 }
 
 /// Fader vertical + meter LED. Click fija el valor; arrastrar lo mueve.
+/// Shift = ajuste fino.
 pub fn fader(ui: &mut egui::Ui, value: &mut f32, height: f32, level: f32) -> bool {
     let (rect, resp) = ui.allocate_exact_size(vec2(34.0, height), Sense::click_and_drag());
     let mut changed = false;
     if resp.dragged() {
-        *value = (*value - resp.drag_delta().y / height).clamp(0.0, 1.0);
+        let fine = if ui.input(|i| i.modifiers.shift) { 0.15 } else { 1.0 };
+        *value = (*value - resp.drag_delta().y / height * fine).clamp(0.0, 1.0);
         changed = true;
     }
     if resp.clicked() {

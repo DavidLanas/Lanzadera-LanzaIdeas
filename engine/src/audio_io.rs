@@ -41,6 +41,41 @@ use crate::synth::Synth;
 use crate::caja_drums::{CajaEngine, CajaLoader, CajaScheduler, CajaStore, default_kit_state};
 use caja_core::kit::{PadCfg, PadLive, ALL_LOCK, NUM_PADS};
 
+#[derive(Clone, Copy, Default)]
+struct GmBiquad {
+    b0: f32, b1: f32, b2: f32, a1: f32, a2: f32,
+    z1: f32, z2: f32,
+}
+impl GmBiquad {
+    #[inline] fn reset(&mut self) { self.z1 = 0.0; self.z2 = 0.0; }
+    #[inline] fn set_lpf(&mut self, sr: f32, freq: f32, q: f32) {
+        let f = freq.clamp(20.0, sr * 0.45);
+        let w0 = 2.0 * std::f32::consts::PI * f / sr.max(1.0);
+        let c = w0.cos(); let s = w0.sin();
+        let alpha = s / (2.0 * q.max(0.1));
+        let b0 = (1.0 - c) * 0.5; let b1 = 1.0 - c; let b2 = (1.0 - c) * 0.5;
+        let a0 = 1.0 + alpha; let a1 = -2.0 * c; let a2 = 1.0 - alpha;
+        self.b0 = b0 / a0; self.b1 = b1 / a0; self.b2 = b2 / a0;
+        self.a1 = a1 / a0; self.a2 = a2 / a0;
+    }
+    #[inline] fn set_hpf(&mut self, sr: f32, freq: f32, q: f32) {
+        let f = freq.clamp(20.0, sr * 0.45);
+        let w0 = 2.0 * std::f32::consts::PI * f / sr.max(1.0);
+        let c = w0.cos(); let s = w0.sin();
+        let alpha = s / (2.0 * q.max(0.1));
+        let b0 = (1.0 + c) * 0.5; let b1 = -(1.0 + c); let b2 = (1.0 + c) * 0.5;
+        let a0 = 1.0 + alpha; let a1 = -2.0 * c; let a2 = 1.0 - alpha;
+        self.b0 = b0 / a0; self.b1 = b1 / a0; self.b2 = b2 / a0;
+        self.a1 = a1 / a0; self.a2 = a2 / a0;
+    }
+    #[inline] fn process(&mut self, x: f32) -> f32 {
+        let y = self.b0 * x + self.z1;
+        self.z1 = self.b1 * x - self.a1 * y + self.z2;
+        self.z2 = self.b2 * x - self.a2 * y;
+        y
+    }
+}
+
 
 /// Tamaño máximo de bloque que procesamos de una vez (los callbacks mayores
 /// se trocean). Los plugins se activan con este max_frames_count.
@@ -370,6 +405,13 @@ struct Renderer {
     caja_trigs: [(u32, u8, f32); 64],
     caja_trig_count: usize,
     caja_scheduler: CajaScheduler,
+    // FX globales del bus Groove
+    groove_fx_filter_l: GmBiquad,
+    groove_fx_filter_r: GmBiquad,
+    groove_fx_delay_l: Box<[f32; 131072]>,
+    groove_fx_delay_r: Box<[f32; 131072]>,
+    groove_fx_delay_w: usize,
+    groove_fx_tape_env: f32,
     record_engine: crate::audio_record::RecordEngine,
     was_recording: bool,
     audio_in_cons: Option<ringbuf::HeapCons<f32>>,
@@ -1116,6 +1158,105 @@ impl Renderer {
                 self.caja_engine.render(&mut cb_l[pos..frames], &mut cb_r[pos..frames]);
             }
             self.caja_trig_count = 0;
+
+            // ── FX globales del bus Groove (PITCH / MOD / PERFORM) ──
+            let fx_pitch = audio.groove_fx_pitch.clamp(0.0, 1.0);
+            let fx_filter = audio.groove_fx_filter.clamp(0.0, 1.0);
+            let fx_perform = audio.groove_fx_perform.clamp(0.0, 1.0);
+            let sr = self.sample_rate.max(1) as f32;
+
+            // PITCH: 0.5 = neutro. <0.5 = tape stop hacia 0; >0.5 = varispeed up.
+            let pitch_target = if (fx_pitch - 0.5).abs() < 0.01 {
+                1.0
+            } else if fx_pitch < 0.5 {
+                (fx_pitch / 0.5).clamp(0.0, 1.0)
+            } else {
+                1.0 + (fx_pitch - 0.5) * 2.0 // hasta 2x
+            };
+            // Tape stop feel: slew env toward target; when going down hard, ramp to stop.
+            let tape_slew = if pitch_target < self.groove_fx_tape_env { 0.0025 } else { 0.02 };
+            // Apply varispeed/tape by resampling in-place via scratch copy.
+            if (pitch_target - 1.0).abs() > 0.001 || (self.groove_fx_tape_env - 1.0).abs() > 0.001 {
+                // copy to temp fixed stack arrays? MAX_BLOCK is 4096; two [f32;4096] on stack is ok.
+                let mut tmp_l = [0.0f32; MAX_BLOCK];
+                let mut tmp_r = [0.0f32; MAX_BLOCK];
+                tmp_l[..frames].copy_from_slice(&cb_l[..frames]);
+                tmp_r[..frames].copy_from_slice(&cb_r[..frames]);
+                let mut posf = 0.0f32;
+                for i in 0..frames {
+                    self.groove_fx_tape_env += (pitch_target - self.groove_fx_tape_env) * tape_slew;
+                    let rate = self.groove_fx_tape_env.clamp(0.0, 2.0);
+                    let idx = posf as usize;
+                    let frac = posf - idx as f32;
+                    let s0 = idx.min(frames.saturating_sub(1));
+                    let s1 = (idx + 1).min(frames.saturating_sub(1));
+                    cb_l[i] = tmp_l[s0] + (tmp_l[s1] - tmp_l[s0]) * frac;
+                    cb_r[i] = tmp_r[s0] + (tmp_r[s1] - tmp_r[s0]) * frac;
+                    posf += rate;
+                    if posf >= frames as f32 { 
+                        // reached end: fill rest with tail/fade
+                        for j in i+1..frames { cb_l[j] = 0.0; cb_r[j] = 0.0; }
+                        break;
+                    }
+                }
+            } else {
+                self.groove_fx_tape_env = 1.0;
+            }
+
+            // MOD: resonant filter sweep LPF<->HPF. 0.5 neutral bypass.
+            if (fx_filter - 0.5).abs() > 0.01 {
+                let q = 1.2;
+                if fx_filter < 0.5 {
+                    // LPF: 0.0 very closed, 0.5 open
+                    let t = fx_filter / 0.5;
+                    let hz = 80.0 * (18000.0f32 / 80.0f32).powf(t.clamp(0.0, 1.0));
+                    self.groove_fx_filter_l.set_lpf(sr, hz, q);
+                    self.groove_fx_filter_r.set_lpf(sr, hz, q);
+                } else {
+                    // HPF: 0.5 off-ish, 1.0 aggressive
+                    let t = (fx_filter - 0.5) / 0.5;
+                    let hz = 20.0 * (8000.0f32 / 20.0f32).powf(t.clamp(0.0, 1.0));
+                    self.groove_fx_filter_l.set_hpf(sr, hz, q);
+                    self.groove_fx_filter_r.set_hpf(sr, hz, q);
+                }
+                for i in 0..frames {
+                    cb_l[i] = self.groove_fx_filter_l.process(cb_l[i]);
+                    cb_r[i] = self.groove_fx_filter_r.process(cb_r[i]);
+                }
+            } else {
+                self.groove_fx_filter_l.reset();
+                self.groove_fx_filter_r.reset();
+            }
+
+            // PERFORM: delay/stutter send synced to tempo. 0=no send.
+            if fx_perform > 0.001 {
+                let bpm = audio.tempo.max(1.0) as f32;
+                // choose division by amount: low=1/8, mid=1/16, high=1/32
+                let div = if fx_perform < 0.34 { 0.5 } else if fx_perform < 0.67 { 0.25 } else { 0.125 }; // beats
+                let delay_samples = ((60.0 / bpm) * div * sr) as usize;
+                let delay_samples = delay_samples.clamp(1, 131071);
+                let send = fx_perform.clamp(0.0, 1.0) * 0.85;
+                let fb = (0.25 + fx_perform * 0.55).clamp(0.0, 0.82);
+                let mask = 131071usize;
+                for i in 0..frames {
+                    let rpos = (self.groove_fx_delay_w + 131072 - delay_samples) & mask;
+                    let dl = self.groove_fx_delay_l[rpos];
+                    let dr = self.groove_fx_delay_r[rpos];
+                    let inl = cb_l[i] + dl * fb;
+                    let inr = cb_r[i] + dr * fb;
+                    self.groove_fx_delay_l[self.groove_fx_delay_w] = inl;
+                    self.groove_fx_delay_r[self.groove_fx_delay_w] = inr;
+                    self.groove_fx_delay_w = (self.groove_fx_delay_w + 1) & mask;
+                    cb_l[i] += dl * send;
+                    cb_r[i] += dr * send;
+                }
+            } else {
+                // decay feedback tails
+                let mut any = false;
+                for s in self.groove_fx_delay_l.iter_mut() { *s *= 0.95; if s.abs() > 1e-5 { any = true; } }
+                for s in self.groove_fx_delay_r.iter_mut() { *s *= 0.95; if s.abs() > 1e-5 { any = true; } }
+                if !any { self.groove_fx_delay_w = 0; }
+            }
         }
 
         // ── EQ + mezcla final + metrónomo ──
@@ -1158,16 +1299,32 @@ impl Renderer {
             let gp = gl.abs().max(gr.abs());
             if gp > self.groove_peak { self.groove_peak = gp; }
 
-            // Metrónomo: envelope + seno amortiguado en cada beat.
-            if audio.metronome && audio.playing && ticks_per_sample > 0.0 {
+            // Metrónomo: configurable (siempre / solo count-in de rec / off) y subdivisión.
+            let rec_count_in = audio.recording
+                && (0..audio.track_count as usize).any(|ti| {
+                    self.engine.active(ti).map(|a| a.scene == audio.rec_scene && a.state == ClipState::RecQueued).unwrap_or(false)
+                });
+            let metro_active = match audio.metronome_mode {
+                1 => rec_count_in, // Solo count-in de grabación
+                2 => false,        // Off
+                _ => audio.metronome && audio.playing, // Siempre (cuando está on y sonando)
+            };
+            if metro_active && ticks_per_sample > 0.0 {
                 let prev = tick_f;
                 tick_f += ticks_per_sample;
-                let prev_beat = (prev / beat_ticks).floor();
-                let cur_beat = (tick_f / beat_ticks).floor();
-                if cur_beat > prev_beat {
-                    let is_bar = (cur_beat as u64) % 4 == 0;
-                    self.metro_env = if is_bar { 0.32 } else { 0.18 };
-                    self.metro_freq = if is_bar { 2000.0 } else { 1000.0 };
+                let subdiv_ticks = match audio.metronome_subdiv {
+                    2 => beat_ticks / 4.0, // 1/16
+                    3 => beat_ticks / 8.0, // 1/32
+                    1 => beat_ticks / 2.0, // 1/8
+                    _ => beat_ticks,       // 1/4
+                }.max(1.0);
+                let prev_step = (prev / subdiv_ticks).floor();
+                let cur_step = (tick_f / subdiv_ticks).floor();
+                if cur_step > prev_step {
+                    let is_bar = ((cur_step as f64 * subdiv_ticks) % (beat_ticks * 4.0)).abs() < 1.0;
+                    let is_beat = ((cur_step as f64 * subdiv_ticks) % beat_ticks).abs() < 1.0;
+                    self.metro_env = if is_bar { 0.32 } else if is_beat { 0.20 } else { 0.11 };
+                    self.metro_freq = if is_bar { 2200.0 } else if is_beat { 1400.0 } else { 900.0 };
                     self.metro_phase = 0.0;
                 }
             } else if ticks_per_sample > 0.0 {
@@ -1716,6 +1873,12 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
         caja_trigs: std::array::from_fn(|_| (0, 0, 0.0)),
         caja_trig_count: 0,
         caja_scheduler,
+        groove_fx_filter_l: GmBiquad::default(),
+        groove_fx_filter_r: GmBiquad::default(),
+        groove_fx_delay_l: Box::new([0.0; 131072]),
+        groove_fx_delay_r: Box::new([0.0; 131072]),
+        groove_fx_delay_w: 0,
+        groove_fx_tape_env: 1.0,
         audio_in_cons,
         audio_in_ch,
         audio_in_scratch: Vec::with_capacity(MAX_BLOCK * (audio_in_ch.max(2) as usize)),

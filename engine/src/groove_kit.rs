@@ -50,7 +50,8 @@ pub struct PadCfg {
     pub pin: Option<String>,
     /// Parámetros de dado/síntesis: [Muestra, Pitch, Decay, Filtro].
     pub param: [ParamCfg; 4],
-    /// Re-tirar el dado cada N compases (0 = desactivado; 1 / 2 / 4).
+    /// Re-tirar el dado cada N compases (0 = desactivado; 1 / 2 / 3 / 4).
+    /// Por defecto 4: cambia la muestra cada 4 compases.
     pub rate: u8,
 }
 
@@ -76,7 +77,7 @@ impl Default for PadCfg {
             pin_seed: 0,
             pin: None,
             param: DEFAULT_PARAM,
-            rate: 0,
+            rate: 4,
         }
     }
 }
@@ -144,7 +145,7 @@ impl Default for PadEngine {
             choke_group: 0,
             choker: false,
             solo: false,
-            rate: 0,
+            rate: 4,
         }
     }
 }

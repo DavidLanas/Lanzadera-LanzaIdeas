@@ -23,6 +23,13 @@ pub struct TransportSnapshot {
     pub quantize_bars: u8, pub rec_queued: bool, pub metronome: bool, pub playing: bool,
 }
 #[derive(Clone, Debug, Default)]
+pub struct GrooveSnapshotRow {
+    pub name: String,
+    pub clips: Vec<Option<ClipSnapshot>>,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct SessionSnapshot {
     pub tracks: Vec<TrackSnapshot>, pub scene_count: usize, pub transport: TransportSnapshot,
+    pub groove: Option<GrooveSnapshotRow>,
 }

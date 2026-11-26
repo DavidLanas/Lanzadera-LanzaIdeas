@@ -82,11 +82,17 @@ pub struct SessionAudio {
     pub master_volume: f32,
     /// Master solo del Groove Machine.
     pub groove_master: f32,
+    /// FX globales del bus Groove (0.0..1.0).
+    pub groove_fx_pitch: f32,
+    pub groove_fx_filter: f32,
+    pub groove_fx_perform: f32,
     /// Contador de grabaciones iniciadas (ver SessionState::rec_seq).
     pub rec_seq: u32,
     pub quantize: Quantize, // global (stops del launcher)
     pub fill_mode: bool,    // hook Fase 4 (occurrence de Caja)
     pub metronome: bool,
+    pub metronome_mode: u8,   // 0=Always, 1=RecordCountIn, 2=Off
+    pub metronome_subdiv: u8, // 0=1/4,1=1/8,2=1/16,3=1/32
     pub recording: bool,
     pub rec_track: u8,
     pub rec_scene: u8,
@@ -104,8 +110,11 @@ impl Default for SessionAudio {
     fn default() -> Self {
         SessionAudio {
             tracks: [TrackAudio::EMPTY; MAX_TRACKS], track_count: 0, any_solo: false,
-            tempo: 120.0, playing: false, master_volume: 0.8, groove_master: 1.0, rec_seq: 0,
+            tempo: 120.0, playing: false, master_volume: 0.8, groove_master: 1.0,
+            groove_fx_pitch: 0.5, groove_fx_filter: 0.5, groove_fx_perform: 0.0,
+            rec_seq: 0,
             quantize: Quantize::One, fill_mode: false, metronome: false,
+            metronome_mode: 0, metronome_subdiv: 1,
             recording: false, rec_track: 0, rec_scene: 0, rec_loop_ticks: 3840,
             rec_q_ticks: 0,
             groove_loop_ticks: 0,
@@ -122,8 +131,13 @@ impl SessionAudio {
             recording: s.recording, rec_track: rt as u8, rec_scene: rs as u8, rec_loop_ticks: rl,
             rec_q_ticks: s.quantize.ticks() as u32,
             tempo: s.tempo, playing: s.playing, master_volume: s.master_volume,
-            groove_master: s.groove_master, rec_seq: s.rec_seq,
+            groove_master: s.groove_master,
+            groove_fx_pitch: s.groove_fx_pitch,
+            groove_fx_filter: s.groove_fx_filter,
+            groove_fx_perform: s.groove_fx_perform,
+            rec_seq: s.rec_seq,
             quantize: s.quantize, fill_mode: s.fill_mode, metronome: s.metronome,
+            metronome_mode: s.metronome_mode, metronome_subdiv: s.metronome_subdiv,
             ..Default::default()
         };
         for (ti, tr) in s.tracks.iter().enumerate().take(MAX_TRACKS) {

@@ -9,6 +9,11 @@ use crate::{Clip, ClipState, LaunchMode, Quantize, Scene, Track, TrackKind, MAX_
 
 fn default_follow_playhead() -> bool { true }
 fn default_groove_master() -> f32 { 1.0 }
+fn default_groove_fx_pitch() -> f32 { 0.5 }
+fn default_groove_fx_filter() -> f32 { 0.5 }
+fn default_groove_fx_perform() -> f32 { 0.0 }
+fn default_metro_mode() -> u8 { 0 } // 0=Always, 1=RecordCountIn, 2=Off
+fn default_metro_subdiv() -> u8 { 1 } // 0=1/4,1=1/8,2=1/16,3=1/32
 
 /// Versión del formato del archivo de proyecto. Súbela cuando cambie la estructura de
 /// forma incompatible y añade el paso de migración en `SessionState::migrate`.
@@ -22,6 +27,27 @@ pub struct GroovePreset {
     pub json: String,
 }
 
+/// Layout de ventanas flotantes guardado en el proyecto.
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct WindowLayoutState {
+    #[serde(default = "default_true")] pub clip_launch: bool,
+    #[serde(default)] pub groove_machine: bool,
+    #[serde(default = "default_true")] pub inspector: bool,
+    #[serde(default)] pub browser: bool,
+    #[serde(default)] pub mixer: bool,
+    #[serde(default)] pub clip_launch_pos: Option<[f32; 2]>,
+    #[serde(default)] pub groove_pos: Option<[f32; 2]>,
+    #[serde(default)] pub inspector_pos: Option<[f32; 2]>,
+    #[serde(default)] pub browser_pos: Option<[f32; 2]>,
+    #[serde(default)] pub mixer_pos: Option<[f32; 2]>,
+    #[serde(default)] pub clip_launch_size: Option<[f32; 2]>,
+    #[serde(default)] pub groove_size: Option<[f32; 2]>,
+    #[serde(default)] pub inspector_size: Option<[f32; 2]>,
+    #[serde(default)] pub browser_size: Option<[f32; 2]>,
+    #[serde(default)] pub mixer_size: Option<[f32; 2]>,
+}
+fn default_true() -> bool { true }
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionState {
     pub tracks: Vec<Track>,
@@ -32,6 +58,12 @@ pub struct SessionState {
     pub playing: bool,
     pub recording: bool,
     pub metronome: bool,
+    /// 0 = Siempre, 1 = Solo en count-in de grabación, 2 = Apagado.
+    #[serde(default = "default_metro_mode")]
+    pub metronome_mode: u8,
+    /// Subdivisión del metrónomo: 0=1/4, 1=1/8, 2=1/16, 3=1/32.
+    #[serde(default = "default_metro_subdiv")]
+    pub metronome_subdiv: u8,
     pub selected_track: usize,
     pub selected_scene: usize,
     pub selected_clip: Option<(usize, usize)>,
@@ -81,6 +113,16 @@ pub struct SessionState {
     /// a todo: pistas y Groove.
     #[serde(default = "default_groove_master")]
     pub groove_master: f32,
+    /// FX globales del bus Groove: PITCH (tape/varispeed), MOD (filtro), PERFORM (delay/stutter).
+    #[serde(default = "default_groove_fx_pitch")]
+    pub groove_fx_pitch: f32,
+    #[serde(default = "default_groove_fx_filter")]
+    pub groove_fx_filter: f32,
+    #[serde(default = "default_groove_fx_perform")]
+    pub groove_fx_perform: f32,
+    /// Layout de ventanas emergentes (posición/tamaño/visibilidad).
+    #[serde(default)]
+    pub window_layout: WindowLayoutState,
     /// Contador de grabaciones iniciadas (runtime, no se guarda). El audio lo usa para
     /// detectar «grabación nueva sin haber parado la anterior».
     #[serde(skip)]
@@ -107,6 +149,8 @@ impl Default for SessionState {
             playing: false,
             recording: false,
             metronome: false,
+            metronome_mode: 0,
+            metronome_subdiv: 1,
             selected_track: 0,
             selected_scene: 0,
             selected_clip: None,
@@ -129,6 +173,10 @@ impl Default for SessionState {
             groove_bank_recent: Vec::new(),
             format_version: FORMAT_VERSION,
             groove_master: 1.0,
+            groove_fx_pitch: 0.5,
+            groove_fx_filter: 0.5,
+            groove_fx_perform: 0.0,
+            window_layout: WindowLayoutState::default(),
             rec_seq: 0,
         }
     }
@@ -438,6 +486,9 @@ impl SessionState {
             ControlCmd::SetPan { track, value } => { let t = self.resolve_track(track); if let Some(tr) = self.tracks.get_mut(t) { tr.pan = value.clamp(-1.0, 1.0); } }
             ControlCmd::SetMasterVol { value } => self.master_volume = value.clamp(0.0, 1.0),
             ControlCmd::SetGrooveMasterVol { value } => self.groove_master = value.clamp(0.0, 1.0),
+            ControlCmd::SetGrooveFxPitch { value } => self.groove_fx_pitch = value.clamp(0.0, 1.0),
+            ControlCmd::SetGrooveFxFilter { value } => self.groove_fx_filter = value.clamp(0.0, 1.0),
+            ControlCmd::SetGrooveFxPerform { value } => self.groove_fx_perform = value.clamp(0.0, 1.0),
             ControlCmd::ToggleMute { track } => { let t = self.resolve_track(track); if let Some(tr) = self.tracks.get_mut(t) { tr.mute = !tr.mute; } }
             ControlCmd::ToggleSolo { track } => { let t = self.resolve_track(track); if let Some(tr) = self.tracks.get_mut(t) { tr.solo = !tr.solo; } }
             ControlCmd::ToggleArm { track } => { let t = self.resolve_track(track); if let Some(tr) = self.tracks.get_mut(t) { tr.arm = !tr.arm; } }
@@ -473,7 +524,10 @@ impl SessionState {
                 }
             }
             ControlCmd::LivePadOn { .. } | ControlCmd::LivePadOff { .. } => {}
-            ControlCmd::ToggleMetronome => { self.metronome = !self.metronome; }
+            ControlCmd::ToggleMetronome => {
+                self.metronome = !self.metronome;
+                self.metronome_mode = if self.metronome { 0 } else { 2 };
+            }
             // Fase 4: el motor de Caja consume estos comandos.
             ControlCmd::CajaPattern { .. } | ControlCmd::CajaStep { .. } | ControlCmd::CajaBpm { .. } => {}
         }

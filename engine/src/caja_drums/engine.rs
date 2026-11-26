@@ -203,8 +203,11 @@ impl CajaEngine {
         let n = store.bank_len[pad].load(Ordering::Relaxed) as usize;
 
         let rate = self.rate[pad];
-        let hp = if rate > 0 && song_beats >= 0.0 {
-            let bars_per = match rate { 1 => 1i64, 2 => 2, _ => 4 };
+        let hp = if rate == 0 {
+            // "Al toque": re-tira en cada golpe.
+            resolve_hit(&cfg.cfg, live, &mut self.rt[pad], &mut self.roll, n)
+        } else if song_beats >= 0.0 {
+            let bars_per = match rate { 1 => 1i64, 2 => 2, 3 => 3, _ => 4 };
             let bar = (song_beats / 4.0).floor() as i64;
             let due = self.last_roll_bar[pad] == i64::MIN || bar - self.last_roll_bar[pad] >= bars_per;
             if due {
@@ -214,7 +217,7 @@ impl CajaEngine {
                 resolve_hit_hold(&cfg.cfg, live, &self.rt[pad], n)
             }
         } else {
-            resolve_hit(&cfg.cfg, live, &mut self.rt[pad], &mut self.roll, n)
+            resolve_hit_hold(&cfg.cfg, live, &self.rt[pad], n)
         };
 
         let pin = store.pin_idx[pad].load(Ordering::Relaxed);
