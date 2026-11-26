@@ -44,6 +44,15 @@ pub fn fx_gui_id(t: usize, i: usize) -> usize {
     MAX_TRACKS + MAX_TRACKS * CHAIN_MAX + (t * CHAIN_MAX + i).min(MAX_TRACKS * CHAIN_MAX - 1)
 }
 /// Pista propietaria de un id de plugin (instrumento, Note FX o FX).
+/// Descompone un id de Note FX / FX en (pista, tipo 1=NoteFx 2=Fx, índice de slot).
+pub fn gui_id_slot(id: usize) -> Option<(usize, u8, usize)> {
+    if id < MAX_TRACKS { return None; }
+    let off = id - MAX_TRACKS;
+    let span = MAX_TRACKS * CHAIN_MAX;
+    let (kind, o2) = if off < span { (1u8, off) } else { (2u8, off - span) };
+    Some((o2 / CHAIN_MAX, kind, o2 % CHAIN_MAX))
+}
+
 pub fn gui_id_track(id: usize) -> usize {
     if id < MAX_TRACKS { return id; }
     let off = id - MAX_TRACKS;
@@ -176,7 +185,7 @@ pub fn set_broken(track: usize, v: bool) {
     }
 }
 pub fn is_broken(track: usize) -> bool {
-    GUI_STATE.lock().map(|s| s.broken[track]).unwrap_or(false)
+    GUI_STATE.lock().map(|s| track < MAX_PLUGIN_SLOTS && s.broken[track]).unwrap_or(false)
 }
 
 /// API de ventana preferida para esta plataforma.

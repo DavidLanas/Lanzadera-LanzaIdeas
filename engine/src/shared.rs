@@ -326,19 +326,50 @@ impl SessionShared {
         });
     }
 
-    /// Asigna (o quita con None) el Note FX de la pista. Reinicia el audio para
-    /// cargarlo (igual que `set_plugin`).
+    /// Añade un plugin a la cadena Note FX (o la vacía con path=None). Reinicia el audio.
     pub fn set_note_fx(&self, t: usize, path: Option<String>, id: Option<String>) {
         self.edit(|st| {
-            if let Some(tr) = st.tracks.get_mut(t) { tr.note_fx_path = path; tr.note_fx_id = id; }
+            if let Some(tr) = st.tracks.get_mut(t) {
+                match path {
+                    Some(p) => tr.note_fx_chain.push(lanzadera_core::track::PluginSlot {
+                        path: p, id, state: None, bypass: false,
+                    }),
+                    None => tr.note_fx_chain.clear(),
+                }
+            }
+        });
+        self.audio_restart.store(true, Ordering::Relaxed);
+    }
+    /// Quita el slot i de la cadena Note FX. Reinicia el audio.
+    pub fn remove_note_fx(&self, t: usize, idx: usize) {
+        self.edit(|st| {
+            if let Some(tr) = st.tracks.get_mut(t) {
+                if idx < tr.note_fx_chain.len() { tr.note_fx_chain.remove(idx); }
+            }
         });
         self.audio_restart.store(true, Ordering::Relaxed);
     }
 
-    /// Asigna (o quita con None) el FX de audio de la pista. Reinicia el audio.
+    /// Añade un plugin a la cadena FX (o la vacía con path=None). Reinicia el audio.
     pub fn set_fx(&self, t: usize, path: Option<String>, id: Option<String>) {
         self.edit(|st| {
-            if let Some(tr) = st.tracks.get_mut(t) { tr.fx_path = path; tr.fx_id = id; }
+            if let Some(tr) = st.tracks.get_mut(t) {
+                match path {
+                    Some(p) => tr.fx_chain.push(lanzadera_core::track::PluginSlot {
+                        path: p, id, state: None, bypass: false,
+                    }),
+                    None => tr.fx_chain.clear(),
+                }
+            }
+        });
+        self.audio_restart.store(true, Ordering::Relaxed);
+    }
+    /// Quita el slot i de la cadena FX. Reinicia el audio.
+    pub fn remove_fx(&self, t: usize, idx: usize) {
+        self.edit(|st| {
+            if let Some(tr) = st.tracks.get_mut(t) {
+                if idx < tr.fx_chain.len() { tr.fx_chain.remove(idx); }
+            }
         });
         self.audio_restart.store(true, Ordering::Relaxed);
     }
@@ -750,10 +781,22 @@ impl SessionShared {
             tr.plugin_state = None;
             tr.note_fx_state = None;
             tr.fx_state = None;
+            for slot in tr.note_fx_chain.iter_mut() { slot.state = None; }
+            for slot in tr.fx_chain.iter_mut() { slot.state = None; }
         }
         let mut h = std::collections::hash_map::DefaultHasher::new();
         s.to_json().hash(&mut h);
         h.finish()
+    }
+
+    /// Vacía los almacenes de audio y notas de todos los slots (proyecto nuevo/cargado).
+    fn clear_all_slot_stores(&self) {
+        for t in 0..MAX_TRACKS {
+            for sc in 0..MAX_SCENES {
+                self.samples.clear(t, sc);
+                self.notes.clear(t, sc);
+            }
+        }
     }
 
     /// Proyecto nuevo: sesión por defecto y patrón de Groove inicial. No reinicia el
@@ -768,6 +811,7 @@ impl SessionShared {
         self.mk3_event_mode.store(s.groove_event_mode, Ordering::Relaxed);
         self.mk3_follow_playhead.store(s.groove_follow_playhead, Ordering::Relaxed);
         self.groove_follow_playhead.store(s.groove_follow_playhead, Ordering::Relaxed);
+        self.clear_all_slot_stores();
         self.edit(|st| *st = s);
     }
 
@@ -809,7 +853,24 @@ impl SessionShared {
             }
         }
         s.playing = false;
-        s.recording = false;
+        // Migración (Paso 2): proyectos con Note FX / FX de slot único → cadenas de 1 slot.
+        for tr in s.tracks.iter_mut() {
+            if tr.note_fx_chain.is_empty() {
+                if let Some(p) = tr.note_fx_path.take() {
+                    tr.note_fx_chain.push(lanzadera_core::track::PluginSlot {
+                        path: p, id: tr.note_fx_id.take(), state: tr.note_fx_state.take(), bypass: false,
+                    });
+                }
+            }
+            if tr.fx_chain.is_empty() {
+                if let Some(p) = tr.fx_path.take() {
+                    tr.fx_chain.push(lanzadera_core::track::PluginSlot {
+                        path: p, id: tr.fx_id.take(), state: tr.fx_state.take(), bypass: false,
+                    });
+                }
+            }
+        }
+        self.clear_all_slot_stores();
         self.edit(|st| *st = s);
         for (t, sc) in midi { self.sync_midi(t, sc); }
         for (t, sc, p) in loads { self.request_load(t, sc, p); }
