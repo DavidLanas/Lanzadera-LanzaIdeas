@@ -17,7 +17,7 @@ pub mod spsc;
 pub mod json;
 
 pub use clip::{Clip, ClipState, FollowAction, LaunchMode, MidiNote, Quantize};
-pub use track::{PluginKind, Track, TrackKind};
+pub use track::{PluginKind, PluginSlot, Track, TrackKind};
 pub use scene::Scene;
 pub use session::{SessionState, FORMAT_VERSION};
 pub use audio_state::{ClipAudioRef, ClipMeta, SessionAudio, TrackAudio};

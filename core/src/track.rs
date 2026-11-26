@@ -23,6 +23,19 @@ impl PluginKind {
     }
 }
 
+/// Plugin dentro de una cadena de pista (Note FX o FX). Orden de inserción = orden de señal.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PluginSlot {
+    pub path: String,
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Estado del plugin (base64). None = parámetros por defecto.
+    #[serde(default)]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub bypass: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Track {
     pub kind: TrackKind,
@@ -85,6 +98,11 @@ pub struct Track {
     pub note_fx_state: Option<String>,
     #[serde(default)]
     pub fx_state: Option<String>,
+    /// Cadena Note FX (antes del instrumento) y cadena FX (después de todo).
+    #[serde(default)]
+    pub note_fx_chain: Vec<PluginSlot>,
+    #[serde(default)]
+    pub fx_chain: Vec<PluginSlot>,
     /// Suma L+R en ambos lados (para una entrada mono grabada en un solo canal).
     #[serde(default)]
     pub mono: bool,
@@ -131,6 +149,8 @@ impl Default for Track {
             plugin_state: None,
             note_fx_state: None,
             fx_state: None,
+            note_fx_chain: Vec::new(),
+            fx_chain: Vec::new(),
             mono: false,
             input_channel: 0,
         }

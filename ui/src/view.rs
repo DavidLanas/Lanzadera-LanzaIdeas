@@ -1381,6 +1381,8 @@ impl SessionView {
                 if st.selected_clip == Some((t, s)) { st.selected_clip = None; }
             });
             shared.sync_midi(t, s);
+            // sync_midi solo limpia las notas: sin esto el audio viejo queda en el SampleStore
+            shared.samples.clear(t, s);
         }
         if let Some((t, s)) = actions.duplicate_clip {
             let target = shared.edit(|st| {
@@ -2027,54 +2029,71 @@ impl SessionView {
                     plugin_clear = Some(t);
                 }
             });
-            // Note FX y FX de la pista seleccionada.
-            let (nfx_cur, fx_cur) = {
-                let st = shared.state.lock().unwrap();
-                st.tracks.get(t).map(|tr| (tr.note_fx_path.clone(), tr.fx_path.clone())).unwrap_or((None, None))
-            };
+            // Note FX y FX de la pista seleccionada: CADENAS de inserts (Paso 2).
+        let (nfx_chain, fx_chain) = {
+            let st = shared.state.lock().unwrap();
+            st.tracks.get(t)
+                .map(|tr| (tr.note_fx_chain.clone(), tr.fx_chain.clone()))
+                .unwrap_or_default()
+        };
+        for (target, lbl, chain) in [
+            (BrowserTarget::NoteFx, "Note FX", &nfx_chain),
+            (BrowserTarget::Fx, "FX", &fx_chain),
+        ] {
             ui.horizontal(|ui| {
-                for (target, lbl, cur_path) in [
-                    (BrowserTarget::NoteFx, "Note FX", &nfx_cur),
-                    (BrowserTarget::Fx, "FX", &fx_cur),
-                ] {
-                    let text = match cur_path {
-                        Some(p) => {
-                            let stem = std::path::Path::new(p).file_stem().and_then(|x| x.to_str()).unwrap_or(p);
-                            format!("{}: {}", lbl, trunc(stem, 12))
-                        }
-                        None => format!("＋ {}", lbl),
-                    };
-                    let hover = match target {
-                        BrowserTarget::NoteFx => "Insertar un plugin Note FX en la pista seleccionada",
-                        _ => "Insertar un plugin de efecto (FX) en la pista seleccionada",
-                    };
-                    if ui.button(text).on_hover_text(hover).clicked() {
-                        self.browser_open = true;
-                        self.browser_target = target;
-                        self.browser_mode = if lanzadera_engine::CLAP_ENABLED { BrowserMode::Clap } else { BrowserMode::Vst3 };
-                        self.browser_show_all = false;
-                        self.browser_list = None;
-                    }
-                    if cur_path.is_some() {
-                        let gui_id = if target == BrowserTarget::NoteFx {
-                            lanzadera_engine::clap_gui::nfx_gui_id(t, 0)
-                        } else {
-                            lanzadera_engine::clap_gui::fx_gui_id(t, 0)
-                        };
-                        let (has_gui, gui_open) = lanzadera_engine::clap_gui::state(gui_id);
-                        if ui.add_enabled(has_gui, egui::Button::new(if gui_open { "🖥 Cerrar" } else { "🖥 Interfaz" }))
-                            .on_hover_text("Abrir o cerrar la interfaz de este plugin")
-                            .clicked()
-                        {
-                            lanzadera_engine::clap_gui::request_toggle(gui_id);
-                        }
-                    }
-                    if cur_path.is_some() && ui.small_button("✕").on_hover_text("Quitar").clicked() {
-                        if target == BrowserTarget::NoteFx { shared.set_note_fx(t, None, None); }
-                        else { shared.set_fx(t, None, None); }
-                    }
+                ui.label(egui::RichText::new(lbl).size(11.0).strong());
+                if ui.button(format!("＋ {}", lbl)).on_hover_text("Añadir plugin a la cadena").clicked() {
+                    self.browser_open = true;
+                    self.browser_target = target;
+                    self.browser_mode = if lanzadera_engine::CLAP_ENABLED { BrowserMode::Clap } else { BrowserMode::Vst3 };
+                    self.browser_show_all = false;
+                    self.browser_list = None;
+                }
+                if !chain.is_empty() && ui.small_button("🗑").on_hover_text("Vaciar la cadena").clicked() {
+                    if target == BrowserTarget::NoteFx { shared.set_note_fx(t, None, None); }
+                    else { shared.set_fx(t, None, None); }
                 }
             });
+            for (i, slot) in chain.iter().enumerate() {
+                let stem = std::path::Path::new(&slot.path)
+                    .file_stem().and_then(|x| x.to_str()).unwrap_or(&slot.path).to_string();
+                ui.horizontal(|ui| {
+                    let gui_id = if target == BrowserTarget::NoteFx {
+                        lanzadera_engine::clap_gui::nfx_gui_id(t, i)
+                    } else {
+                        lanzadera_engine::clap_gui::fx_gui_id(t, i)
+                    };
+                    let (has_gui, gui_open) = lanzadera_engine::clap_gui::state(gui_id);
+                    if ui.add_enabled(has_gui, egui::Button::new(if gui_open { "🖥 Cerrar" } else { "🖥" })
+                        .min_size(vec2(26.0, 18.0)))
+                        .on_hover_text(if has_gui { "Abrir o cerrar la interfaz de este plugin" } else { "Sin interfaz: al pulsar verás aviso" })
+                        .clicked()
+                    {
+                        lanzadera_engine::clap_gui::request_toggle(gui_id);
+                    }
+                    let mut by = slot.bypass;
+                    if ui.checkbox(&mut by, "").on_hover_text("Bypass (se aplica al reiniciar el audio)").changed() {
+                        let tt = target;
+                        shared.edit(|st| {
+                            if let Some(tr) = st.tracks.get_mut(t) {
+                                let chain = if tt == BrowserTarget::NoteFx { &mut tr.note_fx_chain } else { &mut tr.fx_chain };
+                                if let Some(sl) = chain.get_mut(i) { sl.bypass = by; }
+                            }
+                        });
+                        shared.audio_restart.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    ui.label(egui::RichText::new(trunc(&stem, 14)).size(10.0));
+                    if slot.state.is_some() {
+                        ui.label(egui::RichText::new("●").size(9.0).color(T.accent_green))
+                            .on_hover_text("Con parámetros guardados");
+                    }
+                    if ui.small_button("✕").on_hover_text("Quitar de la cadena").clicked() {
+                        if target == BrowserTarget::NoteFx { shared.remove_note_fx(t, i); }
+                        else { shared.remove_fx(t, i); }
+                    }
+                });
+            }
+        }
             ui.separator();
             ui.label(egui::RichText::new(format!("EQ · Pista {}", t + 1)).size(12.0));
             ui.label(egui::RichText::new("Rueda sobre MID = Q (campana) · drag horizontal = freq")
