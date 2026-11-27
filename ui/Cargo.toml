@@ -6,6 +6,7 @@ edition = "2021"
 
 [dependencies]
 caja-core = { path = "../../CAJA.GrooveMaschine-/core" }
+hound = "3.5"
 lanzadera-core   = { path = "../core" }
 lanzadera-engine = { path = "../engine" }  # RtStore + SessionShared para los widgets
 egui = "0.28"

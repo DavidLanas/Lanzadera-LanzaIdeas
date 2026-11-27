@@ -428,11 +428,16 @@ fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize
         if ui.button("◎ Seleccionar").clicked() { a.select_clip = Some((ti, si)); ui.close_menu(); }
     });
 
-    // Drop de archivos externos sobre la celda (browser/OS)
+    // Drop de archivos externos sobre la celda (browser/OS) o arrastre interno desde Browser.
     let dropped_files = ui.input(|i| i.raw.dropped_files.clone());
     let browser_hover = dragging_file && ui.rect_contains_pointer(rect);
     if browser_hover {
         ui.painter().rect_stroke(rect.shrink(1.0), 4.0, Stroke::new(2.0, theme::PROGRESS_FILL));
+        if ui.input(|i| i.pointer.any_released()) {
+            if let Some(payload) = egui::DragAndDrop::take_payload::<crate::view::BrowserFile>(ui.ctx()) {
+                a.load_file = Some((ti, si, payload.0.clone()));
+            }
+        }
     }
     if resp.hovered() && !dropped_files.is_empty() {
         if let Some(f) = dropped_files.first() {

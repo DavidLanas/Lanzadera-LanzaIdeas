@@ -38,6 +38,9 @@ pub struct Config {
     /// (dos buffers de audio). También se puede forzar con LANZADERA_REC_LATENCY_MS.
     #[serde(default)]
     pub rec_latency_ms: Option<f32>,
+    /// Plantilla de disposición/tamaño de ventanas (por defecto para nuevos proyectos).
+    #[serde(default)]
+    pub window_layout_template: Option<crate::session::WindowLayoutState>,
 }
 
 impl Default for Config {
@@ -49,6 +52,7 @@ impl Default for Config {
             midi_auto: Vec::new(),
             ui_scale: 1.0,
             rec_latency_ms: None,
+            window_layout_template: None,
         }
     }
 }

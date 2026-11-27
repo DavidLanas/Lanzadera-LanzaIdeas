@@ -241,12 +241,49 @@ pub fn connect_mk3(
             let inc = (-raw).clamp(-8, 8) as i32;
             if inc == 0 { return; }
             if gm {
+                let sub = shared.groove_sub_mode.load(Ordering::Relaxed);
+                // Modo PAD (sub 0): encoder controla FX global seleccionado (PITCH/MOD/PERFORM)
+                if sub == 0 && !chords && !ev && swing_mode == 0 {
+                    let fx = shared.mk3_pad_fx.load(Ordering::Relaxed);
+                    let step = if b.shift_held() { 0.005 } else { 0.02 };
+                    let delta = inc as f32 * step;
+                    let mut st = shared.state.lock().unwrap();
+                    match fx {
+                        0 => {
+                            let v = (st.groove_fx_pitch + delta).clamp(0.0, 1.0);
+                            st.groove_fx_pitch = v;
+                            drop(st);
+                            shared.apply_control(ControlCmd::SetGrooveFxPitch { value: v });
+                        }
+                        1 => {
+                            let v = (st.groove_fx_filter + delta).clamp(0.0, 1.0);
+                            st.groove_fx_filter = v;
+                            drop(st);
+                            shared.apply_control(ControlCmd::SetGrooveFxFilter { value: v });
+                        }
+                        _ => {
+                            let v = (st.groove_fx_perform + delta).clamp(0.0, 1.0);
+                            st.groove_fx_perform = v;
+                            drop(st);
+                            shared.apply_control(ControlCmd::SetGrooveFxPerform { value: v });
+                        }
+                    }
+                    return;
+                }
                 // EVENT + pad mantenido → velocidad fina (como arrastrar con el mouse)
                 let held = shared.mk3_held_pad.load(Ordering::Relaxed);
                 if ev && held != 255 {
                     let fine = if b.shift_held() { 1 } else { 3 };
                     let d = (inc.signum() * fine).clamp(-20, 20) as i8;
                     shared.mk3_vel_req.store(d, Ordering::Relaxed);
+                    return;
+                }
+                // EVENTS activo sin pad mantenido: encoder mueve selección de pad/pista
+                // en la tira inferior (como vista rack), sin cambiar la ventana principal.
+                if ev {
+                    let cur = shared.groove_sel_pad.load(Ordering::Relaxed) as i32;
+                    let next = (cur + inc.signum()).clamp(0, 24) as u8;
+                    shared.groove_sel_pad.store(next, Ordering::Relaxed);
                     return;
                 }
                 if swing_mode != 0 {
@@ -409,8 +446,20 @@ pub fn connect_mk3(
                     }
                     return;
                 }
-                28 => { shared.mk3_bar_req.store(if b.shift_held() { 2 } else { 0 }, Ordering::Relaxed); return; }
-                29 => { shared.mk3_bar_req.store(if b.shift_held() { 2 } else { 1 }, Ordering::Relaxed); return; }
+                28 => {
+                    if ev && shared.mk3_follow_playhead.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    shared.mk3_bar_req.store(if b.shift_held() { 2 } else { 0 }, Ordering::Relaxed);
+                    return;
+                }
+                29 => {
+                    if ev && shared.mk3_follow_playhead.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    shared.mk3_bar_req.store(if b.shift_held() { 2 } else { 1 }, Ordering::Relaxed);
+                    return;
+                }
                 42 if b.shift_held() => {
                     shared.mk3_bar_req.store(3, Ordering::Relaxed);
                     println!("[MK3] Ir al compás actual");
@@ -425,9 +474,18 @@ pub fn connect_mk3(
                     } else {
                         let on = !ev;
                         shared.mk3_event_mode.store(on, Ordering::Relaxed);
-                        if on { shared.mk3_mode_req.store(1, Ordering::Relaxed); }
-                        println!("[MK3] EVENT {}", if on { "ON — pads = 16 pasos" } else { "OFF" });
+                        // Mantener la GUI en la ventana principal; el foco EVENTS
+                        // se centra en la tira inferior (rack).
+                        if on { shared.mk3_mode_req.store(0, Ordering::Relaxed); }
+                        println!("[MK3] EVENT {}", if on { "ON — foco en tira inferior" } else { "OFF" });
                     }
+                    return;
+                }
+                56 if gm && ev => {
+                    let on = !shared.mk3_follow_playhead.load(Ordering::Relaxed);
+                    shared.mk3_follow_playhead.store(on, Ordering::Relaxed);
+                    shared.groove_follow_playhead.store(on, Ordering::Relaxed);
+                    println!("[MK3] Follow {}", if on { "ON" } else { "OFF" });
                     return;
                 }
                 // ── CHORDS: locks de la celda seleccionada ──
@@ -445,6 +503,22 @@ pub fn connect_mk3(
                         pad + 1,
                         if on { "LOCK" } else { "ROLL" }
                     );
+                    return;
+                }
+                // ── PAD FX globales (modo PAD, no CHORDS) ──
+                30 if gm && !chords && shared.groove_sub_mode.load(Ordering::Relaxed) == 0 => {
+                    shared.mk3_pad_fx.store(0, Ordering::Relaxed);
+                    println!("[MK3] PAD FX: PITCH");
+                    return;
+                }
+                31 if gm && !chords && shared.groove_sub_mode.load(Ordering::Relaxed) == 0 => {
+                    shared.mk3_pad_fx.store(1, Ordering::Relaxed);
+                    println!("[MK3] PAD FX: MOD");
+                    return;
+                }
+                32 if gm && !chords && shared.groove_sub_mode.load(Ordering::Relaxed) == 0 => {
+                    shared.mk3_pad_fx.store(2, Ordering::Relaxed);
+                    println!("[MK3] PAD FX: PERFORM");
                     return;
                 }
                 // ── CHORDS: acciones globales ──

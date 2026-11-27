@@ -23,361 +23,344 @@
             120,
             120
           ],
-          "audio_path": "/tmp/lanzadera_rec_0_0.wav",
+          "audio_path": null,
           "midi_notes": [
             {
-              "tick_start": 30,
-              "tick_dur": 1864,
-              "note": 53,
-              "vel": 97,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 82,
-              "tick_dur": 1812,
-              "note": 46,
-              "vel": 82,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 82,
-              "tick_dur": 1812,
-              "note": 39,
-              "vel": 76,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 30,
-              "tick_dur": 1864,
-              "note": 42,
-              "vel": 87,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 30,
-              "tick_dur": 1864,
-              "note": 49,
-              "vel": 89,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 1946,
-              "tick_dur": 1682,
-              "note": 56,
-              "vel": 87,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 1946,
-              "tick_dur": 1799,
-              "note": 46,
-              "vel": 78,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 1946,
-              "tick_dur": 1799,
-              "note": 42,
-              "vel": 70,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 1946,
-              "tick_dur": 1799,
-              "note": 39,
-              "vel": 66,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 1946,
-              "tick_dur": 1799,
-              "note": 49,
-              "vel": 67,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 1952,
-              "tick_dur": 1858,
-              "note": 53,
-              "vel": 84,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 3874,
-              "tick_dur": 3676,
-              "note": 39,
-              "vel": 61,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 3874,
-              "tick_dur": 3676,
-              "note": 46,
-              "vel": 66,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 3874,
-              "tick_dur": 3676,
-              "note": 53,
-              "vel": 88,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 3874,
-              "tick_dur": 3676,
-              "note": 42,
-              "vel": 46,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 3874,
-              "tick_dur": 3731,
-              "note": 49,
-              "vel": 85,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7732,
-              "tick_dur": 1747,
-              "note": 46,
-              "vel": 40,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7667,
-              "tick_dur": 1812,
-              "note": 42,
-              "vel": 78,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7667,
-              "tick_dur": 1877,
-              "note": 39,
-              "vel": 73,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7965,
-              "tick_dur": 1579,
-              "note": 53,
-              "vel": 100,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7667,
-              "tick_dur": 1877,
-              "note": 49,
-              "vel": 101,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 9660,
-              "tick_dur": 609,
-              "note": 39,
-              "vel": 54,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 9842,
-              "tick_dur": 427,
-              "note": 56,
-              "vel": 91,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 10333,
-              "tick_dur": 1095,
-              "note": 58,
-              "vel": 105,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 10333,
-              "tick_dur": 1101,
-              "note": 56,
-              "vel": 85,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 9660,
-              "tick_dur": 1774,
-              "note": 42,
-              "vel": 65,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 9609,
-              "tick_dur": 1825,
-              "note": 46,
-              "vel": 51,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 9609,
-              "tick_dur": 1825,
-              "note": 49,
-              "vel": 80,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 9609,
-              "tick_dur": 1825,
-              "note": 53,
-              "vel": 85,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 12236,
-              "tick_dur": 673,
-              "note": 56,
-              "vel": 54,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 11550,
-              "tick_dur": 1722,
-              "note": 42,
-              "vel": 41,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 11550,
-              "tick_dur": 1786,
-              "note": 46,
-              "vel": 40,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 11498,
-              "tick_dur": 1838,
-              "note": 39,
-              "vel": 41,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 11494,
-              "tick_dur": 1842,
-              "note": 49,
-              "vel": 82,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 11489,
-              "tick_dur": 1912,
-              "note": 53,
-              "vel": 43,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 13453,
-              "tick_dur": 997,
-              "note": 39,
-              "vel": 62,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 13453,
-              "tick_dur": 997,
-              "note": 49,
+              "tick_start": 24,
+              "tick_dur": 1819,
+              "note": 54,
               "vel": 60,
               "channel": 0,
               "occurrence": 0,
               "probability": 1.0
             },
             {
-              "tick_start": 13518,
-              "tick_dur": 932,
-              "note": 42,
+              "tick_start": 24,
+              "tick_dur": 1819,
+              "note": 58,
+              "vel": 56,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 24,
+              "tick_dur": 1819,
+              "note": 61,
+              "vel": 87,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 24,
+              "tick_dur": 1819,
+              "note": 51,
+              "vel": 62,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 1989,
+              "tick_dur": 1746,
+              "note": 54,
+              "vel": 8,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 1937,
+              "tick_dur": 1798,
+              "note": 58,
               "vel": 39,
               "channel": 0,
               "occurrence": 0,
               "probability": 1.0
             },
             {
-              "tick_start": 13518,
-              "tick_dur": 932,
-              "note": 46,
+              "tick_start": 1884,
+              "tick_dur": 1851,
+              "note": 51,
+              "vel": 43,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 1884,
+              "tick_dur": 1851,
+              "note": 61,
+              "vel": 77,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 1937,
+              "tick_dur": 2038,
+              "note": 65,
+              "vel": 64,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 3881,
+              "tick_dur": 1829,
+              "note": 54,
+              "vel": 10,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 3829,
+              "tick_dur": 1881,
+              "note": 61,
+              "vel": 86,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 3829,
+              "tick_dur": 1881,
+              "note": 58,
+              "vel": 54,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 3829,
+              "tick_dur": 1881,
+              "note": 51,
+              "vel": 79,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 5815,
+              "tick_dur": 1704,
+              "note": 54,
               "vel": 36,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 5763,
+              "tick_dur": 1756,
+              "note": 51,
+              "vel": 68,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 5763,
+              "tick_dur": 1756,
+              "note": 58,
+              "vel": 58,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 7717,
+              "tick_dur": 1819,
+              "note": 54,
+              "vel": 36,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 7717,
+              "tick_dur": 1819,
+              "note": 58,
+              "vel": 33,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 7665,
+              "tick_dur": 1871,
+              "note": 61,
+              "vel": 41,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 9683,
+              "tick_dur": 564,
+              "note": 54,
+              "vel": 7,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 9588,
+              "tick_dur": 659,
+              "note": 70,
+              "vel": 94,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 9588,
+              "tick_dur": 659,
+              "note": 58,
+              "vel": 42,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 7716,
+              "tick_dur": 2531,
+              "note": 65,
+              "vel": 42,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 9588,
+              "tick_dur": 659,
+              "note": 61,
+              "vel": 82,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 10602,
+              "tick_dur": 805,
+              "note": 54,
+              "vel": 1,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 10299,
+              "tick_dur": 1108,
+              "note": 58,
+              "vel": 42,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 10299,
+              "tick_dur": 1171,
+              "note": 61,
+              "vel": 62,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 7665,
+              "tick_dur": 3805,
+              "note": 51,
+              "vel": 39,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 10299,
+              "tick_dur": 2927,
+              "note": 68,
+              "vel": 93,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 10299,
+              "tick_dur": 3032,
+              "note": 65,
+              "vel": 46,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 11512,
+              "tick_dur": 1819,
+              "note": 61,
+              "vel": 93,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 11564,
+              "tick_dur": 1767,
+              "note": 54,
+              "vel": 10,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 11518,
+              "tick_dur": 1865,
+              "note": 51,
+              "vel": 64,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 11512,
+              "tick_dur": 1871,
+              "note": 58,
+              "vel": 78,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 13435,
+              "tick_dur": 1265,
+              "note": 51,
+              "vel": 71,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 13435,
+              "tick_dur": 1265,
+              "note": 58,
+              "vel": 49,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 13435,
+              "tick_dur": 1265,
+              "note": 54,
+              "vel": 40,
               "channel": 0,
               "occurrence": 0,
               "probability": 1.0
             }
           ],
-          "probability": 1.0
+          "probability": 1.0,
+          "loop_start_sec": 0.0
         },
         {
           "state": "Stopping",
@@ -393,1210 +376,176 @@
             120,
             120
           ],
-          "audio_path": "/tmp/lanzadera_rec_0_1.wav",
+          "audio_path": null,
           "midi_notes": [
             {
-              "tick_start": 13,
-              "tick_dur": 3707,
-              "note": 44,
-              "vel": 99,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 1709,
-              "tick_dur": 2019,
-              "note": 56,
-              "vel": 102,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 738,
-              "tick_dur": 2990,
-              "note": 47,
-              "vel": 100,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 919,
-              "tick_dur": 2861,
-              "note": 51,
-              "vel": 102,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 13,
-              "tick_dur": 3767,
-              "note": 37,
-              "vel": 35,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 3844,
-              "tick_dur": 3457,
-              "note": 44,
-              "vel": 93,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 3844,
-              "tick_dur": 3521,
-              "note": 47,
-              "vel": 91,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 3844,
-              "tick_dur": 3573,
-              "note": 37,
-              "vel": 85,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 3844,
-              "tick_dur": 3573,
-              "note": 51,
-              "vel": 90,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 5048,
-              "tick_dur": 2434,
-              "note": 58,
-              "vel": 42,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 3844,
-              "tick_dur": 3702,
-              "note": 56,
-              "vel": 85,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7546,
-              "tick_dur": 428,
-              "note": 37,
-              "vel": 22,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7676,
-              "tick_dur": 673,
-              "note": 39,
-              "vel": 26,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7676,
-              "tick_dur": 673,
-              "note": 46,
-              "vel": 34,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7676,
-              "tick_dur": 673,
-              "note": 53,
-              "vel": 44,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7676,
-              "tick_dur": 673,
-              "note": 42,
-              "vel": 33,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 8414,
-              "tick_dur": 3003,
-              "note": 42,
-              "vel": 85,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 8414,
-              "tick_dur": 3003,
-              "note": 39,
-              "vel": 75,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 8414,
-              "tick_dur": 3055,
-              "note": 46,
-              "vel": 80,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 8414,
-              "tick_dur": 3119,
-              "note": 53,
-              "vel": 80,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7676,
-              "tick_dur": 3857,
-              "note": 49,
-              "vel": 84,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 11533,
-              "tick_dur": 2719,
-              "note": 46,
-              "vel": 66,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 11533,
-              "tick_dur": 2719,
-              "note": 42,
-              "vel": 40,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 11533,
-              "tick_dur": 2719,
-              "note": 39,
-              "vel": 38,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            }
-          ],
-          "probability": 1.0
-        },
-        {
-          "state": "Stopping",
-          "launch_mode": "Trigger",
-          "follow_action": "None",
-          "follow_bars": 0,
-          "quantize": "One",
-          "loop_bars": 12,
-          "loop_count": 0,
-          "name": "Clip 3",
-          "color": [
-            120,
-            120,
-            120
-          ],
-          "audio_path": "/tmp/lanzadera_rec_0_2.wav",
-          "midi_notes": [
-            {
-              "tick_start": 49,
-              "tick_dur": 2486,
-              "note": 49,
-              "vel": 77,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 62,
-              "tick_dur": 2473,
-              "note": 46,
-              "vel": 47,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 49,
-              "tick_dur": 2486,
-              "note": 42,
-              "vel": 67,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 56,
-              "tick_dur": 2543,
-              "note": 54,
-              "vel": 63,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 2664,
-              "tick_dur": 1049,
-              "note": 46,
-              "vel": 41,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 2664,
-              "tick_dur": 1049,
-              "note": 49,
-              "vel": 66,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 2664,
-              "tick_dur": 1049,
-              "note": 42,
-              "vel": 49,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 2664,
-              "tick_dur": 1113,
-              "note": 54,
-              "vel": 48,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 1693,
-              "tick_dur": 2266,
-              "note": 56,
-              "vel": 71,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 4075,
-              "tick_dur": 790,
-              "note": 56,
-              "vel": 98,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 4567,
-              "tick_dur": 663,
-              "note": 58,
-              "vel": 60,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 3829,
-              "tick_dur": 1825,
-              "note": 46,
-              "vel": 54,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 3829,
-              "tick_dur": 1825,
-              "note": 49,
-              "vel": 84,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 3829,
-              "tick_dur": 1890,
-              "note": 42,
-              "vel": 42,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 3829,
-              "tick_dur": 1890,
-              "note": 54,
-              "vel": 85,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 5046,
-              "tick_dur": 1281,
-              "note": 56,
-              "vel": 73,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 5784,
-              "tick_dur": 1838,
-              "note": 46,
-              "vel": 103,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 5784,
-              "tick_dur": 1838,
-              "note": 49,
-              "vel": 106,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 5784,
-              "tick_dur": 1838,
-              "note": 42,
-              "vel": 90,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 5784,
-              "tick_dur": 1902,
-              "note": 54,
-              "vel": 99,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 6509,
-              "tick_dur": 1734,
-              "note": 56,
-              "vel": 105,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7686,
-              "tick_dur": 1618,
-              "note": 46,
-              "vel": 89,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7686,
-              "tick_dur": 1618,
-              "note": 49,
-              "vel": 98,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7686,
-              "tick_dur": 1618,
-              "note": 42,
-              "vel": 76,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7751,
-              "tick_dur": 1553,
-              "note": 54,
-              "vel": 90,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 9369,
-              "tick_dur": 2045,
-              "note": 49,
-              "vel": 80,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 9369,
-              "tick_dur": 2045,
-              "note": 46,
-              "vel": 72,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 9369,
-              "tick_dur": 2045,
-              "note": 42,
-              "vel": 59,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 9369,
-              "tick_dur": 2045,
-              "note": 54,
-              "vel": 83,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 8437,
-              "tick_dur": 3223,
-              "note": 56,
-              "vel": 90,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 10353,
-              "tick_dur": 1307,
-              "note": 58,
-              "vel": 42,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 11777,
-              "tick_dur": 725,
-              "note": 56,
-              "vel": 88,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 12256,
-              "tick_dur": 675,
-              "note": 58,
-              "vel": 86,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 12748,
-              "tick_dur": 504,
-              "note": 56,
-              "vel": 88,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 11531,
-              "tick_dur": 3715,
-              "note": 54,
-              "vel": 74,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 11531,
-              "tick_dur": 3716,
-              "note": 49,
-              "vel": 67,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 11596,
-              "tick_dur": 3663,
-              "note": 46,
-              "vel": 40,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 11531,
-              "tick_dur": 3728,
-              "note": 42,
-              "vel": 52,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 15,
-              "tick_dur": 6654,
-              "note": 39,
-              "vel": 75,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 15,
-              "tick_dur": 6654,
-              "note": 49,
-              "vel": 60,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 15,
-              "tick_dur": 6654,
-              "note": 42,
-              "vel": 38,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 15,
-              "tick_dur": 6654,
-              "note": 46,
-              "vel": 46,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 15,
-              "tick_dur": 6654,
-              "note": 53,
-              "vel": 88,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            }
-          ],
-          "probability": 1.0
-        },
-        {
-          "state": "Stopping",
-          "launch_mode": "Trigger",
-          "follow_action": "None",
-          "follow_bars": 0,
-          "quantize": "One",
-          "loop_bars": 8,
-          "loop_count": 0,
-          "name": "Clip 4",
-          "color": [
-            120,
-            120,
-            120
-          ],
-          "audio_path": "/tmp/lanzadera_rec_0_3.wav",
-          "midi_notes": [
-            {
-              "tick_start": 38,
-              "tick_dur": 1825,
-              "note": 46,
-              "vel": 71,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 38,
-              "tick_dur": 1825,
-              "note": 42,
-              "vel": 57,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 38,
-              "tick_dur": 1825,
-              "note": 39,
-              "vel": 65,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 698,
-              "tick_dur": 1294,
-              "note": 56,
-              "vel": 91,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 38,
-              "tick_dur": 2006,
-              "note": 49,
-              "vel": 90,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 38,
-              "tick_dur": 2011,
-              "note": 53,
-              "vel": 100,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 1928,
-              "tick_dur": 1818,
-              "note": 46,
-              "vel": 85,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 1928,
-              "tick_dur": 1825,
-              "note": 39,
-              "vel": 77,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 1928,
-              "tick_dur": 1825,
-              "note": 42,
-              "vel": 70,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 3196,
-              "tick_dur": 686,
-              "note": 58,
-              "vel": 42,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 2174,
-              "tick_dur": 1825,
-              "note": 49,
-              "vel": 101,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 2665,
-              "tick_dur": 1334,
-              "note": 56,
-              "vel": 54,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 2420,
-              "tick_dur": 1579,
-              "note": 53,
-              "vel": 100,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 4128,
-              "tick_dur": 854,
-              "note": 49,
-              "vel": 103,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 4555,
-              "tick_dur": 427,
-              "note": 56,
-              "vel": 96,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 4128,
-              "tick_dur": 854,
-              "note": 53,
-              "vel": 71,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 5047,
-              "tick_dur": 673,
-              "note": 53,
-              "vel": 55,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 3869,
-              "tick_dur": 1851,
-              "note": 46,
-              "vel": 90,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 3882,
-              "tick_dur": 1838,
-              "note": 39,
-              "vel": 79,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 3878,
-              "tick_dur": 1842,
-              "note": 42,
-              "vel": 78,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 5047,
-              "tick_dur": 673,
-              "note": 49,
-              "vel": 102,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 5798,
-              "tick_dur": 660,
-              "note": 39,
-              "vel": 89,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 5788,
-              "tick_dur": 670,
-              "note": 49,
-              "vel": 106,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 5798,
-              "tick_dur": 673,
-              "note": 42,
-              "vel": 99,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 5798,
-              "tick_dur": 673,
-              "note": 46,
-              "vel": 108,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 6536,
-              "tick_dur": 1022,
-              "note": 46,
-              "vel": 96,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 6536,
-              "tick_dur": 1022,
-              "note": 42,
-              "vel": 91,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 6536,
-              "tick_dur": 1022,
-              "note": 39,
-              "vel": 81,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 6523,
-              "tick_dur": 1100,
-              "note": 51,
-              "vel": 112,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 6526,
-              "tick_dur": 1097,
-              "note": 49,
-              "vel": 102,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7688,
-              "tick_dur": 660,
-              "note": 39,
-              "vel": 86,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7675,
-              "tick_dur": 673,
-              "note": 46,
-              "vel": 89,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7934,
-              "tick_dur": 427,
-              "note": 53,
-              "vel": 105,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7688,
-              "tick_dur": 673,
-              "note": 42,
-              "vel": 93,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7688,
-              "tick_dur": 725,
-              "note": 49,
-              "vel": 111,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 8426,
-              "tick_dur": 1087,
-              "note": 39,
-              "vel": 92,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 8426,
-              "tick_dur": 1087,
-              "note": 42,
-              "vel": 71,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 8426,
-              "tick_dur": 1087,
-              "note": 46,
-              "vel": 71,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 8413,
-              "tick_dur": 1294,
-              "note": 49,
-              "vel": 91,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 8423,
-              "tick_dur": 1284,
-              "note": 53,
+              "tick_start": 1216,
+              "tick_dur": 638,
+              "note": 66,
               "vel": 104,
               "channel": 0,
               "occurrence": 0,
               "probability": 1.0
             },
             {
-              "tick_start": 8426,
-              "tick_dur": 1281,
+              "tick_start": 1895,
+              "tick_dur": 596,
+              "note": 61,
+              "vel": 87,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 1906,
+              "tick_dur": 606,
               "note": 56,
-              "vel": 105,
+              "vel": 83,
               "channel": 0,
               "occurrence": 0,
               "probability": 1.0
             },
             {
-              "tick_start": 10794,
-              "tick_dur": 426,
-              "note": 58,
-              "vel": 99,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 10315,
-              "tick_dur": 1088,
-              "note": 56,
-              "vel": 100,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 9578,
-              "tick_dur": 1825,
-              "note": 46,
-              "vel": 99,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 9578,
-              "tick_dur": 1825,
-              "note": 39,
-              "vel": 96,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 9578,
-              "tick_dur": 1825,
-              "note": 42,
-              "vel": 99,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 9837,
-              "tick_dur": 1566,
+              "tick_start": 1906,
+              "tick_dur": 638,
               "note": 49,
+              "vel": 39,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 2606,
+              "tick_dur": 983,
+              "note": 63,
+              "vel": 91,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 2606,
+              "tick_dur": 1098,
+              "note": 56,
+              "vel": 71,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 1895,
+              "tick_dur": 1809,
+              "note": 66,
+              "vel": 91,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 694,
+              "tick_dur": 3041,
+              "note": 68,
+              "vel": 49,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 2606,
+              "tick_dur": 1129,
+              "note": 49,
+              "vel": 51,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 3798,
+              "tick_dur": 847,
+              "note": 61,
               "vel": 97,
               "channel": 0,
               "occurrence": 0,
               "probability": 1.0
             },
             {
-              "tick_start": 10082,
-              "tick_dur": 1385,
-              "note": 53,
-              "vel": 102,
+              "tick_start": 4540,
+              "tick_dur": 533,
+              "note": 68,
+              "vel": 56,
               "channel": 0,
               "occurrence": 0,
               "probability": 1.0
             },
             {
-              "tick_start": 11532,
-              "tick_dur": 609,
-              "note": 39,
-              "vel": 78,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 11532,
-              "tick_dur": 609,
-              "note": 42,
-              "vel": 62,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 11532,
-              "tick_dur": 609,
-              "note": 46,
-              "vel": 74,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 11532,
-              "tick_dur": 609,
-              "note": 49,
-              "vel": 101,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 11532,
-              "tick_dur": 673,
-              "note": 53,
-              "vel": 88,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 12270,
-              "tick_dur": 854,
-              "note": 42,
-              "vel": 89,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 12270,
-              "tick_dur": 854,
-              "note": 46,
-              "vel": 72,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 12270,
-              "tick_dur": 919,
-              "note": 53,
-              "vel": 84,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 12270,
-              "tick_dur": 919,
-              "note": 39,
-              "vel": 90,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 12274,
-              "tick_dur": 915,
-              "note": 49,
-              "vel": 95,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 13254,
-              "tick_dur": 1398,
-              "note": 39,
+              "tick_start": 4049,
+              "tick_dur": 1077,
+              "note": 66,
               "vel": 73,
               "channel": 0,
               "occurrence": 0,
               "probability": 1.0
             },
             {
-              "tick_start": 13254,
-              "tick_dur": 1398,
-              "note": 46,
+              "tick_start": 3808,
+              "tick_dur": 2561,
+              "note": 56,
+              "vel": 66,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 5523,
+              "tick_dur": 1463,
+              "note": 68,
+              "vel": 41,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 5011,
+              "tick_dur": 1975,
+              "note": 63,
+              "vel": 67,
+              "channel": 0,
+              "occurrence": 0,
+              "probability": 1.0
+            },
+            {
+              "tick_start": 2606,
+              "tick_dur": 4715,
+              "note": 59,
               "vel": 80,
               "channel": 0,
               "occurrence": 0,
               "probability": 1.0
             },
             {
-              "tick_start": 13254,
-              "tick_dur": 1398,
-              "note": 49,
-              "vel": 53,
+              "tick_start": 6474,
+              "tick_dur": 847,
+              "note": 56,
+              "vel": 62,
               "channel": 0,
               "occurrence": 0,
               "probability": 1.0
             },
             {
-              "tick_start": 13254,
-              "tick_dur": 1398,
-              "note": 42,
-              "vel": 82,
+              "tick_start": 3808,
+              "tick_dur": 3513,
+              "note": 49,
+              "vel": 39,
               "channel": 0,
               "occurrence": 0,
               "probability": 1.0
             }
           ],
-          "probability": 1.0
+          "probability": 1.0,
+          "loop_start_sec": 0.0
         },
+        null,
+        null,
         null,
         null,
         null,
@@ -1626,11 +575,11 @@
         null,
         null
       ],
-      "volume": 0.8,
+      "volume": 0.8125496,
       "pan": 0.0,
       "mute": false,
       "solo": false,
-      "arm": false,
+      "arm": true,
       "eq_low": 0.0,
       "eq_mid": 0.0,
       "eq_high": 0.0,
@@ -1745,7 +694,18 @@
           "Delay mix",
           0.15
         ]
-      ]
+      ],
+      "note_fx_path": null,
+      "note_fx_id": null,
+      "fx_path": null,
+      "fx_id": null,
+      "plugin_state": "ewIAAAAAAAB7InZlcnNpb24iOiIwLjEuMCIsInBhcmFtcyI6eyJhdHRhY2siOnsiZjMyIjoxLjB9LCJjaG9ydXNfZGVwdGgiOnsiZjMyIjowLjV9LCJjaG9ydXNfbWl4Ijp7ImYzMiI6MC4zNX0sImNob3J1c19yYXRlIjp7ImYzMiI6MC44fSwiZGVsYXlfZmIiOnsiZjMyIjowLjM1fSwiZGVsYXlfbWl4Ijp7ImYzMiI6MC4xNX0sImRlbGF5X3BwIjp7ImJvb2wiOnRydWV9LCJkZWxheV9zeW5jIjp7InN0cmluZyI6IjFfOGQifSwiZGVsYXlfdGltZSI6eyJmMzIiOjM1MC4wfSwiZGVsYXlfdG9uZSI6eyJmMzIiOjYwMDAuMH0sImdhaW4iOnsiZjMyIjowLjB9LCJsYXllcl9tb2RlIjp7InN0cmluZyI6InZlbG9jaXR5In0sImxvd3Bhc3MiOnsiZjMyIjoyMDAwMC4wfSwib2N0YXZlIjp7ImkzMiI6MH0sInJlbGVhc2UiOnsiZjMyIjozMDAuMH0sInRyZW1fZGVwdGgiOnsiZjMyIjowLjB9LCJ0cmVtX3JhdGUiOnsiZjMyIjo0LjV9LCJ2ZWxfc2VucyI6eyJmMzIiOjAuNH0sInZvaWNlcyI6eyJpMzIiOjI0fX0sImZpZWxkcyI6eyJlZGl0b3Itc3RhdGUtdjIiOiJ7XCJzaXplXCI6WzcyMCw2NTBdfSIsImZvbGRlciI6IlwiL2hvbWUvdGFycm8vTcO6c2ljYS9TQU1QTEVTIElOU1RSVU1FTlQvUmhvZGVzXCIiLCJ1aS1zY2FsZSI6IjEuMCJ9fQ==",
+      "note_fx_state": null,
+      "fx_state": null,
+      "note_fx_chain": [],
+      "fx_chain": [],
+      "mono": false,
+      "input_channel": 0
     },
     {
       "kind": "Instrument",
@@ -1756,665 +716,8 @@
         34
       ],
       "clips": [
-        {
-          "state": "Empty",
-          "launch_mode": "Trigger",
-          "follow_action": "None",
-          "follow_bars": 0,
-          "quantize": "One",
-          "loop_bars": 8,
-          "loop_count": 0,
-          "name": "Clip 1",
-          "color": [
-            120,
-            120,
-            120
-          ],
-          "audio_path": "/tmp/lanzadera_rec_1_0.wav",
-          "midi_notes": [
-            {
-              "tick_start": 729,
-              "tick_dur": 194,
-              "note": 39,
-              "vel": 92,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 858,
-              "tick_dur": 311,
-              "note": 42,
-              "vel": 114,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 1104,
-              "tick_dur": 622,
-              "note": 44,
-              "vel": 99,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 1674,
-              "tick_dur": 246,
-              "note": 42,
-              "vel": 62,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 1868,
-              "tick_dur": 116,
-              "note": 39,
-              "vel": 77,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 2683,
-              "tick_dur": 195,
-              "note": 56,
-              "vel": 88,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 2813,
-              "tick_dur": 194,
-              "note": 54,
-              "vel": 80,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 4599,
-              "tick_dur": 190,
-              "note": 39,
-              "vel": 99,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 4729,
-              "tick_dur": 246,
-              "note": 42,
-              "vel": 100,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 4910,
-              "tick_dur": 608,
-              "note": 44,
-              "vel": 76,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 5518,
-              "tick_dur": 181,
-              "note": 46,
-              "vel": 85,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 5635,
-              "tick_dur": 375,
-              "note": 44,
-              "vel": 71,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 5945,
-              "tick_dur": 557,
-              "note": 46,
-              "vel": 99,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 6450,
-              "tick_dur": 246,
-              "note": 49,
-              "vel": 103,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 6631,
-              "tick_dur": 246,
-              "note": 44,
-              "vel": 40,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 8392,
-              "tick_dur": 259,
-              "note": 39,
-              "vel": 81,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 8573,
-              "tick_dur": 337,
-              "note": 42,
-              "vel": 96,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 8845,
-              "tick_dur": 647,
-              "note": 44,
-              "vel": 93,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 9363,
-              "tick_dur": 258,
-              "note": 42,
-              "vel": 72,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 9557,
-              "tick_dur": 323,
-              "note": 39,
-              "vel": 83,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 10320,
-              "tick_dur": 259,
-              "note": 54,
-              "vel": 82,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 10450,
-              "tick_dur": 194,
-              "note": 51,
-              "vel": 59,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 12275,
-              "tick_dur": 194,
-              "note": 49,
-              "vel": 96,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 12404,
-              "tick_dur": 272,
-              "note": 46,
-              "vel": 96,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 12676,
-              "tick_dur": 570,
-              "note": 44,
-              "vel": 87,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 13181,
-              "tick_dur": 311,
-              "note": 42,
-              "vel": 69,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 13440,
-              "tick_dur": 311,
-              "note": 44,
-              "vel": 105,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 13686,
-              "tick_dur": 557,
-              "note": 42,
-              "vel": 105,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 14178,
-              "tick_dur": 194,
-              "note": 39,
-              "vel": 79,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 14307,
-              "tick_dur": 259,
-              "note": 42,
-              "vel": 116,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            }
-          ],
-          "probability": 1.0
-        },
-        {
-          "state": "Empty",
-          "launch_mode": "Trigger",
-          "follow_action": "None",
-          "follow_bars": 0,
-          "quantize": "One",
-          "loop_bars": 8,
-          "loop_count": 0,
-          "name": "Clip 2",
-          "color": [
-            120,
-            120,
-            120
-          ],
-          "audio_path": "/tmp/lanzadera_rec_1_1.wav",
-          "midi_notes": [
-            {
-              "tick_start": 17,
-              "tick_dur": 259,
-              "note": 39,
-              "vel": 97,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 267,
-              "tick_dur": 514,
-              "note": 42,
-              "vel": 79,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 716,
-              "tick_dur": 181,
-              "note": 46,
-              "vel": 78,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 832,
-              "tick_dur": 311,
-              "note": 42,
-              "vel": 123,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 1143,
-              "tick_dur": 828,
-              "note": 39,
-              "vel": 100,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 1894,
-              "tick_dur": 207,
-              "note": 44,
-              "vel": 84,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 2036,
-              "tick_dur": 621,
-              "note": 42,
-              "vel": 97,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 2657,
-              "tick_dur": 208,
-              "note": 39,
-              "vel": 76,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 2800,
-              "tick_dur": 194,
-              "note": 42,
-              "vel": 107,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 4107,
-              "tick_dur": 324,
-              "note": 46,
-              "vel": 76,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 4237,
-              "tick_dur": 440,
-              "note": 44,
-              "vel": 42,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 4560,
-              "tick_dur": 492,
-              "note": 42,
-              "vel": 35,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 4987,
-              "tick_dur": 492,
-              "note": 39,
-              "vel": 42,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 5298,
-              "tick_dur": 181,
-              "note": 42,
-              "vel": 78,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 5415,
-              "tick_dur": 375,
-              "note": 44,
-              "vel": 93,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 5790,
-              "tick_dur": 207,
-              "note": 46,
-              "vel": 71,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 5855,
-              "tick_dur": 272,
-              "note": 44,
-              "vel": 110,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 6450,
-              "tick_dur": 376,
-              "note": 39,
-              "vel": 60,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 6631,
-              "tick_dur": 195,
-              "note": 42,
-              "vel": 69,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 7952,
-              "tick_dur": 388,
-              "note": 46,
-              "vel": 77,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 8146,
-              "tick_dur": 323,
-              "note": 44,
-              "vel": 40,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 8405,
-              "tick_dur": 194,
-              "note": 42,
-              "vel": 82,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 8793,
-              "tick_dur": 633,
-              "note": 42,
-              "vel": 89,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 9350,
-              "tick_dur": 194,
-              "note": 44,
-              "vel": 71,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 8534,
-              "tick_dur": 1269,
-              "note": 39,
-              "vel": 85,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 9544,
-              "tick_dur": 388,
-              "note": 46,
-              "vel": 39,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 9803,
-              "tick_dur": 621,
-              "note": 44,
-              "vel": 80,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 10424,
-              "tick_dur": 311,
-              "note": 39,
-              "vel": 76,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 10296,
-              "tick_dur": 801,
-              "note": 42,
-              "vel": 9,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 11796,
-              "tick_dur": 427,
-              "note": 46,
-              "vel": 68,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 12029,
-              "tick_dur": 259,
-              "note": 44,
-              "vel": 92,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 12223,
-              "tick_dur": 194,
-              "note": 42,
-              "vel": 69,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 12353,
-              "tick_dur": 634,
-              "note": 39,
-              "vel": 80,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 12612,
-              "tick_dur": 440,
-              "note": 42,
-              "vel": 68,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 12922,
-              "tick_dur": 246,
-              "note": 44,
-              "vel": 92,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 13116,
-              "tick_dur": 331,
-              "note": 46,
-              "vel": 106,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 13375,
-              "tick_dur": 207,
-              "note": 44,
-              "vel": 40,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 13440,
-              "tick_dur": 958,
-              "note": 42,
-              "vel": 89,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            },
-            {
-              "tick_start": 14268,
-              "tick_dur": 777,
-              "note": 37,
-              "vel": 63,
-              "channel": 0,
-              "occurrence": 0,
-              "probability": 1.0
-            }
-          ],
-          "probability": 1.0
-        },
+        null,
+        null,
         null,
         null,
         null,
@@ -2450,7 +753,7 @@
       "pan": 0.0,
       "mute": false,
       "solo": false,
-      "arm": true,
+      "arm": false,
       "eq_low": 0.0,
       "eq_mid": 0.0,
       "eq_high": 0.0,
@@ -2467,145 +770,20 @@
         0.0
       ],
       "input_device": null,
-      "plugin_path": "/home/tarro/.clap/roots_synth.clap",
-      "plugin_id": "com.analog-suite.roots_synth",
-      "plugin_params": [
-        [
-          "1283651625",
-          "VCO1 Wave",
-          0.0
-        ],
-        [
-          "706351840",
-          "VCO1 Octave",
-          0.5
-        ],
-        [
-          "1128455252",
-          "VCO1 Level",
-          0.8
-        ],
-        [
-          "1312280776",
-          "VCO2 Wave",
-          0.5
-        ],
-        [
-          "301678527",
-          "VCO2 Octave",
-          0.25
-        ],
-        [
-          "1312165181",
-          "VCO2 Semitones",
-          0.5
-        ],
-        [
-          "2015958933",
-          "VCO2 Level",
-          0.55
-        ],
-        [
-          "812278777",
-          "Detune",
-          0.06
-        ],
-        [
-          "139777440",
-          "Pulse Width",
-          0.50000006
-        ],
-        [
-          "798419949",
-          "Cutoff",
-          0.3761544
-        ],
-        [
-          "1189352828",
-          "Emphasis",
-          0.4
-        ],
-        [
-          "95852938",
-          "Drive",
-          0.3
-        ],
-        [
-          "502755179",
-          "Key Track",
-          0.5
-        ],
-        [
-          "410355920",
-          "Filter Env Amt",
-          0.55
-        ],
-        [
-          "15757378",
-          "Filter Env Decay",
-          0.067669176
-        ],
-        [
-          "1011497131",
-          "Filter Env Sustain",
-          0.2
-        ],
-        [
-          "740224584",
-          "Attack",
-          0.0010005002
-        ],
-        [
-          "95459258",
-          "Decay",
-          0.085213035
-        ],
-        [
-          "295592483",
-          "Sustain",
-          0.8
-        ],
-        [
-          "1090594823",
-          "Release",
-          0.022044089
-        ],
-        [
-          "1300260647",
-          "Glide",
-          0.015
-        ],
-        [
-          "2036477206",
-          "Bend Range",
-          0.16666667
-        ],
-        [
-          "2123299806",
-          "Mod Wheel",
-          0.0
-        ],
-        [
-          "1561666275",
-          "Aftertouch",
-          0.0
-        ],
-        [
-          "1220740924",
-          "Master Gain",
-          0.4
-        ],
-        [
-          "1075866515",
-          "Preset Prev",
-          0.0
-        ],
-        [
-          "1075795027",
-          "Preset Next",
-          0.0
-        ]
-      ]
+      "plugin_path": null,
+      "plugin_id": null,
+      "plugin_params": [],
+      "note_fx_path": null,
+      "note_fx_id": null,
+      "fx_path": null,
+      "fx_id": null,
+      "plugin_state": null,
+      "note_fx_state": null,
+      "fx_state": null,
+      "note_fx_chain": [],
+      "fx_chain": [],
+      "mono": false,
+      "input_channel": 0
     },
     {
       "kind": "Instrument",
@@ -2672,7 +850,18 @@
       "input_device": null,
       "plugin_path": null,
       "plugin_id": null,
-      "plugin_params": []
+      "plugin_params": [],
+      "note_fx_path": null,
+      "note_fx_id": null,
+      "fx_path": null,
+      "fx_id": null,
+      "plugin_state": null,
+      "note_fx_state": null,
+      "fx_state": null,
+      "note_fx_chain": [],
+      "fx_chain": [],
+      "mono": false,
+      "input_channel": 0
     },
     {
       "kind": "Instrument",
@@ -2739,7 +928,18 @@
       "input_device": null,
       "plugin_path": null,
       "plugin_id": null,
-      "plugin_params": []
+      "plugin_params": [],
+      "note_fx_path": null,
+      "note_fx_id": null,
+      "fx_path": null,
+      "fx_id": null,
+      "plugin_state": null,
+      "note_fx_state": null,
+      "fx_state": null,
+      "note_fx_chain": [],
+      "fx_chain": [],
+      "mono": false,
+      "input_channel": 0
     },
     {
       "kind": "Instrument",
@@ -2806,7 +1006,18 @@
       "input_device": null,
       "plugin_path": null,
       "plugin_id": null,
-      "plugin_params": []
+      "plugin_params": [],
+      "note_fx_path": null,
+      "note_fx_id": null,
+      "fx_path": null,
+      "fx_id": null,
+      "plugin_state": null,
+      "note_fx_state": null,
+      "fx_state": null,
+      "note_fx_chain": [],
+      "fx_chain": [],
+      "mono": false,
+      "input_channel": 0
     },
     {
       "kind": "Instrument",
@@ -2873,7 +1084,18 @@
       "input_device": null,
       "plugin_path": null,
       "plugin_id": null,
-      "plugin_params": []
+      "plugin_params": [],
+      "note_fx_path": null,
+      "note_fx_id": null,
+      "fx_path": null,
+      "fx_id": null,
+      "plugin_state": null,
+      "note_fx_state": null,
+      "fx_state": null,
+      "note_fx_chain": [],
+      "fx_chain": [],
+      "mono": false,
+      "input_channel": 0
     },
     {
       "kind": "Instrument",
@@ -2940,7 +1162,18 @@
       "input_device": null,
       "plugin_path": null,
       "plugin_id": null,
-      "plugin_params": []
+      "plugin_params": [],
+      "note_fx_path": null,
+      "note_fx_id": null,
+      "fx_path": null,
+      "fx_id": null,
+      "plugin_state": null,
+      "note_fx_state": null,
+      "fx_state": null,
+      "note_fx_chain": [],
+      "fx_chain": [],
+      "mono": false,
+      "input_channel": 0
     },
     {
       "kind": "Instrument",
@@ -3007,7 +1240,18 @@
       "input_device": null,
       "plugin_path": null,
       "plugin_id": null,
-      "plugin_params": []
+      "plugin_params": [],
+      "note_fx_path": null,
+      "note_fx_id": null,
+      "fx_path": null,
+      "fx_id": null,
+      "plugin_state": null,
+      "note_fx_state": null,
+      "fx_state": null,
+      "note_fx_chain": [],
+      "fx_chain": [],
+      "mono": false,
+      "input_channel": 0
     }
   ],
   "scenes": [
@@ -3084,29 +1328,34 @@
       "tempo": null
     }
   ],
-  "master_volume": 0.6929134,
-  "tempo": 75.84490203857422,
+  "master_volume": 0.75785875,
+  "tempo": 61.25004196166992,
   "quantize": "One",
   "playing": false,
   "recording": false,
   "metronome": false,
-  "selected_track": 1,
-  "selected_scene": 2,
-  "selected_clip": null,
+  "metronome_mode": 0,
+  "metronome_subdiv": 1,
+  "selected_track": 0,
+  "selected_scene": 1,
+  "selected_clip": [
+    0,
+    0
+  ],
   "fill_mode": false,
   "groove_enabled": true,
-  "ctrl_mode": 0,
+  "ctrl_mode": 1,
   "device_params": [
     0.5,
     0.5,
     0.5,
     0.5,
-    0.5703473,
+    0.5,
     0.5,
     0.5,
     0.5
   ],
-  "groove_json": "{\"v\":2,\"phrase\":\"\",\"warning\":\"\",\"mods\":0,\"pattern\":{\"bars\":2,\"c\":[0,0,224,0,3,148,0,6,144,0,10,144,0,16,230,0,19,138,0,22,180,0,26,142,0,29,146,1,1,57,1,3,75,1,4,238,1,7,93,1,12,232,1,15,184,1,18,77,1,20,236,1,21,63,1,26,81,1,28,230,1,31,77,2,2,126,2,4,122,2,7,65,2,10,116,2,12,116,2,13,85,2,16,160,2,17,73,2,18,118,2,20,120,2,24,118,2,25,69,2,26,118,2,28,126,2,29,71,3,6,146,3,14,144,5,4,138,5,12,132,5,28,138,10,23,69]},\"map\":{\"name\":\"Bitwig Drum Machine\",\"notes\":[36,37,38,39,40,41,42,43,48,45,46,47,44,49,50,51,52,53,54,55,56,57,58,59,60]},\"history\":[],\"rack\":{\"active\":0,\"e\":[{\"i\":0,\"genre\":1,\"bars\":1,\"swing\":0,\"human\":14,\"density\":50,\"seed\":70489871,\"accent\":50,\"pattern\":{\"bars\":2,\"c\":[0,0,224,0,3,148,0,6,144,0,10,144,0,16,230,0,19,138,0,22,180,0,26,142,0,29,146,1,1,57,1,3,75,1,4,238,1,7,93,1,12,232,1,15,184,1,18,77,1,20,236,1,21,63,1,26,81,1,28,230,1,31,77,2,2,126,2,4,122,2,7,65,2,10,116,2,12,116,2,13,85,2,16,160,2,17,73,2,18,118,2,20,120,2,24,118,2,25,69,2,26,118,2,28,126,2,29,71,3,6,146,3,14,144,5,4,138,5,12,132,5,28,138,10,23,69]}}]}}",
+  "groove_json": "{\"v\":2,\"phrase\":\"\",\"warning\":\"\",\"mods\":0,\"pattern\":{\"bars\":2,\"c\":[0,0,234,0,3,144,0,16,234,0,22,140,0,29,140,1,2,77,1,3,89,1,4,236,1,12,244,1,14,81,1,20,238,1,22,79,1,28,234,2,0,126,2,1,71,2,2,116,2,4,122,2,5,73,2,6,116,2,12,126,2,18,120,2,19,69,2,20,120,2,21,79,2,23,75,2,26,124,2,28,124,3,14,146,5,20,132,10,10,61,10,23,75]},\"map\":{\"name\":\"Bitwig Drum Machine\",\"notes\":[36,37,38,39,40,41,42,43,48,45,46,47,44,49,50,51,52,53,54,55,56,57,58,59,60]},\"history\":[],\"rack\":{\"active\":0,\"e\":[{\"i\":0,\"genre\":1,\"bars\":1,\"swing\":0,\"human\":14,\"density\":50,\"seed\":9999,\"accent\":50,\"pattern\":{\"bars\":2,\"c\":[0,0,234,0,3,144,0,16,234,0,22,140,0,29,140,1,2,77,1,3,89,1,4,236,1,12,244,1,14,81,1,20,238,1,22,79,1,28,234,2,0,126,2,1,71,2,2,116,2,4,122,2,5,73,2,6,116,2,12,126,2,18,120,2,19,69,2,20,120,2,21,79,2,23,75,2,26,124,2,28,124,3,14,146,5,20,132,10,10,61,10,23,75]}}]}}",
   "groove_view": 0,
   "groove_bar": 0,
   "groove_page": 0,
@@ -3127,5 +1376,57 @@
   "groove_preset_active": 0,
   "groove_bank_name": "",
   "groove_bank_favorites": [],
-  "groove_bank_recent": []
+  "groove_bank_recent": [],
+  "format_version": 2,
+  "groove_master": 0.7322835,
+  "groove_fx_pitch": 0.5,
+  "groove_fx_filter": 0.5,
+  "groove_fx_perform": 0.0,
+  "window_layout": {
+    "clip_launch": true,
+    "groove_machine": true,
+    "inspector": true,
+    "browser": true,
+    "mixer": true,
+    "clip_launch_pos": [
+      381.0,
+      80.0
+    ],
+    "groove_pos": [
+      7.0,
+      83.0
+    ],
+    "inspector_pos": [
+      4.0,
+      85.0
+    ],
+    "browser_pos": [
+      1503.0,
+      83.0
+    ],
+    "mixer_pos": [
+      485.0,
+      669.0
+    ],
+    "clip_launch_size": [
+      1120.0,
+      584.0
+    ],
+    "groove_size": [
+      1927.0,
+      830.77606
+    ],
+    "inspector_size": [
+      370.0,
+      920.0
+    ],
+    "browser_size": [
+      421.0,
+      544.0
+    ],
+    "mixer_size": [
+      972.0,
+      382.682
+    ]
+  }
 }

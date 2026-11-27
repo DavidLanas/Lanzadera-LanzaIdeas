@@ -123,6 +123,8 @@ pub struct SessionShared {
     /// 1 = Pitch, 2 = Decay, 3 = Filtro. Se asigna aunque el parámetro esté
     /// bloqueado: el lock detiene el dado, no la edición manual.
     pub mk3_chords_param: AtomicU8,
+    /// FX PAD seleccionado en MK3: 0=PITCH, 1=MOD, 2=PERFORM.
+    pub mk3_pad_fx: AtomicU8,
     /// Modo temporal de presets rápidos del MK3; no cambia el modo PATTERN.
     pub mk3_preset_mode: AtomicBool,
     /// Bits 0..7: cargas de slots rápidos pendientes desde el MK3.
@@ -204,6 +206,7 @@ impl SessionShared {
             mk3_pattern_mode: AtomicBool::new(false),
             mk3_chords_mode: AtomicBool::new(false),
             mk3_chords_param: AtomicU8::new(255),
+            mk3_pad_fx: AtomicU8::new(0),
             mk3_preset_mode: AtomicBool::new(false),
             mk3_preset_load_req: AtomicU8::new(0),
             mk3_preset_save_req: AtomicU8::new(0),

@@ -28,7 +28,7 @@ pub struct GroovePreset {
 }
 
 /// Layout de ventanas flotantes guardado en el proyecto.
-#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default, PartialEq)]
 pub struct WindowLayoutState {
     #[serde(default = "default_true")] pub clip_launch: bool,
     #[serde(default)] pub groove_machine: bool,

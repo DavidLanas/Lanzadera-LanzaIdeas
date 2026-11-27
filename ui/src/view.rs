@@ -107,15 +107,39 @@ impl Default for WindowState {
 
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GrooveTab {
-    Pad,
-    Mixer,
+pub enum GrooveScreenTab {
+    Main,
     Step,
 }
 
-impl Default for GrooveTab {
+impl Default for GrooveScreenTab {
     fn default() -> Self {
-        GrooveTab::Pad
+        GrooveScreenTab::Main
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GrooveDetailTab {
+    Chord,
+    Params,
+}
+
+impl Default for GrooveDetailTab {
+    fn default() -> Self {
+        GrooveDetailTab::Chord
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GrooveMainFocus {
+    Pads,
+    Detail,
+    Rack,
+}
+
+impl Default for GrooveMainFocus {
+    fn default() -> Self {
+        GrooveMainFocus::Pads
     }
 }
 
@@ -146,7 +170,9 @@ pub struct ClipClipboard {
 
 pub struct SessionView {
     pub windows: WindowState,
-    pub groove_tab: GrooveTab,
+    pub groove_tab: GrooveScreenTab,
+    pub groove_detail_tab: GrooveDetailTab,
+    pub groove_main_focus: GrooveMainFocus,
     /// Copia del estado de Groove Machine (se refresca solo si rev cambia).
     pub groove_snap: Option<lanzadera_engine::groove::GrooveSnapshot>,
     pub groove_rev: u64,
@@ -176,6 +202,9 @@ pub struct SessionView {
     pub groove_sel_pad: usize,
     /// Modo CHORDS (Library): pads = dado de muestras + locks de parámetro.
     pub groove_chords: bool,
+    /// Cache de overview de waveform por pad para la GUI (UI-only).
+    pub groove_wave_cache_pad: [usize; 25],
+    pub groove_wave_cache: [Option<std::sync::Arc<Vec<f32>>>; 25],
     /// Nombre en edición para guardar/exportar presets del Groove.
     pub groove_preset_name: String,
     /// Preset elegido en el combo de la ventana Groove Machine.
@@ -190,6 +219,13 @@ pub struct SessionView {
     pub groove_pad_gain: [f32; 25],
     pub groove_pad_pan: [f32; 25],
     pub groove_pad_mute: [bool; 25],
+    pub groove_sample_zoom: f32,
+    pub groove_sample_scroll: f32,
+    pub groove_sample_sel: Option<(f32, f32)>,
+    pub groove_sample_gain_db: f32,
+    pub groove_sample_msg: String,
+    pub groove_sample_pad: usize,
+    pub groove_sample_slot: usize,
     pub inspector_focus: InspectorFocus,
     pub browser_path: std::path::PathBuf,
     pub browser_filter: String,
@@ -255,7 +291,9 @@ impl Default for SessionView {
     fn default() -> Self {
         SessionView {
             windows: WindowState::default(),
-            groove_tab: GrooveTab::default(),
+            groove_tab: GrooveScreenTab::default(),
+            groove_detail_tab: GrooveDetailTab::default(),
+            groove_main_focus: GrooveMainFocus::default(),
             groove_snap: None,
             groove_rev: 0,
             groove_genres: Vec::new(),
@@ -272,6 +310,8 @@ impl Default for SessionView {
             groove_pat_name: String::new(),
             groove_sel_pad: 0,
             groove_chords: false,
+            groove_wave_cache_pad: [usize::MAX; 25],
+            groove_wave_cache: std::array::from_fn(|_| None),
             groove_preset_name: String::new(),
             groove_preset_selected: String::new(),
             groove_slot_clear_confirm: None,
@@ -287,6 +327,13 @@ impl Default for SessionView {
             groove_pad_gain: [1.0; 25],
             groove_pad_pan: [0.0; 25],
             groove_pad_mute: [false; 25],
+            groove_sample_zoom: 1.0,
+            groove_sample_scroll: 0.0,
+            groove_sample_sel: None,
+            groove_sample_gain_db: 0.0,
+            groove_sample_msg: String::new(),
+            groove_sample_pad: usize::MAX,
+            groove_sample_slot: usize::MAX,
             inspector_focus: InspectorFocus::default(),
             browser_path: std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/".into())),
             browser_filter: String::new(),
@@ -349,17 +396,31 @@ impl SessionView {
 
     pub fn show(&mut self, ctx: &egui::Context, shared: &Arc<SessionShared>, audio_on: bool) {
         // ── Fase 1.4C.2b: peticiones del MK3 físico ──────────────────
-        // Pestaña de Groove Machine pedida por PAD_MODE/STEP/KEYBOARD/CHORDS
+        // Pestaña/foco de Groove Machine pedido por PAD_MODE/STEP/KEYBOARD/CHORDS
         let mode_req = shared.mk3_mode_req.swap(255, std::sync::atomic::Ordering::Relaxed);
         if mode_req != 255 {
-            // CHORDS (3) reutiliza la pestaña Pad: los pads siguen siendo
-            // las celdas del kit, pero cambian de función (dado + locks).
             self.groove_chords = mode_req == 3;
-            self.groove_tab = match mode_req {
-                1 => GrooveTab::Step,
-                2 => GrooveTab::Mixer,
-                _ => GrooveTab::Pad,
-            };
+            match mode_req {
+                1 => {
+                    self.groove_tab = GrooveScreenTab::Step;
+                    self.groove_main_focus = GrooveMainFocus::Rack;
+                }
+                2 => {
+                    self.groove_tab = GrooveScreenTab::Main;
+                    self.groove_detail_tab = GrooveDetailTab::Params;
+                    self.groove_main_focus = GrooveMainFocus::Detail;
+                }
+                3 => {
+                    self.groove_tab = GrooveScreenTab::Main;
+                    self.groove_detail_tab = GrooveDetailTab::Chord;
+                    self.groove_main_focus = GrooveMainFocus::Detail;
+                }
+                _ => {
+                    self.groove_tab = GrooveScreenTab::Main;
+                    // Si EVENTS está activo, mantener foco en la tira inferior.
+                    self.groove_main_focus = if self.groove_event { GrooveMainFocus::Rack } else { GrooveMainFocus::Pads };
+                }
+            }
             self.windows.groove_machine_visible = true;
         }
 
@@ -593,15 +654,18 @@ impl SessionView {
             self.groove_machine_window(ctx, shared);
         }
 
-        // Sub-modo publicado para el MK3 y los LEDs: 0=Pad 1=Step 2=Mixer
-        // 3=Chords. Se escribe DESPUÉS de la ventana para que CHORDS gane.
-        // El sub-modo publicado es SIEMPRE el de la pestaña (0/1/2), igual
-        // que el que escribe la ventana: el valor ya no oscila dentro del
-        // frame. CHORDS viaja en su propio flag estable.
-        let sub_mode = match self.groove_tab {
-            GrooveTab::Pad => 0,
-            GrooveTab::Step => 1,
-            GrooveTab::Mixer => 2,
+        // Sub-modo publicado para MK3/LEDs. Se mantiene la semántica lógica
+        // aunque la UI muestre una pantalla unificada: 0=Pad 1=Step 2=Mixer 3=Chords.
+        let sub_mode = if self.groove_chords {
+            3
+        } else {
+            match self.groove_tab {
+                GrooveScreenTab::Step => 1,
+                GrooveScreenTab::Main => match self.groove_main_focus {
+                    GrooveMainFocus::Detail if self.groove_detail_tab == GrooveDetailTab::Params => 2,
+                    _ => 0,
+                },
+            }
         };
         shared.groove_sub_mode.store(sub_mode, std::sync::atomic::Ordering::Relaxed);
         shared.mk3_chords_mode.store(self.groove_chords, std::sync::atomic::Ordering::Relaxed);
@@ -637,6 +701,7 @@ impl SessionView {
         // ── Ventanas flotantes de plugins (Fase 3H) ──
         let native_reqs = self.plugin_windows.show(ctx, shared);
         self.pending_native_gui.extend(native_reqs);
+        self.window_layout_apply_frames = self.window_layout_apply_frames.saturating_sub(1);
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }
 
@@ -711,6 +776,7 @@ impl SessionView {
             Ok(()) => {
                 self.project_path = path.clone();
                 self.push_recent(&path);
+                self.window_layout_apply_frames = 3;
                 self.apply_window_layout_from_state(shared);
                 // Reinicia el audio para cargar los plugins (instrumento, Note FX, FX) del proyecto.
                 lanzadera_engine::state_ctl::skip_capture_on_next_restart();
@@ -724,6 +790,10 @@ impl SessionView {
 
     fn project_new(&mut self, shared: &SessionShared) {
         shared.new_project();
+        if let Some(tpl) = lanzadera_core::config::get().window_layout_template {
+            shared.edit(|st| st.window_layout = tpl);
+        }
+        self.window_layout_apply_frames = 3;
         self.apply_window_layout_from_state(shared);
         lanzadera_engine::state_ctl::skip_capture_on_next_restart();
         shared.audio_restart.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -755,6 +825,7 @@ impl SessionView {
         self.windows.inspector_size = wl.inspector_size.map(|s| egui::vec2(s[0], s[1]));
         self.windows.browser_size = wl.browser_size.map(|s| egui::vec2(s[0], s[1]));
         self.windows.mixer_size = wl.mixer_size.map(|s| egui::vec2(s[0], s[1]));
+        self.window_layout_apply_frames = 3;
     }
 
     fn sync_window_layout_to_state(&self, shared: &SessionShared) {
@@ -1238,6 +1309,25 @@ impl SessionView {
                 ui.checkbox(&mut self.windows.inspector_visible, "Inspector");
                 ui.checkbox(&mut self.windows.browser_visible, "Browser");
                 ui.checkbox(&mut self.windows.mixer_visible, "Mixer");
+                ui.separator();
+                if ui.button("Guardar disposición de ventanas como plantilla").clicked() {
+                    self.sync_window_layout_to_state(shared);
+                    let wl = shared.state.lock().unwrap_or_else(|e| e.into_inner()).window_layout.clone();
+                    lanzadera_core::config::update(|c| c.window_layout_template = Some(wl));
+                    self.msg = "Plantilla de ventanas guardada".into();
+                    ui.close_menu();
+                }
+                if ui.button("Aplicar plantilla de ventanas").clicked() {
+                    if let Some(tpl) = lanzadera_core::config::get().window_layout_template {
+                        shared.edit(|st| st.window_layout = tpl);
+                        self.window_layout_apply_frames = 3;
+                        self.apply_window_layout_from_state(shared);
+                        self.msg = "Plantilla de ventanas aplicada".into();
+                    } else {
+                        self.msg = "No hay plantilla de ventanas guardada".into();
+                    }
+                    ui.close_menu();
+                }
             });
 
             ui.menu_button("Pista", |ui| {
@@ -2933,15 +3023,24 @@ impl SessionView {
 
     fn clip_launch_window(&mut self, ctx: &egui::Context, shared: &Arc<SessionShared>, audio_on: bool) {
         let mut open = self.windows.clip_launch_visible;
+        let apply_layout = self.window_layout_apply_frames > 0;
+        let default_sz = egui::vec2(980.0, 560.0);
+        let saved_sz = self.windows.clip_launch_size.filter(|s| s.x > 100.0 && s.y > 100.0);
         let mut win = egui::Window::new("🎹 Clip Launch")
             .open(&mut open)
-            .default_size(self.windows.clip_launch_size.unwrap_or(egui::vec2(980.0, 560.0)))
             .min_size([320.0, 200.0])
             .max_size([8000.0, 8000.0])
             .constrain(false)
             .resizable(true)
             .frame(Self::window_frame());
-        if let Some(p) = self.windows.clip_launch_pos { win = win.default_pos(p); }
+        if apply_layout {
+            if let Some(s) = saved_sz { win = win.fixed_size(s); }
+            else { win = win.default_size(default_sz); }
+            if let Some(p) = self.windows.clip_launch_pos { win = win.current_pos(p); }
+        } else {
+            win = win.default_size(saved_sz.unwrap_or(default_sz));
+            if let Some(p) = self.windows.clip_launch_pos { win = win.default_pos(p); }
+        }
         let resp = win.show(ctx, |ui| {
                 // Barra de herramientas del grid: +/− pistas
                 ui.horizontal(|ui| {
@@ -2980,30 +3079,56 @@ impl SessionView {
                     |ui| { self.clip_grid(ui, ctx, shared, audio_on); },
                 );
             });
-        if let Some(r) = resp {
-            self.windows.clip_launch_pos = Some(r.response.rect.min);
-            self.windows.clip_launch_size = Some(r.response.rect.size());
+        if resp.is_some() {
+            let rect = ctx.memory(|mem| mem.area_rect(egui::Id::new("🎹 Clip Launch")));
+            if let Some(r) = rect {
+                self.windows.clip_launch_pos = Some(r.min);
+                if !apply_layout || self.window_layout_apply_frames == 1 {
+                    self.windows.clip_launch_size = Some(r.size());
+                }
+            }
         }
         self.windows.clip_launch_visible = open;
     }
 
     fn groove_machine_window(&mut self, ctx: &egui::Context, shared: &Arc<SessionShared>) {
         let mut open = self.windows.groove_machine_visible;
+        let apply_layout = self.window_layout_apply_frames > 0;
 
+        let screen = ctx.screen_rect();
+        // Dejar margen para la barra superior de Lanzadera y ocupar casi toda la pantalla.
+        let top_bar = screen.min.y + 56.0;
+        let default_sz = egui::vec2(
+            (screen.width() - 16.0).clamp(900.0, 2400.0),
+            (screen.max.y - top_bar - 8.0).clamp(560.0, 1600.0),
+        );
+        let default_pos = egui::pos2(screen.min.x + 8.0, top_bar);
         let mut win = egui::Window::new("🥁 Groove Machine")
             .open(&mut open)
             .constrain(false)
             .max_size([8000.0, 8000.0])
-            .default_size(self.windows.groove_size.unwrap_or(egui::vec2(880.0, 540.0)))
-            .min_size([520.0, 300.0])
+            .min_size([560.0, 360.0])
             .resizable(true)
             .frame(Self::window_frame());
-        if let Some(p) = self.windows.groove_pos { win = win.default_pos(p); }
+        let saved_sz = self.windows.groove_size.filter(|s| s.x > 100.0 && s.y > 100.0);
+        let area_id = egui::Id::new("🥁 Groove Machine");
+        let area_rect = ctx.memory(|mem| mem.area_rect(area_id));
+        let has_good_state = area_rect.map(|r| r.width() >= 100.0 && r.height() >= 100.0).unwrap_or(false);
+        if apply_layout {
+            let sz = saved_sz.unwrap_or(default_sz);
+            let pos = self.windows.groove_pos.unwrap_or(default_pos);
+            win = win.fixed_size(sz).current_pos(pos);
+        } else if !has_good_state {
+            // Primera apertura / estado inválido: ocupar pantalla, respetando barra superior.
+            win = win.default_size(saved_sz.unwrap_or(default_sz))
+                .current_pos(self.windows.groove_pos.unwrap_or(default_pos));
+        }
+        // Con estado válido y sin apply_layout: no forzar tamaño/posición;
+        // egui preserva el resize manual del usuario.
         let resp = win.show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.groove_tab, GrooveTab::Pad, "Pad");
-                    ui.selectable_value(&mut self.groove_tab, GrooveTab::Mixer, "Mixer");
-                    ui.selectable_value(&mut self.groove_tab, GrooveTab::Step, "Step");
+                    ui.selectable_value(&mut self.groove_tab, GrooveScreenTab::Main, "Groove");
+                    ui.selectable_value(&mut self.groove_tab, GrooveScreenTab::Step, "Step");
 
                     ui.separator();
 
@@ -3019,6 +3144,18 @@ impl SessionView {
                     if enabled && step != 255 {
                         ui.label(egui::RichText::new(format!("Step {}/16", step + 1)).color(T.accent).size(11.0));
                     }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let (gmaster, gpeak) = {
+                            let st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+                            (st.groove_master, shared.rt.groove_peak())
+                        };
+                        let mut gm = gmaster;
+                        ui.add_space(4.0);
+                        let r = ui.add(egui::Slider::new(&mut gm, 0.0..=1.5).text("GM Master").show_value(false));
+                        if r.changed() { shared.apply_control(ControlCmd::SetGrooveMasterVol { value: gm }); }
+                        ui.label(egui::RichText::new(format!("OUT {:>4.1} dB", 20.0 * (gpeak.max(1e-5)).log10())).size(10.0).color(T.text_dim));
+                    });
                 });
 
                 ui.separator();
@@ -3411,33 +3548,38 @@ impl SessionView {
 
                 ui.separator();
 
-                // Sincronizar pestaña activa → flag atómico para el MK3
-                let sub_mode_val: u8 = match self.groove_tab {
-                    GrooveTab::Pad => 0,
-                    GrooveTab::Mixer => 2,
-                    GrooveTab::Step => 1,
-                };
+                // Submodo lógico para MK3/LEDs: 0 Pad, 1 Step, 2 Mixer, 3 Chords.
+                let sub_mode_val: u8 = if self.groove_chords { 3 } else { match self.groove_tab {
+                    GrooveScreenTab::Step => 1,
+                    GrooveScreenTab::Main => match self.groove_main_focus {
+                        GrooveMainFocus::Detail if self.groove_detail_tab == GrooveDetailTab::Params => 2,
+                        _ => 0,
+                    },
+                }};
                 shared.groove_sub_mode.store(sub_mode_val, std::sync::atomic::Ordering::Relaxed);
+                shared.mk3_chords_mode.store(self.groove_chords, std::sync::atomic::Ordering::Relaxed);
 
                 match self.groove_tab {
-                    GrooveTab::Pad => {
-                        self.inspector_focus = InspectorFocus::GroovePad;
-                        self.groove_pad_tab(ui, shared);
+                    GrooveScreenTab::Main => {
+                        self.groove_main_tab(ui, shared);
                     }
-                    GrooveTab::Mixer => {
-                        self.inspector_focus = InspectorFocus::GrooveMixer;
-                        self.groove_mixer_tab(ui, shared);
-                    }
-                    GrooveTab::Step => {
+                    GrooveScreenTab::Step => {
                         self.inspector_focus = InspectorFocus::GrooveStep;
                         self.groove_step_tab(ui, shared);
                     }
                 }
             });
 
-        if let Some(r) = resp {
-            self.windows.groove_pos = Some(r.response.rect.min);
-            self.windows.groove_size = Some(r.response.rect.size());
+        if resp.is_some() {
+            let area_id = egui::Id::new("🥁 Groove Machine");
+            let rect = ctx.memory(|mem| mem.area_rect(area_id));
+            if let Some(r) = rect {
+                self.windows.groove_pos = Some(r.min);
+                // Persistir tamaño real siempre que no estemos en frames de fixed_size de apply.
+                if !apply_layout || self.window_layout_apply_frames == 1 {
+                    self.windows.groove_size = Some(r.size());
+                }
+            }
         }
         // Si el usuario cierra la ventana con la X, apagamos el motor.
         if !open {
@@ -3494,42 +3636,358 @@ impl SessionView {
         self.msg = format!("Groove exportado a Clip Launch: P{}·E{}", track + 1, sc + 1);
     }
 
-    fn groove_pad_tab(&mut self, ui: &mut egui::Ui, shared: &Arc<SessionShared>) {
-        use caja_core::pieces::{PAD_ORDER, PIECES};
+    fn groove_main_tab(&mut self, ui: &mut egui::Ui, shared: &Arc<SessionShared>) {
+        ui.vertical(|ui| {
+            self.groove_header_bar(ui, shared);
+            ui.add_space(4.0);
+            ui.separator();
+            self.groove_source_strip(ui, shared);
+            ui.add_space(4.0);
+            ui.separator();
 
+            let avail = ui.available_height().max(200.0);
+            let rack_h = (avail * 0.24).clamp(110.0, 180.0);
+            let top_h = (avail - rack_h - 8.0).max(160.0);
+
+            ui.allocate_ui_with_layout(vec2(ui.available_width(), top_h), egui::Layout::left_to_right(egui::Align::TOP), |ui| {
+                let total_w = ui.available_width().max(1.0);
+                let gap = 8.0;
+                // Pads amplio, editor sample compacto (casi cuadrado), SAMPLES/PARAMS con protagonismo.
+                let left_w = (total_w * 0.40).clamp(300.0, 520.0);
+                let right_w = (total_w * 0.34).clamp(320.0, 500.0);
+                let mid_w = (total_w - left_w - right_w - gap * 2.0).clamp(180.0, 280.0);
+
+                ui.allocate_ui_with_layout(vec2(left_w, top_h), egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                    ui.set_max_width(left_w);
+                    egui::ScrollArea::vertical().id_source("gm_main_pads_scroll").auto_shrink([false, false]).show(ui, |ui| {
+                        self.groove_pad_grid_unified(ui, shared);
+                    });
+                });
+                ui.add_space(gap);
+                ui.allocate_ui_with_layout(vec2(mid_w, top_h), egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                    ui.set_max_width(mid_w);
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("VISTA").size(9.0).color(T.text_dim));
+                        if ui.selectable_label(self.groove_bank == 0, "A").clicked() { self.groove_bank = 0; }
+                        if ui.selectable_label(self.groove_bank == 1, "B").clicked() { self.groove_bank = 1; }
+                        ui.separator();
+                        if ui.selectable_label(self.groove_tab == GrooveScreenTab::Main, "Rack").clicked() {
+                            self.groove_tab = GrooveScreenTab::Main;
+                            self.groove_main_focus = GrooveMainFocus::Rack;
+                        }
+                        if ui.button("Step").clicked() {
+                            self.groove_tab = GrooveScreenTab::Step;
+                            self.groove_main_focus = GrooveMainFocus::Rack;
+                        }
+                    });
+                    ui.add_space(4.0);
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(34, 31, 28))
+                        .rounding(Rounding::same(6.0))
+                        .stroke(Stroke::new(1.0, Color32::from_rgb(72, 66, 58)))
+                        .inner_margin(8.0)
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical().id_source("gm_main_sample_scroll").auto_shrink([false, false]).show(ui, |ui| {
+                                self.groove_embedded_sample_editor(ui, shared);
+                            });
+                        });
+                });
+                ui.add_space(gap);
+                ui.allocate_ui_with_layout(vec2(right_w, top_h), egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                    ui.set_max_width(right_w);
+                    egui::Frame::none().fill(Color32::from_rgb(34, 31, 28)).rounding(Rounding::same(6.0)).stroke(Stroke::new(1.0, T.accent_gold.gamma_multiply(0.35))).inner_margin(8.0).show(ui, |ui| {
+                        egui::ScrollArea::vertical().id_source("gm_main_detail_scroll").auto_shrink([false, false]).show(ui, |ui| {
+                            self.groove_pad_detail_panel(ui, shared);
+                        });
+                    });
+                });
+            });
+
+            ui.add_space(4.0);
+            ui.separator();
+            ui.allocate_ui_with_layout(vec2(ui.available_width(), rack_h), egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                self.groove_rack_strip(ui, shared);
+            });
+        });
+    }
+
+    fn groove_header_bar(&mut self, ui: &mut egui::Ui, shared: &Arc<SessionShared>) {
+        let frame = egui::Frame::none()
+            .fill(Color32::from_rgb(43, 39, 35))
+            .stroke(Stroke::new(1.0, Color32::from_rgb(78, 70, 60)))
+            .rounding(Rounding::same(6.0))
+            .inner_margin(egui::Margin::symmetric(10.0, 8.0));
+        frame.show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("GROOVE SAMPLER").size(11.0).color(T.accent_gold).strong().monospace());
+                ui.separator();
+                ui.label(egui::RichText::new("PRESET").size(9.0).color(T.text_dim).strong());
+                let presets = shared.list_groove_presets();
+                egui::ComboBox::from_id_source("gm_preset_combo_main")
+                    .selected_text(if self.groove_preset_selected.is_empty() { "elegir…".to_string() } else { self.groove_preset_selected.clone() })
+                    .width(170.0)
+                    .show_ui(ui, |ui| {
+                        for p in &presets {
+                            ui.selectable_value(&mut self.groove_preset_selected, p.clone(), p.as_str());
+                        }
+                    });
+                if ui.small_button("Cargar").clicked() && !self.groove_preset_selected.is_empty() {
+                    match shared.load_groove_preset(&self.groove_preset_selected) {
+                        Ok(()) => self.msg = format!("Preset cargado: {}", self.groove_preset_selected),
+                        Err(e) => self.msg = e,
+                    }
+                }
+                ui.add(egui::TextEdit::singleline(&mut self.groove_preset_name).desired_width(110.0).hint_text("nombre…"));
+                if ui.small_button("Guardar").clicked() {
+                    if self.groove_preset_name.trim().is_empty() {
+                        self.groove_preset_name = format!("Groove {}", presets.len() + 1);
+                    }
+                    match shared.save_groove_preset(&self.groove_preset_name) {
+                        Ok(()) => { self.groove_preset_selected = self.groove_preset_name.trim().to_string(); self.msg = format!("Preset guardado: {}", self.groove_preset_selected); }
+                        Err(e) => self.msg = e,
+                    }
+                }
+                if ui.small_button("Export").clicked() {
+                    let n = self.groove_preset_name.trim().to_string();
+                    if n.is_empty() { self.msg = "Escribe un nombre para exportar.".into(); }
+                    else { let path = format!("{}.groovepreset", n.replace('/', "_")); match shared.export_groove_preset(&path) { Ok(()) => self.msg = format!("Exportado {}", path), Err(e) => self.msg = e } }
+                }
+                if ui.small_button("Import").clicked() {
+                    let n = self.groove_preset_name.trim().to_string();
+                    if n.is_empty() { self.msg = "Escribe el nombre del archivo a importar (sin extensión).".into(); }
+                    else { let path = format!("{}.groovepreset", n.replace('/', "_")); match shared.import_groove_preset(&path, &n) { Ok(()) => { self.groove_preset_selected = n; self.msg = format!("Importado {}", path); } Err(e) => self.msg = e } }
+                }
+            });
+
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                let enabled = shared.caja_sched.enabled.load(std::sync::atomic::Ordering::Relaxed);
+                let motor = ui.add(egui::Button::new(egui::RichText::new(if enabled { "● MOTOR ON" } else { "○ MOTOR OFF" }).size(11.0).strong())
+                    .fill(if enabled { Color32::from_rgb(52, 88, 58) } else { Color32::from_rgb(56, 50, 44) })
+                    .stroke(Stroke::new(1.0, if enabled { T.accent_green } else { Color32::from_rgb(90, 80, 68) })));
+                if motor.clicked() { shared.caja_sched.toggle(); }
+
+                let step = groove_head(shared);
+                ui.add_space(6.0);
+                ui.label(egui::RichText::new(if enabled && step != 255 { format!("STEP {:02}/16", step + 1) } else { "STEP --/16".into() }).size(10.0).color(if enabled { T.accent_green } else { T.text_dim }).monospace());
+                let (rect, _) = ui.allocate_exact_size(vec2(170.0, 14.0), Sense::hover());
+                let p = ui.painter_at(rect);
+                p.rect_filled(rect, 3.0, Color32::from_rgb(22, 20, 18));
+                let cw = rect.width() / 16.0;
+                for i in 0..16 {
+                    let r = Rect::from_min_size(pos2(rect.left() + i as f32 * cw + 1.0, rect.top() + 2.0), vec2(cw - 2.0, rect.height() - 4.0));
+                    let on = enabled && i as u8 == step;
+                    let beat = i % 4 == 0;
+                    p.rect_filled(r, 1.0, if on { T.accent_green } else if beat { Color32::from_rgb(70, 64, 56) } else { Color32::from_rgb(48, 44, 40) });
+                }
+
+                ui.separator();
+                let (mut gmaster, gpeak) = {
+                    let st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+                    (st.groove_master, shared.rt.groove_peak())
+                };
+                ui.label(egui::RichText::new("OUT").size(9.0).color(T.accent_gold).strong());
+                let meter_rect = ui.allocate_exact_size(vec2(100.0, 12.0), Sense::hover()).0;
+                let mp = ui.painter_at(meter_rect);
+                mp.rect_filled(meter_rect, 2.0, Color32::from_rgb(20, 18, 16));
+                let lvl = gpeak.clamp(0.0, 1.0).sqrt();
+                let fill = Rect::from_min_size(meter_rect.min, vec2(meter_rect.width() * lvl, meter_rect.height()));
+                mp.rect_filled(fill, 2.0, if lvl > 0.9 { T.meter_high } else if lvl > 0.7 { T.meter_mid } else { T.accent_green });
+                ui.label(egui::RichText::new(format!("{:>5.1} dB", 20.0 * gpeak.max(1e-5).log10())).size(9.0).color(T.text_dim).monospace());
+                let r = ui.add(egui::Slider::new(&mut gmaster, 0.0..=1.5).text("GM").show_value(false));
+                if r.changed() { shared.apply_control(ControlCmd::SetGrooveMasterVol { value: gmaster }); }
+            });
+        });
+    }
+
+    fn groove_source_strip(&mut self, ui: &mut egui::Ui, shared: &Arc<SessionShared>) {
+        let (mut p, genre_name, reading, genre_names) = match &self.groove_snap {
+            Some(s) => (s.p, s.genre_name.clone(), s.reading.clone(), s.genre_names.clone()),
+            None => { ui.label(egui::RichText::new("Cargando Groove Machine…").color(T.text_dim)); return; }
+        };
+        let kit = shared.kit.clone();
+        let sel_pad = self.groove_sel_pad.min(24);
+        let cur_rate = kit.snapshot_cfg().get(sel_pad).map(|c| c.rate).unwrap_or(4);
+
+        egui::Frame::none()
+            .fill(Color32::from_rgb(40, 36, 32))
+            .stroke(Stroke::new(1.0, Color32::from_rgb(74, 67, 58)))
+            .rounding(Rounding::same(6.0))
+            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new("SOURCE").size(9.0).color(T.accent_gold).strong());
+                    if ui.small_button("◀").clicked() { shared.groove.cycle_genre(-1); }
+                    egui::ComboBox::from_id_source("gm_genre_main").selected_text(&genre_name).width(150.0).show_ui(ui, |ui| {
+                        for (i, n) in genre_names.iter().enumerate() { if ui.selectable_label(n == &genre_name, n).clicked() { shared.groove.set_genre(i); } }
+                    });
+                    if ui.small_button("▶").clicked() { shared.groove.cycle_genre(1); }
+                    ui.add(egui::TextEdit::singleline(&mut self.groove_phrase).desired_width(240.0).hint_text("frase / idea…"));
+                    if ui.add(egui::Button::new("Generar").fill(Color32::from_rgb(74, 64, 50))).clicked() { shared.groove.generate(&self.groove_phrase); }
+                    if ui.button("↻ Regenerar").clicked() { shared.groove.reroll(true); }
+                });
+
+                ui.add_space(2.0);
+                ui.label(egui::RichText::new(&reading).size(10.0).color(Color32::from_rgb(188, 176, 158)));
+
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    fn gm_knob(ui: &mut egui::Ui, label: &str, v: &mut i32, suffix: &str) -> bool {
+                        let mut changed = false;
+                        ui.vertical(|ui| {
+                            ui.set_width(72.0);
+                            ui.label(egui::RichText::new(label).size(9.0).color(T.text_dim));
+                            let mut f = *v as f32;
+                            let r = ui.add(egui::Slider::new(&mut f, 0.0..=100.0).show_value(false));
+                            if r.changed() { *v = f.round().clamp(0.0, 100.0) as i32; changed = true; }
+                            ui.label(egui::RichText::new(format!("{}{}", *v, suffix)).size(9.0).color(T.text_bright).monospace());
+                        });
+                        changed
+                    }
+                    if gm_knob(ui, "SWING", &mut p.swing, "%") { shared.groove.set_swing(p.swing); }
+                    if gm_knob(ui, "ACCENT", &mut p.accent, "%") { shared.groove.set_accent(p.accent); }
+                    if gm_knob(ui, "HUMAN", &mut p.human, "%") { shared.groove.set_human(p.human); }
+                    if gm_knob(ui, "DENSITY", &mut p.density, "%") { shared.groove.set_density(p.density); }
+
+                    ui.separator();
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("BARS").size(9.0).color(T.text_dim));
+                        const GM_BARS_LOCAL: [&str; 4] = ["1", "2", "4", "8"];
+                        let bars_idx = p.bars_idx.min(3) as usize;
+                        egui::ComboBox::from_id_source("gm_bars_main").selected_text(GM_BARS_LOCAL[bars_idx]).width(48.0).show_ui(ui, |ui| {
+                            for (i, lbl) in GM_BARS_LOCAL.iter().enumerate() { if ui.selectable_label(bars_idx == i, *lbl).clicked() { shared.groove.set_bars_idx(i as i32); } }
+                        });
+                    });
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("SEED").size(9.0).color(T.text_dim));
+                        ui.horizontal(|ui| {
+                            let mut seed = p.seed as i32;
+                            if ui.add(egui::DragValue::new(&mut seed).range(0..=9999)).changed() { shared.groove.set_seed(seed.clamp(0, 9999)); }
+                            if ui.small_button("🎲").clicked() { shared.groove.randomize_seed(); }
+                        });
+                    });
+                });
+
+                ui.add_space(4.0);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new("CAMBIO MUESTRA").size(9.0).color(T.accent_gold).strong());
+                    for (bars, lbl) in [(0u8, "Al toque"), (1, "1c"), (2, "2c"), (3, "3c"), (4, "4c")] {
+                        let on = cur_rate == bars;
+                        if ui.add(egui::Button::new(egui::RichText::new(lbl).size(10.0)).fill(if on { T.accent_gold.gamma_multiply(0.85) } else { Color32::from_rgb(52, 48, 42) })).clicked() {
+                            kit.set_rate(sel_pad, bars);
+                        }
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("FX GLOBAL").size(9.0).color(T.text_dim).strong());
+                    let (mut fx_pitch, mut fx_filter, mut fx_perform) = {
+                        let st = shared.state.lock().unwrap();
+                        (st.groove_fx_pitch, st.groove_fx_filter, st.groove_fx_perform)
+                    };
+                    let mut cmds: Vec<ControlCmd> = Vec::new();
+                    ui.label(egui::RichText::new("PITCH").size(9.0).color(T.text_dim));
+                    let r = ui.add(egui::Slider::new(&mut fx_pitch, 0.0..=1.0).show_value(false));
+                    if r.changed() { cmds.push(ControlCmd::SetGrooveFxPitch { value: fx_pitch }); }
+                    if r.double_clicked() { cmds.push(ControlCmd::SetGrooveFxPitch { value: 0.5 }); }
+                    ui.label(egui::RichText::new("MOD").size(9.0).color(T.text_dim));
+                    let r = ui.add(egui::Slider::new(&mut fx_filter, 0.0..=1.0).show_value(false));
+                    if r.changed() { cmds.push(ControlCmd::SetGrooveFxFilter { value: fx_filter }); }
+                    if r.double_clicked() { cmds.push(ControlCmd::SetGrooveFxFilter { value: 0.5 }); }
+                    ui.label(egui::RichText::new("PERFORM").size(9.0).color(T.text_dim));
+                    let r = ui.add(egui::Slider::new(&mut fx_perform, 0.0..=1.0).show_value(false));
+                    if r.changed() { cmds.push(ControlCmd::SetGrooveFxPerform { value: fx_perform }); }
+                    if r.double_clicked() { cmds.push(ControlCmd::SetGrooveFxPerform { value: 0.0 }); }
+                    for c in cmds { shared.apply_control(c); }
+                });
+            });
+    }
+
+    fn groove_pad_grid_unified(&mut self, ui: &mut egui::Ui, shared: &Arc<SessionShared>) {
+        use caja_core::pieces::{PAD_ORDER, PIECES};
         let (active, filled, names) = match &self.groove_snap {
             Some(s) => (s.active, s.filled, s.names.clone()),
             None => (0, [false; 32], std::array::from_fn::<String, 32, _>(|_| String::new())),
         };
         let pattern_mode = shared.mk3_pattern_mode.load(std::sync::atomic::Ordering::Relaxed);
+        let kit = shared.kit.clone();
+        let cfg = kit.snapshot_cfg();
+        let live = kit.snapshot_live();
 
-        ui.horizontal_top(|ui| {
-            // ── Columna izquierda: 16 pads virtuales ──
-            ui.vertical(|ui| {
-                ui.set_min_width(360.0);
-                ui.label(egui::RichText::new(if pattern_mode { "PADS = PATRONES (MK3)" } else { "Pads · doble click dispara" })
-                    .color(if pattern_mode { T.accent } else { T.text_dim }).size(11.0));
-                ui.add_space(4.0);
-                egui::Grid::new("gm_pads").num_columns(4).spacing(vec2(8.0, 8.0)).show(ui, |ui| {
+        egui::Frame::none()
+            .fill(Color32::from_rgb(36, 33, 30))
+            .stroke(Stroke::new(1.0, Color32::from_rgb(72, 66, 58)))
+            .rounding(Rounding::same(6.0))
+            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("PADS").size(11.0).strong().color(T.accent_gold).monospace());
+                    ui.label(egui::RichText::new(if pattern_mode { "PATTERN MODE" } else { "DRUM PADS" }).size(9.0).color(T.text_dim));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.selectable_label(pattern_mode, egui::RichText::new("PATTERN").size(9.0)).clicked() {
+                            shared.mk3_pattern_mode.store(!pattern_mode, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        ui.label(egui::RichText::new("RACK").size(9.0).color(T.text_dim));
+                        if ui.selectable_label(self.groove_bank == 1, "B").clicked() { self.groove_bank = 1; }
+                        if ui.selectable_label(self.groove_bank == 0, "A").clicked() { self.groove_bank = 0; }
+                    });
+                });
+                ui.add_space(6.0);
+
+                let grid_w = ui.available_width().max(240.0);
+                let pad_w = ((grid_w - 24.0) / 4.0).clamp(58.0, 138.0);
+                let pad_h = 78.0;
+                egui::Grid::new("gm_pads_unified").num_columns(4).spacing(vec2(8.0, 8.0)).show(ui, |ui| {
                     for i in 0..16 {
                         let slot = self.groove_bank * 16 + i;
                         let selected = if pattern_mode { slot == active } else { self.groove_sel_pad == i };
-                        let label = if pattern_mode {
+                        let pc = PAD_ORDER[i];
+                        let note = self.groove_snap.as_ref().map(|s| s.notes[pc]).unwrap_or(36 + i as u8);
+                        let name = if pattern_mode {
                             let nm = &names[slot];
-                            if nm.is_empty() { format!("{}{}", if slot < 16 { "A" } else { "B" }, slot % 16 + 1) }
-                            else { trunc(nm, 8) }
+                            if nm.is_empty() { format!("{}{}", if slot < 16 { "A" } else { "B" }, slot % 16 + 1) } else { trunc(nm, 10) }
+                        } else { trunc(PIECES[pc].name, 11) };
+
+                        let (rect, resp) = ui.allocate_exact_size(vec2(pad_w, pad_h), Sense::click());
+                        let p = ui.painter_at(rect);
+                        let base = if pattern_mode && filled[slot] { Color32::from_rgb(52, 47, 40) } else { Color32::from_rgb(44, 40, 36) };
+                        let bg = if selected { Color32::from_rgb(66, 58, 46) } else { base };
+                        p.rect_filled(rect, 5.0, bg);
+                        let border_col = if selected { T.accent_gold } else { Color32::from_rgb(84, 76, 66) };
+                        p.rect_stroke(rect, 5.0, Stroke::new(if selected { 2.0 } else { 1.0 }, border_col));
+                        let hue = PAD_PALETTE[i % PAD_PALETTE.len()];
+                        p.rect_filled(Rect::from_min_size(rect.min + vec2(0.0, 4.0), vec2(4.0, rect.height() - 8.0)), 2.0, hue.gamma_multiply(0.85));
+
+                        let wf_rect = Rect::from_min_max(pos2(rect.min.x + 10.0, rect.min.y + 22.0), pos2(rect.max.x - 8.0, rect.max.y - 20.0));
+                        if !pattern_mode {
+                            let peaks = self.groove_pad_wave_peaks(shared, i);
+                            if peaks.is_empty() {
+                                p.rect_stroke(wf_rect, 3.0, Stroke::new(1.0, Color32::from_rgb(72, 66, 58)));
+                                p.text(wf_rect.center(), Align2::CENTER_CENTER, "+", FontId::proportional(18.0), T.accent_gold.gamma_multiply(0.35));
+                            } else {
+                                crate::waveform::paint(&p, wf_rect, &peaks, None, &crate::waveform::WaveStyle { bg: Color32::from_rgb(28, 26, 24), wave: T.accent_gold.gamma_multiply(0.95), center: Color32::from_rgb(72, 66, 58), head: T.accent_green });
+                            }
                         } else {
-                            format!("{}\n{}", trunc(PIECES[PAD_ORDER[i]].name, 9), 36 + i)
-                        };
-                        let fill = if selected { T.accent }
-                                   else if pattern_mode && filled[slot] { lighten(T.panel, 0.12) }
-                                   else { T.panel };
-                        let r = ui.add(egui::Button::new(label).min_size(vec2(84.0, 56.0)).fill(fill));
-                        if r.clicked() {
-                            if pattern_mode { shared.groove.select_pattern(slot); }
-                            else { self.groove_sel_pad = i; }
+                            let tag = if filled[slot] { "●" } else { "○" };
+                            p.text(wf_rect.center(), Align2::CENTER_CENTER, tag, FontId::proportional(22.0), if filled[slot] { T.accent_gold } else { T.text_dim });
                         }
-                        if r.double_clicked() && !pattern_mode {
+
+                        p.text(pos2(rect.min.x + 10.0, rect.min.y + 5.0), Align2::LEFT_TOP, &name, FontId::proportional(10.0), if selected { Color32::from_rgb(244, 236, 222) } else { Color32::from_rgb(196, 184, 166) });
+                        let sub = if pattern_mode { format!("slot {}", slot + 1) } else { format!("n{}", note) };
+                        p.text(pos2(rect.max.x - 8.0, rect.max.y - 5.0), Align2::RIGHT_BOTTOM, sub, FontId::proportional(9.0), T.text_dim);
+                        if !pattern_mode {
+                            let c = &cfg[i.min(cfg.len()-1)];
+                            if c.mute { p.text(pos2(rect.max.x - 8.0, rect.min.y + 5.0), Align2::RIGHT_TOP, "M", FontId::proportional(9.0), T.clip_rec); }
+                            else if c.solo { p.text(pos2(rect.max.x - 8.0, rect.min.y + 5.0), Align2::RIGHT_TOP, "S", FontId::proportional(9.0), T.accent_gold); }
+                        }
+
+                        if resp.clicked() {
+                            self.groove_main_focus = GrooveMainFocus::Pads;
+                            if pattern_mode { shared.groove.select_pattern(slot); }
+                            else {
+                                self.groove_sel_pad = i;
+                                shared.groove_sel_pad.store(i as u8, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                        if resp.double_clicked() && !pattern_mode {
                             let cmd = ControlCmd::LivePadOn { pad: i as u8, vel: 100 };
                             let _ = shared.trig_rx.push(cmd.encode());
                         }
@@ -3538,84 +3996,347 @@ impl SessionView {
                 });
             });
 
-            ui.separator();
+        let _ = (active, live);
+    }
 
-            // ── Columna derecha: rack de 32 patrones, bancos A/B ──
-            ui.vertical(|ui| {
-                ui.set_min_width(210.0);
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("Patrones").color(T.accent).size(12.0));
-                    if ui.selectable_label(self.groove_bank == 0, "A").clicked() { self.groove_bank = 0; }
-                    if ui.selectable_label(self.groove_bank == 1, "B").clicked() { self.groove_bank = 1; }
-                });
-                ui.add_space(2.0);
-                egui::ScrollArea::vertical().id_source("gm_rack_list")
-                    .max_height(260.0).auto_shrink([false, false]).show(ui, |ui| {
-                    for i in 0..16 {
-                        let slot = self.groove_bank * 16 + i;
-                        let tag = format!("{}{}", if slot < 16 { "A" } else { "B" }, slot % 16 + 1);
-                        let nm = if names[slot].is_empty() { "—".to_string() } else { trunc(&names[slot], 14) };
-                        let on = slot == active;
-                        let txt = format!("{} {} {}", if filled[slot] { "●" } else { "○" }, tag, nm);
-                        if ui.add(egui::Button::new(txt).fill(if on { T.accent.gamma_multiply(0.35) } else { T.panel })
-                            .min_size(vec2(196.0, 20.0))).clicked() {
-                            shared.groove.select_pattern(slot);
-                        }
-                    }
-                });
-                ui.separator();
-                ui.label(egui::RichText::new(format!("Slot {} activo", active + 1)).color(T.text_dim).size(10.0));
-                ui.add(egui::TextEdit::singleline(&mut self.groove_pat_name)
-                    .hint_text("nombre del patrón").desired_width(190.0));
-                ui.horizontal(|ui| {
-                    if ui.button("✏ Nombrar").clicked() {
-                        let n = self.groove_pat_name.clone();
-                        shared.groove.set_pattern_name(&n);
-                    }
-                    if ui.button("🗑 Vaciar").clicked() { shared.groove.clear_pattern(active); }
-                });
-                ui.separator();
-                if ui.selectable_label(pattern_mode, "Pads = patrones (PATTERN)").clicked() {
-                    shared.mk3_pattern_mode.store(!pattern_mode, std::sync::atomic::Ordering::Relaxed);
+    fn groove_pad_wave_peaks(&mut self, shared: &Arc<SessionShared>, pad: usize) -> Vec<f32> {
+        let pad = pad.min(24);
+        let slot = shared.kit.snapshot_live().get(pad).map(|l| l.slot as usize).unwrap_or(0);
+        if self.groove_wave_cache_pad[pad] == slot {
+            if let Some(c) = &self.groove_wave_cache[pad] { return (**c).clone(); }
+        }
+        let peaks = shared.caja_store.load_sample(pad, slot)
+            .map(|s| s.overview(96))
+            .unwrap_or_default();
+        self.groove_wave_cache_pad[pad] = slot;
+        self.groove_wave_cache[pad] = Some(std::sync::Arc::new(peaks.clone()));
+        peaks
+    }
+
+    fn groove_pad_detail_panel(&mut self, ui: &mut egui::Ui, shared: &Arc<SessionShared>) {
+        use caja_core::pieces::{PAD_ORDER, PIECES};
+        let pad = self.groove_sel_pad.min(24);
+        let pc = PAD_ORDER[pad];
+        let note = self.groove_snap.as_ref().map(|s| s.notes[pc]).unwrap_or(36 + pad as u8);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(format!("DETALLE · {} {:02}", PIECES[pc].name, pad + 1)).size(11.0).strong().color(T.accent_gold));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.selectable_label(self.groove_detail_tab == GrooveDetailTab::Params, "PARAMS").clicked() {
+                    self.groove_detail_tab = GrooveDetailTab::Params; self.groove_main_focus = GrooveMainFocus::Detail;
+                    if !self.groove_chords { shared.groove_sub_mode.store(2, std::sync::atomic::Ordering::Relaxed); }
+                }
+                if ui.selectable_label(self.groove_detail_tab == GrooveDetailTab::Chord, "SAMPLES").clicked() {
+                    self.groove_detail_tab = GrooveDetailTab::Chord; self.groove_main_focus = GrooveMainFocus::Detail;
                 }
             });
         });
-
-        // ── FX globales creativos del bus Groove (fader horizontal) ──
-        ui.add_space(8.0);
+        ui.label(egui::RichText::new(format!("Pieza {} · nota MIDI {}", pc, note)).size(10.0).color(T.text_dim));
         ui.separator();
-        ui.label(egui::RichText::new("FX GLOBALES · bus Groove").color(T.accent_gold).size(12.0).strong());
-        let (mut fx_pitch, mut fx_filter, mut fx_perform) = {
-            let st = shared.state.lock().unwrap();
-            (st.groove_fx_pitch, st.groove_fx_filter, st.groove_fx_perform)
-        };
-        let mut cmds: Vec<ControlCmd> = Vec::new();
-        egui::Grid::new("gm_global_fx").num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
-            ui.label(egui::RichText::new("PITCH").size(11.0).color(T.text_bright));
-            let pitch_txt = if fx_pitch < 0.48 { "Tape stop" } else if fx_pitch > 0.52 { "Varispeed +" } else { "Neutro" };
-            let r = ui.add(egui::Slider::new(&mut fx_pitch, 0.0..=1.0).text(pitch_txt).show_value(false));
-            if r.changed() { cmds.push(ControlCmd::SetGrooveFxPitch { value: fx_pitch }); }
-            if r.double_clicked() { fx_pitch = 0.5; cmds.push(ControlCmd::SetGrooveFxPitch { value: 0.5 }); }
-            ui.end_row();
 
-            ui.label(egui::RichText::new("MOD").size(11.0).color(T.text_bright));
-            let filt_txt = if fx_filter < 0.48 { "LPF" } else if fx_filter > 0.52 { "HPF" } else { "Neutro" };
-            let r = ui.add(egui::Slider::new(&mut fx_filter, 0.0..=1.0).text(filt_txt).show_value(false));
-            if r.changed() { cmds.push(ControlCmd::SetGrooveFxFilter { value: fx_filter }); }
-            if r.double_clicked() { fx_filter = 0.5; cmds.push(ControlCmd::SetGrooveFxFilter { value: 0.5 }); }
-            ui.end_row();
-
-            ui.label(egui::RichText::new("PERFORM").size(11.0).color(T.text_bright));
-            let perf_txt = if fx_perform < 0.01 { "Off" } else if fx_perform < 0.34 { "Delay 1/8" } else if fx_perform < 0.67 { "Delay 1/16" } else { "Stutter 1/32" };
-            let r = ui.add(egui::Slider::new(&mut fx_perform, 0.0..=1.0).text(perf_txt).show_value(false));
-            if r.changed() { cmds.push(ControlCmd::SetGrooveFxPerform { value: fx_perform }); }
-            if r.double_clicked() { fx_perform = 0.0; cmds.push(ControlCmd::SetGrooveFxPerform { value: 0.0 }); }
-            ui.end_row();
+        match self.groove_detail_tab {
+            GrooveDetailTab::Chord => {
+                self.inspector_focus = InspectorFocus::GroovePad;
+                self.inspector_groove_chords(ui, shared);
+            }
+            GrooveDetailTab::Params => {
+                self.inspector_focus = InspectorFocus::GrooveMixer;
+                self.inspector_groove_cell(ui, shared);
+            }
+        }
+        ui.add_space(6.0);
+        ui.small_button("Editar en Inspector").on_hover_text("El inspector global se conserva como acceso paralelo").clicked().then(|| {
+            self.windows.inspector_visible = true;
+            self.inspector_focus = if self.groove_detail_tab == GrooveDetailTab::Params { InspectorFocus::GrooveMixer } else { InspectorFocus::GroovePad };
         });
-        for c in cmds { shared.apply_control(c); }
-        ui.label(egui::RichText::new("PITCH: tape stop/varispeed · MOD: filtro resonante LPF↔HPF · PERFORM: delay/stutter sync").size(9.0).color(T.text_dim));
     }
 
+    fn groove_embedded_sample_editor(&mut self, ui: &mut egui::Ui, shared: &Arc<SessionShared>) {
+        use lanzadera_engine::sample_edit::SampleOp;
+        use caja_core::pieces::{PAD_ORDER, PIECES};
+        let pad = self.groove_sel_pad.min(24);
+        let pc = PAD_ORDER[pad];
+        let slot = shared.kit.snapshot_live().get(pad).map(|l| l.slot as usize).unwrap_or(0).min(7);
+        if self.groove_sample_pad != pad || self.groove_sample_slot != slot {
+            self.groove_sample_pad = pad;
+            self.groove_sample_slot = slot;
+            self.groove_sample_zoom = 1.0;
+            self.groove_sample_scroll = 0.0;
+            self.groove_sample_sel = None;
+            self.groove_sample_msg.clear();
+        }
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("EDITOR DE MUESTRA").size(11.0).strong().color(T.accent_gold));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(egui::RichText::new(format!("{} · slot {}/8", PIECES[pc].name, slot + 1)).size(10.0).color(T.text_dim));
+            });
+        });
+        ui.add_space(4.0);
+
+        let sample = shared.caja_store.load_sample(pad, slot);
+        let Some(sd) = sample else {
+            ui.label(egui::RichText::new("No hay muestra cargada en este slot.").color(T.text_dim));
+            ui.label(egui::RichText::new("Usa SAMPLES para asignar/cargar muestras en este pad.").size(10.0).color(T.text_dim));
+            return;
+        };
+
+        let _ch = if sd.right.is_some() { 2usize } else { 1usize };
+        let frames = sd.len();
+        if frames == 0 { ui.label("Muestra vacía."); return; }
+        // Los samples de caja no guardan sample_rate; asumimos 44100 para UI.
+        let sample_rate = 44100.0f64;
+        let secs = frames as f64 / sample_rate;
+
+        let mut op: Option<SampleOp> = None;
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Zoom");
+            ui.add_sized(vec2(90.0, 18.0), egui::Slider::new(&mut self.groove_sample_zoom, 1.0..=64.0).logarithmic(true).show_value(false));
+            if ui.button("Ver todo").clicked() { self.groove_sample_zoom = 1.0; self.groove_sample_scroll = 0.0; }
+            ui.separator();
+            ui.label("Gain");
+            ui.add_sized(vec2(110.0, 18.0), egui::Slider::new(&mut self.groove_sample_gain_db, -24.0..=24.0).suffix(" dB"));
+            if ui.button("Aplicar").clicked() { op = Some(SampleOp::Gain((10.0f32).powf(self.groove_sample_gain_db / 20.0))); }
+            if ui.button("Norm").clicked() { op = Some(SampleOp::Normalize); }
+            if ui.button("Rev").clicked() { op = Some(SampleOp::Reverse); }
+        });
+
+        let sel_range = self.groove_sample_sel.map(|(a,b)|(a.min(b), a.max(b))).filter(|(a,b)| b-a > 0.001);
+        ui.horizontal_wrapped(|ui| {
+            match sel_range {
+                Some((lo, hi)) => {
+                    ui.label(egui::RichText::new(format!("{:.2}-{:.2}s", lo * secs as f32, hi * secs as f32)).size(10.0).color(T.text_dim));
+                    if ui.button("Silenciar").clicked() { op = Some(SampleOp::Silence(lo, hi)); }
+                    if ui.button("Fade in").clicked() { op = Some(SampleOp::FadeIn(lo, hi)); }
+                    if ui.button("Fade out").clicked() { op = Some(SampleOp::FadeOut(lo, hi)); }
+                    if ui.button("Loop start").clicked() { self.groove_sample_msg = format!("Selección inicio: {:.3}s (loop clip solo en Clip Launch)", lo * secs as f32); }
+                }
+                None => { ui.label(egui::RichText::new("Arrastra sobre la onda para seleccionar").size(10.0).color(T.text_dim)); }
+            }
+        });
+
+        let zoom = self.groove_sample_zoom.clamp(1.0, 64.0);
+        let span = 1.0 / zoom;
+        self.groove_sample_scroll = self.groove_sample_scroll.clamp(0.0, (1.0 - span).max(0.0));
+        let a = self.groove_sample_scroll;
+        let b = (a + span).min(1.0);
+        // Más compacto/casi cuadrado: que el panel derecho tenga más protagonismo.
+        let w = ui.available_width().max(80.0);
+        let h = w.clamp(120.0, 220.0);
+        let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click_and_drag());
+        if resp.hovered() {
+            let dy = ui.input(|i| i.raw_scroll_delta.y);
+            if dy.abs() > 0.5 {
+                let px = resp.hover_pos().map(|p| ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0)).unwrap_or(0.5);
+                let focus = a + px * span;
+                let nz = (zoom * (1.0 + dy * 0.002)).clamp(1.0, 64.0);
+                let nspan = 1.0 / nz;
+                self.groove_sample_zoom = nz;
+                self.groove_sample_scroll = (focus - px * nspan).clamp(0.0, (1.0 - nspan).max(0.0));
+            }
+        }
+        let frac = |x: f32| (a + ((x - rect.left()) / rect.width()).clamp(0.0, 1.0) * span).clamp(0.0, 1.0);
+        if resp.drag_started() {
+            if let Some(p) = resp.interact_pointer_pos() { let f = frac(p.x); self.groove_sample_sel = Some((f, f)); }
+        }
+        if resp.dragged() {
+            if let (Some(p), Some((s0, _))) = (resp.interact_pointer_pos(), self.groove_sample_sel) { self.groove_sample_sel = Some((s0, frac(p.x))); }
+        }
+        if resp.double_clicked() { self.groove_sample_sel = None; }
+
+        let f0 = ((a * frames as f32) as usize).min(frames.saturating_sub(1));
+        let f1 = (((b * frames as f32) as usize).max(f0 + 1)).min(frames);
+        let cols = (rect.width() as usize).clamp(1, 2048);
+        let mut peaks = vec![0.0f32; cols];
+        let view_frames = (f1 - f0).max(1);
+        let right = sd.right.as_deref();
+        for i in 0..cols {
+            let sa = f0 + i * view_frames / cols;
+            let sb = (f0 + (i + 1) * view_frames / cols).max(sa + 1).min(f1);
+            let mut m = 0.0f32;
+            for j in sa..sb {
+                let mut v = sd.left.get(j).copied().unwrap_or(0.0).abs();
+                if let Some(r) = right { v = v.max(r.get(j).copied().unwrap_or(0.0).abs()); }
+                if v > m { m = v; }
+            }
+            peaks[i] = m.clamp(0.0, 1.0);
+        }
+        let p = ui.painter_at(rect);
+        crate::waveform::paint(&p, rect, &peaks, None, &crate::waveform::WaveStyle::default());
+        if let Some((s0, s1)) = self.groove_sample_sel {
+            let lo = s0.min(s1); let hi = s0.max(s1);
+            let x0 = rect.left() + ((lo - a) / span).clamp(0.0, 1.0) * rect.width();
+            let x1 = rect.left() + ((hi - a) / span).clamp(0.0, 1.0) * rect.width();
+            if x1 > x0 {
+                p.rect_filled(Rect::from_min_max(pos2(x0, rect.top()), pos2(x1, rect.bottom())), 0.0, Color32::from_rgba_unmultiplied(120, 190, 255, 45));
+            }
+        }
+
+        if zoom > 1.01 {
+            ui.add(egui::Slider::new(&mut self.groove_sample_scroll, 0.0..=(1.0 - span).max(0.001)).show_value(false));
+        }
+        if !self.groove_sample_msg.is_empty() {
+            ui.label(egui::RichText::new(&self.groove_sample_msg).size(10.0).color(T.accent));
+        }
+
+        if let Some(op) = op {
+            self.groove_sample_msg = match self.apply_groove_sample_op(shared, pad, slot, op, sample_rate as u32) {
+                Ok(m) => m,
+                Err(e) => format!("⚠ {}", e),
+            };
+        }
+    }
+
+    fn apply_groove_sample_op(&mut self, shared: &Arc<SessionShared>, pad: usize, slot: usize, op: lanzadera_engine::sample_edit::SampleOp, sample_rate: u32) -> Result<String, String> {
+        use lanzadera_engine::sample_edit::SampleOp;
+        let sd = shared.caja_store.load_sample(pad, slot).ok_or("No hay muestra cargada")?;
+        let ch = if sd.right.is_some() { 2usize } else { 1usize };
+        let frames = sd.len();
+        if frames == 0 { return Err("Muestra vacía".into()); }
+        let mut data = Vec::with_capacity(frames * ch);
+        for i in 0..frames {
+            data.push(sd.left.get(i).copied().unwrap_or(0.0));
+            if ch == 2 { data.push(sd.right.as_ref().and_then(|r| r.get(i).copied()).unwrap_or(0.0)); }
+        }
+        fn range_frames(lo: f32, hi: f32, frames: usize) -> (usize, usize) {
+            let a = (lo.clamp(0.0, 1.0) * frames as f32) as usize;
+            let b = (hi.clamp(0.0, 1.0) * frames as f32) as usize;
+            (a.min(b), b.max(a))
+        }
+        match op {
+            SampleOp::Gain(g) => for v in &mut data { *v *= g; },
+            SampleOp::Normalize => {
+                let peak = data.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+                if peak < 1e-6 { return Err("La muestra es silencio".into()); }
+                let g = 0.99 / peak;
+                for v in &mut data { *v *= g; }
+            }
+            SampleOp::Reverse => {
+                for f in 0..frames/2 {
+                    let a = f*ch; let b = (frames-1-f)*ch;
+                    for c in 0..ch { data.swap(a+c, b+c); }
+                }
+            }
+            SampleOp::Silence(lo, hi) => { let (a,b)=range_frames(lo,hi,frames); if b<=a {return Err("Selección vacía".into());} for f in a..b { for c in 0..ch { data[f*ch+c]=0.0; } } }
+            SampleOp::FadeIn(lo, hi) => { let (a,b)=range_frames(lo,hi,frames); if b<=a {return Err("Selección vacía".into());} let n=(b-a) as f32; for f in a..b { let g=(f-a) as f32/n; for c in 0..ch { data[f*ch+c]*=g; } } }
+            SampleOp::FadeOut(lo, hi) => { let (a,b)=range_frames(lo,hi,frames); if b<=a {return Err("Selección vacía".into());} let n=(b-a) as f32; for f in a..b { let g=1.0-(f-a) as f32/n; for c in 0..ch { data[f*ch+c]*=g; } } }
+            SampleOp::Trim(_, _) => return Err("Trim no disponible en editor embebido de Groove".into()),
+        }
+
+        let dir = std::path::PathBuf::from("/tmp/lanzadera_groove_edits");
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let mut dest = dir.join(format!("pad{}_slot{}_edit.wav", pad, slot));
+        let mut n = 1;
+        while dest.exists() { dest = dir.join(format!("pad{}_slot{}_edit{}.wav", pad, slot, n)); n += 1; }
+        let spec = hound::WavSpec { channels: ch as u16, sample_rate, bits_per_sample: 32, sample_format: hound::SampleFormat::Float };
+        let mut w = hound::WavWriter::create(&dest, spec).map_err(|e| e.to_string())?;
+        for v in &data { w.write_sample(*v).map_err(|e| e.to_string())?; }
+        w.finalize().map_err(|e| e.to_string())?;
+
+        let (left, right) = if ch == 2 {
+            let mut l = Vec::with_capacity(frames);
+            let mut r = Vec::with_capacity(frames);
+            for f in 0..frames { l.push(data[f*2]); r.push(data[f*2+1]); }
+            (l, Some(r))
+        } else {
+            (data, None)
+        };
+        let sample = std::sync::Arc::new(lanzadera_engine::caja_drums::sample::Sample { left, right });
+        shared.caja_store.store_sample(pad, slot, sample);
+        self.groove_wave_cache[pad] = None;
+        Ok(format!("Aplicado en pad {} slot {}", pad + 1, slot + 1))
+    }
+
+    fn groove_rack_strip(&mut self, ui: &mut egui::Ui, shared: &Arc<SessionShared>) {
+        use caja_core::pieces::{PAD_ORDER, PIECES};
+        use caja_core::pattern::STEPS_PER_BAR;
+        let (pattern, notes, active, bars) = match &self.groove_snap {
+            Some(s) => (s.pattern.clone(), s.notes, s.active, s.pattern.bars.max(1)),
+            None => return,
+        };
+        let total_steps = pattern.steps();
+        let per_page = 1usize;
+        let pages = bars.div_ceil(per_page).max(1);
+        self.groove_bar = self.groove_bar.min(pages.saturating_sub(1));
+        let abs_step_now = shared.caja_sched.current_abs_step.load(std::sync::atomic::Ordering::Relaxed);
+        let playing = groove_head(shared) != 255;
+        if self.groove_follow_playhead && playing && abs_step_now != u32::MAX {
+            self.groove_bar = (abs_step_now as usize / STEPS_PER_BAR).min(pages.saturating_sub(1));
+        }
+        let first = (self.groove_bar * per_page * STEPS_PER_BAR).min(total_steps.saturating_sub(1));
+        let cols = STEPS_PER_BAR.min(total_steps.saturating_sub(first));
+
+        self.groove_bar = self.groove_bar.min(pages.saturating_sub(1));
+        shared.groove_bar.store(self.groove_bar, std::sync::atomic::Ordering::Relaxed);
+        shared.groove_follow_playhead.store(self.groove_follow_playhead, std::sync::atomic::Ordering::Relaxed);
+        shared.mk3_follow_playhead.store(self.groove_follow_playhead, std::sync::atomic::Ordering::Relaxed);
+
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("RACK / PATRÓN").size(11.0).strong().color(T.accent_gold));
+            ui.label(egui::RichText::new(format!("Slot {}", active + 1)).size(10.0).color(T.text_dim));
+            ui.separator();
+            if ui.selectable_label(self.groove_follow_playhead, "Seguir").clicked() {
+                self.groove_follow_playhead = true;
+            }
+            if ui.selectable_label(!self.groove_follow_playhead, "Editar").clicked() {
+                self.groove_follow_playhead = false;
+            }
+            ui.add_enabled_ui(!self.groove_follow_playhead, |ui| {
+                if ui.small_button("◀").clicked() { self.groove_bar = self.groove_bar.saturating_sub(1); shared.groove_bar.store(self.groove_bar, std::sync::atomic::Ordering::Relaxed); }
+                ui.label(egui::RichText::new(format!("Bar {}/{}", self.groove_bar + 1, pages)).size(10.0));
+                if ui.small_button("▶").clicked() { self.groove_bar = (self.groove_bar + 1).min(pages - 1); shared.groove_bar.store(self.groove_bar, std::sync::atomic::Ordering::Relaxed); }
+            });
+            if ui.small_button("↻").on_hover_text("Ir al compás actual").clicked() {
+                let abs_step_now = shared.caja_sched.current_abs_step.load(std::sync::atomic::Ordering::Relaxed);
+                if abs_step_now != u32::MAX {
+                    self.groove_bar = (abs_step_now as usize / STEPS_PER_BAR).min(pages.saturating_sub(1));
+                    shared.groove_bar.store(self.groove_bar, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            ui.separator();
+            let sel_pad = self.groove_sel_pad.min(PAD_ORDER.len() - 1);
+            ui.label(egui::RichText::new(PIECES[PAD_ORDER[sel_pad]].name).size(10.0).color(PAD_PALETTE[sel_pad % PAD_PALETTE.len()]));
+            if ui.button("Abrir Step").clicked() { self.groove_tab = GrooveScreenTab::Step; self.groove_main_focus = GrooveMainFocus::Rack; }
+        });
+
+        let sel_pad = self.groove_sel_pad.min(PAD_ORDER.len() - 1);
+        let row_h = 34.0f32;
+        let name_w = 86.0;
+        let avail_w = (ui.available_width() - name_w - 12.0).max(80.0);
+        let cw = (avail_w / cols.max(1) as f32).floor().max(14.0);
+        let (outer, _) = ui.allocate_exact_size(vec2(name_w + cw * cols as f32 + 4.0, row_h + 4.0), Sense::hover());
+        let paint = ui.painter_at(outer);
+        let x0 = outer.min.x + name_w;
+        let y0 = outer.min.y;
+        let pc = PAD_ORDER[sel_pad];
+        let hue = PAD_PALETTE[sel_pad % PAD_PALETTE.len()];
+        paint.text(pos2(outer.min.x + 4.0, y0 + row_h * 0.5), Align2::LEFT_CENTER, trunc(PIECES[pc].name, 12), FontId::proportional(10.0), hue);
+        paint.text(pos2(outer.min.x + name_w - 6.0, y0 + row_h * 0.5), Align2::RIGHT_CENTER, format!("{}", notes[pc]), FontId::proportional(9.0), T.text_dim);
+        for c in 0..cols {
+            let st = first + c;
+            if st >= total_steps { break; }
+            let cell = pattern.cell[pc][st];
+            let slot = Rect::from_min_size(pos2(x0 + c as f32 * cw + 1.0, y0 + 1.0), vec2(cw - 2.0, row_h - 2.0));
+            let is_active = playing && abs_step_now != u32::MAX && abs_step_now as usize == st;
+            paint.rect_filled(slot, 2.0, if is_active { T.accent.gamma_multiply(0.18) } else { T.panel });
+            if cell.on() {
+                let h = (slot.height() * f32::from(cell.vel) / 127.0).max(3.0);
+                let bar = Rect::from_min_max(pos2(slot.min.x, slot.max.y - h), slot.max);
+                if cell.ghost { paint.rect_stroke(bar, 2.0, Stroke::new(1.5, hue)); } else { paint.rect_filled(bar, 2.0, hue); }
+            }
+            if st % STEPS_PER_BAR == 0 {
+                paint.rect_filled(Rect::from_min_size(pos2(x0 + c as f32 * cw - 1.0, y0), vec2(2.0, row_h)), 0.0, T.text_dim.gamma_multiply(0.6));
+            }
+        }
+        if playing && abs_step_now != u32::MAX {
+            let abs = abs_step_now as usize;
+            if abs >= first && abs < first + cols {
+                let hx = x0 + (abs - first) as f32 * cw;
+                paint.rect_filled(Rect::from_min_size(pos2(hx, y0), vec2(cw, row_h)), 0.0, T.accent_green.gamma_multiply(0.10));
+            }
+        }
+    }
+
+    #[allow(dead_code)]
     fn groove_mixer_tab(&mut self, ui: &mut egui::Ui, shared: &Arc<SessionShared>) {
         use caja_core::pieces::{PAD_ORDER, PIECES};
 
@@ -4022,16 +4743,25 @@ impl SessionView {
 
     fn global_browser_window(&mut self, ctx: &egui::Context, shared: &Arc<SessionShared>) {
         let mut open = self.windows.browser_visible;
+        let apply_layout = self.window_layout_apply_frames > 0;
+        let default_sz = egui::vec2(560.0, 560.0);
+        let saved_sz = self.windows.browser_size.filter(|s| s.x > 100.0 && s.y > 100.0);
 
         let mut win = egui::Window::new("📁 Browser")
             .open(&mut open)
             .constrain(false)
             .max_size([8000.0, 8000.0])
-            .default_size(self.windows.browser_size.unwrap_or(egui::vec2(560.0, 560.0)))
             .min_size([420.0, 360.0])
             .resizable(true)
             .frame(Self::window_frame());
-        if let Some(p) = self.windows.browser_pos { win = win.default_pos(p); }
+        if apply_layout {
+            if let Some(s) = saved_sz { win = win.fixed_size(s); }
+            else { win = win.default_size(default_sz); }
+            if let Some(p) = self.windows.browser_pos { win = win.current_pos(p); }
+        } else {
+            win = win.default_size(saved_sz.unwrap_or(default_sz));
+            if let Some(p) = self.windows.browser_pos { win = win.default_pos(p); }
+        }
         let resp = win.show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(&mut self.browser_tab, BrowserTab::Files, "📂 Directorio");
@@ -4049,9 +4779,14 @@ impl SessionView {
             }
         });
 
-        if let Some(r) = resp {
-            self.windows.browser_pos = Some(r.response.rect.min);
-            self.windows.browser_size = Some(r.response.rect.size());
+        if resp.is_some() {
+            let rect = ctx.memory(|mem| mem.area_rect(egui::Id::new("📁 Browser")));
+            if let Some(r) = rect {
+                self.windows.browser_pos = Some(r.min);
+                if !apply_layout || self.window_layout_apply_frames == 1 {
+                    self.windows.browser_size = Some(r.size());
+                }
+            }
         }
         self.windows.browser_visible = open;
     }
@@ -4260,16 +4995,25 @@ impl SessionView {
 
     fn global_inspector_window(&mut self, ctx: &egui::Context, shared: &Arc<SessionShared>) {
         let mut open = self.windows.inspector_visible;
+        let apply_layout = self.window_layout_apply_frames > 0;
+        let default_sz = egui::vec2(300.0, 560.0);
+        let saved_sz = self.windows.inspector_size.filter(|s| s.x > 100.0 && s.y > 100.0);
 
         let mut win = egui::Window::new("🔍 Inspector")
             .open(&mut open)
             .constrain(false)
             .max_size([8000.0, 8000.0])
-            .default_size(self.windows.inspector_size.unwrap_or(egui::vec2(300.0, 560.0)))
             .min_size([240.0, 320.0])
             .resizable(true)
             .frame(Self::window_frame());
-        if let Some(p) = self.windows.inspector_pos { win = win.default_pos(p); }
+        if apply_layout {
+            if let Some(s) = saved_sz { win = win.fixed_size(s); }
+            else { win = win.default_size(default_sz); }
+            if let Some(p) = self.windows.inspector_pos { win = win.current_pos(p); }
+        } else {
+            win = win.default_size(saved_sz.unwrap_or(default_sz));
+            if let Some(p) = self.windows.inspector_pos { win = win.default_pos(p); }
+        }
         let resp = win.show(ctx, |ui| {
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                 // El inspector sigue el FOCO, no la visibilidad de la ventana GM.
@@ -4281,20 +5025,25 @@ impl SessionView {
                     InspectorFocus::Clip | InspectorFocus::Track => false,
                     _ => self.windows.groove_machine_visible,
                 };
-                if groove_focused
-                    && shared.groove_sub_mode.load(std::sync::atomic::Ordering::Relaxed) == 3
-                {
-                    // CHORDS: inspector de biblioteca (dado, locks, muestra).
-                    self.inspector_groove_chords(ui, shared);
-                } else if groove_focused {
-                    match self.groove_tab {
-                        GrooveTab::Pad => self.inspector_groove_pad(ui, shared),
-                        GrooveTab::Mixer => self.inspector_groove_cell(ui, shared),
-                        GrooveTab::Step => {
-                            if self.groove_view == 1 || self.groove_event {
-                                self.inspector_groove_cell(ui, shared);
-                            } else {
-                                self.inspector_groove_step(ui, shared);
+                if groove_focused {
+                    if self.groove_chords || shared.groove_sub_mode.load(std::sync::atomic::Ordering::Relaxed) == 3 {
+                        self.inspector_groove_chords(ui, shared);
+                        ui.separator();
+                        self.inspector_groove_cell(ui, shared);
+                    } else {
+                        match self.groove_tab {
+                            GrooveScreenTab::Main => {
+                                match self.groove_detail_tab {
+                                    GrooveDetailTab::Chord => self.inspector_groove_chords(ui, shared),
+                                    GrooveDetailTab::Params => self.inspector_groove_cell(ui, shared),
+                                }
+                            }
+                            GrooveScreenTab::Step => {
+                                if self.groove_view == 1 || self.groove_event {
+                                    self.inspector_groove_cell(ui, shared);
+                                } else {
+                                    self.inspector_groove_step(ui, shared);
+                                }
                             }
                         }
                     }
@@ -4306,31 +5055,50 @@ impl SessionView {
                 });
             });
 
-        if let Some(r) = resp {
-            self.windows.inspector_pos = Some(r.response.rect.min);
-            self.windows.inspector_size = Some(r.response.rect.size());
+        if resp.is_some() {
+            let rect = ctx.memory(|mem| mem.area_rect(egui::Id::new("🔍 Inspector")));
+            if let Some(r) = rect {
+                self.windows.inspector_pos = Some(r.min);
+                if !apply_layout || self.window_layout_apply_frames == 1 {
+                    self.windows.inspector_size = Some(r.size());
+                }
+            }
         }
         self.windows.inspector_visible = open;
     }
 
     fn mixer_window(&mut self, ctx: &egui::Context, shared: &Arc<SessionShared>, audio_on: bool) {
         let mut open = self.windows.mixer_visible;
+        let apply_layout = self.window_layout_apply_frames > 0;
+        let default_sz = egui::vec2(900.0, 260.0);
+        let saved_sz = self.windows.mixer_size.filter(|s| s.x > 100.0 && s.y > 100.0);
 
         let mut win = egui::Window::new("🎚 Mixer")
             .open(&mut open)
             .constrain(false)
             .max_size([8000.0, 8000.0])
-            .default_size(self.windows.mixer_size.unwrap_or(egui::vec2(900.0, 260.0)))
             .min_size([420.0, 160.0])
             .resizable(true)
             .frame(Self::window_frame());
-        if let Some(p) = self.windows.mixer_pos { win = win.default_pos(p); }
+        if apply_layout {
+            if let Some(s) = saved_sz { win = win.fixed_size(s); }
+            else { win = win.default_size(default_sz); }
+            if let Some(p) = self.windows.mixer_pos { win = win.current_pos(p); }
+        } else {
+            win = win.default_size(saved_sz.unwrap_or(default_sz));
+            if let Some(p) = self.windows.mixer_pos { win = win.default_pos(p); }
+        }
         let resp = win.show(ctx, |ui| {
             self.mixer(ui, shared, audio_on);
         });
-        if let Some(r) = resp {
-            self.windows.mixer_pos = Some(r.response.rect.min);
-            self.windows.mixer_size = Some(r.response.rect.size());
+        if resp.is_some() {
+            let rect = ctx.memory(|mem| mem.area_rect(egui::Id::new("🎚 Mixer")));
+            if let Some(r) = rect {
+                self.windows.mixer_pos = Some(r.min);
+                if !apply_layout || self.window_layout_apply_frames == 1 {
+                    self.windows.mixer_size = Some(r.size());
+                }
+            }
         }
 
         self.windows.mixer_visible = open;
@@ -4519,6 +5287,7 @@ impl SessionView {
 // ════════════════════════════════════════════════════════════════════════
 
 impl SessionView {
+    #[allow(dead_code)]
     fn inspector_groove_pad(&mut self, ui: &mut egui::Ui, _shared: &Arc<SessionShared>) {
         use caja_core::pieces::{PAD_ORDER, PIECES};
         use lanzadera_engine::caja_drums::library_state;
@@ -4734,10 +5503,13 @@ impl SessionView {
         ui.separator();
 
         // ── Muestras asignadas a este pad ──
-        let lib = library_state::shared();
-        let g = lib.lock().unwrap_or_else(|e| e.into_inner());
-        let cell = g.lib.cells.get(pad).cloned().unwrap_or_default();
-        let loaded = g.loaded.get(pad).copied().unwrap_or(0);
+        let (cell, loaded) = {
+            let lib = library_state::shared();
+            let g = lib.lock().unwrap_or_else(|e| e.into_inner());
+            let cell = g.lib.cells.get(pad).cloned().unwrap_or_default();
+            let loaded = g.loaded.get(pad).copied().unwrap_or(0);
+            (cell, loaded)
+        };
         ui.label(egui::RichText::new(format!("Muestras · {} cargadas de {}", loaded, cell.len()))
             .color(T.accent).size(12.0));
         egui::ScrollArea::vertical().id_source("gm_cell_samples")
@@ -4778,26 +5550,84 @@ impl SessionView {
         let pin_label = c.pin.as_deref().unwrap_or("(ninguna)").to_string();
         ui.label(egui::RichText::new(trunc(&pin_label, 28)).color(T.text_dim).size(10.0));
         if ui.button("Fijar la muestra actual").clicked() {
-            // Toma la muestra del slot activo como pin
-            let lib = lanzadera_engine::caja_drums::library_state::shared();
-            let g = lib.lock().unwrap_or_else(|e| e.into_inner());
-            let cell = g.lib.cells.get(pad).cloned().unwrap_or_default();
-            if let Some(rel) = cell.get(slot) {
+            if let Some(rel) = cell.get(slot).cloned() {
+                // Aplicar inmediatamente en RT/store; persistencia en background para no congelar UI.
                 kit.set_pin(pad, Some(rel.clone()));
+                kit.set_lock(pad, caja_core::kit::P_SAMPLE, true);
+                _shared.caja_store.pin_idx[pad].store(slot as i32, std::sync::atomic::Ordering::Relaxed);
+                _shared.caja_store.pin_missing[pad].store(false, std::sync::atomic::Ordering::Relaxed);
+                let rel_bg = rel.clone();
+                std::thread::spawn(move || {
+                    let lib = lanzadera_engine::caja_drums::library_state::shared();
+                    let mut g = lib.lock().unwrap_or_else(|e| e.into_inner());
+                    g.set_pin(pad, Some((slot, rel_bg)));
+                    g.save();
+                });
+                self.msg = format!("Muestra fijada: {}", rel);
+            } else {
+                self.msg = "No hay muestra actual para fijar".to_string();
             }
         }
         if c.pin.is_some() && ui.button("Desbloquear").clicked() {
             kit.set_pin(pad, None);
+            kit.set_lock(pad, caja_core::kit::P_SAMPLE, false);
+            _shared.caja_store.pin_idx[pad].store(-1, std::sync::atomic::Ordering::Relaxed);
+            _shared.caja_store.pin_missing[pad].store(false, std::sync::atomic::Ordering::Relaxed);
+            std::thread::spawn(move || {
+                let lib = lanzadera_engine::caja_drums::library_state::shared();
+                let mut g = lib.lock().unwrap_or_else(|e| e.into_inner());
+                g.set_pin(pad, None);
+                g.save();
+            });
+            self.msg = "Pin quitado".to_string();
         }
 
         ui.separator();
-        // ── Síntesis (pendiente de portar ParamCfg de Caja) ──
+        // ── Cambio de muestra por celda ──
+        ui.label(egui::RichText::new("Cambio de muestra").color(T.accent).size(12.0));
+        ui.horizontal_wrapped(|ui| {
+            for (bars, lbl) in [(0u8, "Al toque"), (1, "1c"), (2, "2c"), (3, "3c"), (4, "4c")] {
+                let on = c.rate == bars;
+                if ui.add(egui::Button::new(lbl).fill(if on { T.accent } else { T.panel }))
+                    .on_hover_text(if bars == 0 { "Cambia en cada golpe".to_string() } else { format!("Cada {} compases", bars) })
+                    .clicked()
+                {
+                    kit.set_rate(pad, bars);
+                }
+            }
+        });
+
+        ui.separator();
+        // ── Síntesis por celda ──
         ui.label(egui::RichText::new("Síntesis por celda").color(T.accent).size(12.0));
-        for lbl in ["Pitch (semitonos)", "Decay (ms)", "Filtro (HPF/LPF)"] {
-            ui.label(egui::RichText::new(format!("· {}", lbl)).color(T.text_dim).size(10.0));
+        use caja_core::kit::{ParamCfg, P_DECAY, P_FILTER, P_PITCH, P_SAMPLE};
+        use lanzadera_engine::caja_drums::engine::{cutoff_hz, decay_seconds, pitch_semitones};
+        let mut param = c.param;
+        let mut changes: Vec<(usize, ParamCfg)> = Vec::new();
+        for (idx, lbl) in [(P_SAMPLE, "Muestra"), (P_PITCH, "Pitch"), (P_DECAY, "Decay"), (P_FILTER, "Filtro")] {
+            let center = param[idx].base as f32 / 1000.0;
+            let readout = match idx {
+                P_SAMPLE => format!("{}% banco", (param[idx].range / 10).max(1)),
+                P_PITCH => format!("{:+.1} st", pitch_semitones(center)),
+                P_DECAY => match decay_seconds(center) { Some(s) => format!("{:.0} ms", s * 1000.0), None => "sin recorte".to_string() },
+                _ => match cutoff_hz(center) { Some(h) => format!("{:.0} Hz", h), None => "abierto".to_string() },
+            };
+            ui.label(egui::RichText::new(format!("{} · {}", lbl, readout)).color(T.text_dim).size(11.0));
+            let mut base = i32::from(param[idx].base);
+            let mut range = i32::from(param[idx].range);
+            let mut prob = i32::from(param[idx].prob);
+            let mut dirty = false;
+            ui.horizontal(|ui| {
+                dirty |= ui.add(egui::Slider::new(&mut base, 0..=1000).text("base")).changed();
+                dirty |= ui.add(egui::Slider::new(&mut range, 0..=1000).text("rango")).changed();
+            });
+            dirty |= ui.add(egui::Slider::new(&mut prob, 0..=1000).text("prob ‰")).changed();
+            if dirty {
+                param[idx] = ParamCfg { base: base.clamp(0, 1000) as u16, range: range.clamp(0, 1000) as u16, prob: prob.clamp(0, 1000) as u16 };
+                changes.push((idx, param[idx]));
+            }
         }
-        ui.label(egui::RichText::new("→ se activan al portar ParamCfg de Caja")
-            .color(T.text_dim).size(9.0));
+        for (idx, pc) in changes { kit.set_param(pad, idx, pc); }
     }
 }
 
@@ -4833,7 +5663,7 @@ impl SessionView {
         let current = shared.chords_current_sample(pad);
         let bank = shared.chords_bank(pad);
 
-        ui.heading("CHORDS · Biblioteca");
+        ui.heading("SAMPLES · Biblioteca");
         ui.label(
             egui::RichText::new(format!("Pad {} · {}", pad + 1, PIECES[PAD_ORDER[pad]].name))
                 .color(T.accent)
@@ -4852,34 +5682,36 @@ impl SessionView {
                 shared.chords_all_lock();
                 self.msg = "All lock: kit congelado".to_string();
             }
-            ui.label(egui::RichText::new("Cambio de muestra").size(10.0).color(T.text_dim));
-            ui.horizontal_wrapped(|ui| {
-                for (bars, lbl) in [(0u8, "Al toque"), (1, "1c"), (2, "2c"), (3, "3c"), (4, "4c")] {
-                    let on = c.rate == bars;
-                    let tip = if bars == 0 {
-                        "Cambia la muestra en cada golpe (dado activo)".to_string()
+        });
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Cambio de muestra de la celda").color(T.accent).size(12.0));
+        ui.label(egui::RichText::new("Cada cuánto re-tira el dado de muestra (por defecto 4c)").size(10.0).color(T.text_dim));
+        ui.horizontal_wrapped(|ui| {
+            for (bars, lbl) in [(0u8, "Al toque"), (1, "1c"), (2, "2c"), (3, "3c"), (4, "4c")] {
+                let on = c.rate == bars;
+                let tip = if bars == 0 {
+                    "Cambia la muestra en cada golpe (dado activo)".to_string()
+                } else {
+                    format!("Re-tirar el dado cada {} compases", bars)
+                };
+                if ui.add(egui::Button::new(lbl).fill(if on { T.accent } else { T.panel }))
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    shared.kit.set_rate(pad, bars);
+                    self.msg = if bars == 0 {
+                        "Muestra: al toque".to_string()
                     } else {
-                        format!("Re-tirar el dado cada {} compases", bars)
+                        format!("Muestra: cambia cada {} compases", bars)
                     };
-                    if ui.add(egui::Button::new(lbl).fill(if on { T.accent } else { T.panel }))
-                        .on_hover_text(tip)
-                        .clicked()
-                    {
-                        shared.kit.set_rate(pad, bars);
-                        self.msg = if bars == 0 {
-                            "Muestra: al toque".to_string()
-                        } else {
-                            format!("Muestra: cambia cada {} compases", bars)
-                        };
-                    }
-                }
-            });
-            if ui.button("💥 Todos golpe").clicked() {
-                for p in 0..lanzadera_engine::groove_kit::NUM_CELLS as u8 {
-                    shared.apply_control(ControlCmd::LivePadOn { pad: p, vel: 100 });
                 }
             }
         });
+        if ui.button("💥 Todos golpe").clicked() {
+            for p in 0..lanzadera_engine::groove_kit::NUM_CELLS as u8 {
+                shared.apply_control(ControlCmd::LivePadOn { pad: p, vel: 100 });
+            }
+        }
 
         ui.separator();
 

@@ -673,13 +673,16 @@ impl Renderer {
         self.rec_on = rec_live;
         if !audio.recording { self.rec_clip = None; }
 
-        // Si acaba de abrirse la puerta de captura, detener de inmediato el
-        // clip que estuviera sonando en esa pista. Sin esto, SessionState
-        // pone el nuevo clip en Recording pero el motor sigue con la voz
-        // anterior. Regla "una pista, una voz", inspirada en MAGDA (GPL-3).
-        // Además fijamos el origen de ticks para que las notas entren en 0.1.
+        // Fijar origen de ticks al armar la grabación. La parada del clip
+        // anterior solo ocurre cuando la puerta de captura se abre realmente
+        // (rec_live), no durante el count-in/RecQueued: así se mantiene la
+        // fluidez en vivo mientras se espera el 1.1 de grabación.
+        if armed_now {
+            let now = self.engine.global_ticks();
+            self.rec_origin_ticks = if rec_q > 0 { (now / rec_q as u64) * rec_q as u64 } else { now };
+        }
         let mut force_stop_track: Option<usize> = None;
-        if (rec_live && !old_rec_on) || armed_now {
+        if rec_live && !old_rec_on {
             force_stop_track = Some(audio.rec_track as usize);
             let now = self.engine.global_ticks();
             self.rec_origin_ticks = if rec_q > 0 { (now / rec_q as u64) * rec_q as u64 } else { now };
@@ -1235,15 +1238,15 @@ impl Renderer {
                 let div = if fx_perform < 0.34 { 0.5 } else if fx_perform < 0.67 { 0.25 } else { 0.125 }; // beats
                 let delay_samples = ((60.0 / bpm) * div * sr) as usize;
                 let delay_samples = delay_samples.clamp(1, 131071);
-                let send = fx_perform.clamp(0.0, 1.0) * 0.85;
-                let fb = (0.25 + fx_perform * 0.55).clamp(0.0, 0.82);
+                let send = fx_perform.clamp(0.0, 1.0) * 0.65;
+                let fb = (0.2 + fx_perform * 0.45).clamp(0.0, 0.72);
                 let mask = 131071usize;
                 for i in 0..frames {
                     let rpos = (self.groove_fx_delay_w + 131072 - delay_samples) & mask;
                     let dl = self.groove_fx_delay_l[rpos];
                     let dr = self.groove_fx_delay_r[rpos];
-                    let inl = cb_l[i] + dl * fb;
-                    let inr = cb_r[i] + dr * fb;
+                    let inl = (cb_l[i] + dl * fb).clamp(-2.0, 2.0);
+                    let inr = (cb_r[i] + dr * fb).clamp(-2.0, 2.0);
                     self.groove_fx_delay_l[self.groove_fx_delay_w] = inl;
                     self.groove_fx_delay_r[self.groove_fx_delay_w] = inr;
                     self.groove_fx_delay_w = (self.groove_fx_delay_w + 1) & mask;
@@ -1256,6 +1259,14 @@ impl Renderer {
                 for s in self.groove_fx_delay_l.iter_mut() { *s *= 0.95; if s.abs() > 1e-5 { any = true; } }
                 for s in self.groove_fx_delay_r.iter_mut() { *s *= 0.95; if s.abs() > 1e-5 { any = true; } }
                 if !any { self.groove_fx_delay_w = 0; }
+            }
+
+            // Soft clip suave post-FX para evitar clipping al mover PITCH/MOD/PERFORM.
+            for i in 0..frames {
+                let l = cb_l[i];
+                let r = cb_r[i];
+                cb_l[i] = l / (1.0 + l.abs() * 0.35);
+                cb_r[i] = r / (1.0 + r.abs() * 0.35);
             }
         }
 
@@ -1707,7 +1718,7 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
             if !has_instr && nchain.iter().any(|sl| !sl.bypass) {
                 crate::clap_gui::notify(format!("⚠ Note FX pista {}: la pista no tiene instrumento plugin; no se aplica", t + 1));
             }
-            for (i, slot) in nchain.iter().enumerate().take(crate::clap_gui::CHAIN_MAX) {
+            for (_i, slot) in nchain.iter().enumerate().take(crate::clap_gui::CHAIN_MAX) {
                 if slot.bypass || !has_instr { continue; }
                 if slot.path.trim_end_matches('/').ends_with(".vst3") {
                     crate::clap_gui::notify(format!("⚠ Note FX pista {}: los Note FX VST3 aún no se procesan; usa la versión CLAP", t + 1));
@@ -1715,6 +1726,7 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
                 }
                 #[cfg(feature = "clap")]
                 {
+                    let i = _i;
                     let gui_id = crate::clap_gui::nfx_gui_id(t, i);
                     match clap_host::load(&slot.path, slot.id.as_deref(), sample_rate, MAX_BLOCK as u32, gui_id) {
                         Ok((mut inst, proc, name, _params)) => {
@@ -1730,10 +1742,15 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
                         Err(e) => crate::clap_gui::notify(format!("⚠ Note FX {} pista {}: {}", i + 1, t + 1, e)),
                     }
                 }
+                #[cfg(not(feature = "clap"))]
+                let _ = _i;
             }
             for (i, slot) in fchain.iter().enumerate().take(crate::clap_gui::CHAIN_MAX) {
                 if slot.bypass { continue; }
+                #[cfg(feature = "clap")]
                 let gui_id = crate::clap_gui::fx_gui_id(t, i);
+                #[cfg(not(feature = "clap"))]
+                let _gui_id = crate::clap_gui::fx_gui_id(t, i);
                 if slot.path.trim_end_matches('/').ends_with(".vst3") {
                     #[cfg(feature = "vst3")]
                     match vst3_slot::load(&slot.path, sample_rate, MAX_BLOCK as u32) {
@@ -1751,7 +1768,10 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
                                     if let Ok(mut pl) = vslot.plugin.lock() { let _ = pl.load_state(&bytes); }
                                 }
                                 loaded.push((t, 2, i, slot.path.clone()));
+                                #[cfg(feature = "clap")]
                                 fx_vst3_handles.push((gui_id, vslot.plugin.clone()));
+                                #[cfg(not(feature = "clap"))]
+                                let _ = gui_id;
                                 fx_chains[t].push(FxInst::Vst3(vslot));
                             }
                         }
