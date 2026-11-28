@@ -129,8 +129,9 @@ fn scene_header(ui: &mut Ui, si: usize, scene_name: &str, w: f32, h: f32, a: &mu
     );
 
     let btn_rect = Rect::from_min_size(rect.right_center() - Vec2::new(24.0, 10.0), Vec2::new(18.0, 18.0));
-    ui.painter().rect_filled(btn_rect, 2.0, Color32::from_gray(60));
-    ui.painter().text(btn_rect.center(), Align2::CENTER_CENTER, "▶", FontId::proportional(12.0), theme::TEXT_COLOR);
+    ui.painter().rect_filled(btn_rect, 3.0, Color32::from_rgb(52, 56, 66));
+    ui.painter().rect_stroke(btn_rect, 3.0, Stroke::new(1.0, theme::GRID_LINE));
+    ui.painter().text(btn_rect.center(), Align2::CENTER_CENTER, "▶", FontId::proportional(11.0), theme::TEXT_COLOR);
 
     if resp.clicked() {
         if let Some(pos) = resp.interact_pointer_pos() {
@@ -141,7 +142,7 @@ fn scene_header(ui: &mut Ui, si: usize, scene_name: &str, w: f32, h: f32, a: &mu
     }
 
     if resp.hovered() {
-        ui.painter().rect_filled(rect, 4.0, Color32::from_rgba_unmultiplied(100, 180, 255, 30));
+        ui.painter().rect_filled(rect, 4.0, Color32::from_rgba_unmultiplied(63, 212, 90, 18));
     }
     resp.context_menu(|ui| {
         if ui.button("🗑 Eliminar escena").clicked() { a.remove_scene = Some(si); ui.close_menu(); }
@@ -153,46 +154,54 @@ fn track_header(ui: &mut Ui, t: &TrackSnapshot, track_idx: usize, w: f32, h: f32
     let (outer, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
     let p = ui.painter();
 
-    p.rect_filled(outer, 0.0, theme::TRACK_HEADER_BG);
-    p.rect_filled(Rect::from_min_size(outer.min, Vec2::new(w, 5.0)), 0.0, t.color);
-    if is_selected {
-        p.rect_stroke(outer.shrink(0.5), 0.0, Stroke::new(2.0, Color32::from_rgb(200, 165, 80)));
-    }
+    p.rect_filled(outer, 2.0, theme::TRACK_HEADER_BG);
+    p.rect_filled(Rect::from_min_size(outer.min, Vec2::new(5.0, h)), 2.0, t.color);
+    p.rect_stroke(
+        outer.shrink(0.5),
+        2.0,
+        Stroke::new(
+            if is_selected { 1.5 } else { 1.0 },
+            if is_selected { crate::theme::T.accent_gold } else { theme::GRID_LINE },
+        ),
+    );
 
     p.text(
-        Pos2::new(outer.left() + 6.0, outer.top() + 8.0),
+        Pos2::new(outer.left() + 10.0, outer.top() + 8.0),
         Align2::LEFT_TOP,
         &t.name,
         FontId::proportional(theme::FONT_MEDIUM),
         theme::TEXT_COLOR,
     );
 
-    let m = Rect::from_min_size(Pos2::new(outer.left() + 6.0, outer.bottom() - 8.0), Vec2::new(w - 12.0, 4.0));
-    p.rect_filled(m, 0.0, theme::METER_BG);
-    p.rect_filled(
-        Rect::from_min_size(m.min, Vec2::new(m.width() * t.meter_level.clamp(0.0, 1.0), 4.0)),
-        0.0, theme::METER_FILL,
-    );
+    let m = Rect::from_min_size(Pos2::new(outer.left() + 10.0, outer.bottom() - 8.0), Vec2::new(w - 16.0, 4.0));
+    p.rect_filled(m, 1.0, theme::METER_BG);
+    let meter = t.meter_level.clamp(0.0, 1.0);
+    let meter_col = if meter > 0.85 { crate::theme::T.meter_high } else { theme::METER_FILL };
+    p.rect_filled(Rect::from_min_size(m.min, Vec2::new(m.width() * meter, 4.0)), 1.0, meter_col);
 
-    let bw = 22.0; let bh = 16.0;
+    let bw = 22.0;
+    let bh = 18.0;
     let y = outer.top() + 26.0;
-    let x0 = outer.left() + 6.0;
+    let x0 = outer.left() + 10.0;
 
     let arm = Rect::from_min_size(Pos2::new(x0, y), Vec2::new(bw, bh));
-    let mute = arm.translate(Vec2::new(bw + 2.0, 0.0));
-    let solo = mute.translate(Vec2::new(bw + 2.0, 0.0));
-    let stop = solo.translate(Vec2::new(bw + 2.0, 0.0));
+    let mute = arm.translate(Vec2::new(bw + 3.0, 0.0));
+    let solo = mute.translate(Vec2::new(bw + 3.0, 0.0));
+    let stop = solo.translate(Vec2::new(bw + 3.0, 0.0));
 
     for (r, label, active, col) in [
-        (arm,  "●", t.armed,  Color32::from_rgb(232,  92,  92)),
-        (mute, "M", t.muted,  Color32::from_rgb(240, 200,  70)),
-        (solo, "S", t.soloed, Color32::from_rgb(240, 152,  72)),
+        (arm,  "●", t.armed,  Color32::from_rgb(232, 92, 92)),
+        (mute, "M", t.muted,  Color32::from_rgb(240, 200, 70)),
+        (solo, "S", t.soloed, Color32::from_rgb(240, 152, 72)),
     ] {
-        let fill = if active { col } else { Color32::from_gray(50) };
-        p.rect_filled(r, 2.0, fill);
-        p.text(r.center(), Align2::CENTER_CENTER, label, FontId::proportional(10.0), theme::TEXT_COLOR);
+        let fill = if active { col } else { Color32::from_rgb(52, 56, 66) };
+        let txt = if active && label == "M" { Color32::from_rgb(30, 30, 30) } else { theme::TEXT_COLOR };
+        p.rect_filled(r, 3.0, fill);
+        p.rect_stroke(r, 3.0, Stroke::new(1.0, theme::GRID_LINE));
+        p.text(r.center(), Align2::CENTER_CENTER, label, FontId::proportional(10.0), txt);
     }
-    p.rect_filled(stop, 2.0, Color32::from_gray(50));
+    p.rect_filled(stop, 3.0, Color32::from_rgb(52, 56, 66));
+    p.rect_stroke(stop, 3.0, Stroke::new(1.0, theme::GRID_LINE));
     p.text(stop.center(), Align2::CENTER_CENTER, "■", FontId::proportional(10.0), theme::TEXT_COLOR);
 
     if resp.clicked() {
@@ -209,17 +218,19 @@ fn track_header(ui: &mut Ui, t: &TrackSnapshot, track_idx: usize, w: f32, h: f32
 fn groove_track_header(ui: &mut Ui, name: &str, w: f32, h: f32) {
     let (outer, _resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
     let p = ui.painter();
-    p.rect_filled(outer, 0.0, Color32::from_rgb(28, 24, 20));
-    p.rect_filled(Rect::from_min_size(outer.min, Vec2::new(w, 5.0)), 0.0, Color32::from_rgb(240, 170, 60));
+    let accent = Color32::from_rgb(240, 170, 60);
+    p.rect_filled(outer, 2.0, theme::TRACK_HEADER_BG);
+    p.rect_filled(Rect::from_min_size(outer.min, Vec2::new(5.0, h)), 2.0, accent);
+    p.rect_stroke(outer.shrink(0.5), 2.0, Stroke::new(1.0, theme::GRID_LINE));
     p.text(
-        Pos2::new(outer.left() + 6.0, outer.top() + 10.0),
+        Pos2::new(outer.left() + 10.0, outer.top() + 10.0),
         Align2::LEFT_TOP,
         name,
         FontId::proportional(theme::FONT_MEDIUM),
         theme::TEXT_COLOR,
     );
     p.text(
-        Pos2::new(outer.left() + 6.0, outer.top() + 30.0),
+        Pos2::new(outer.left() + 10.0, outer.top() + 30.0),
         Align2::LEFT_TOP,
         "Groove Machine",
         FontId::proportional(theme::FONT_SMALL),
@@ -229,14 +240,14 @@ fn groove_track_header(ui: &mut Ui, name: &str, w: f32, h: f32) {
 
 fn groove_cell(ui: &mut Ui, c: Option<&ClipSnapshot>, si: usize, w: f32, h: f32, a: &mut ClipGridActions) {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
-    let bg = if c.is_some() { Color32::from_rgb(58, 46, 28) } else { theme::SCENE_COL_BG };
+    let bg = if c.is_some() { Color32::from_rgb(58, 46, 28) } else { Color32::from_rgb(24, 26, 31) };
     ui.painter().rect_filled(rect, 4.0, theme::CLIP_BORDER);
     ui.painter().rect_filled(rect.shrink(1.0), 4.0, bg);
     let label = c.map(|x| x.name.as_str()).unwrap_or("Exportar MIDI");
     ui.painter().text(rect.center(), Align2::CENTER_CENTER, label,
         FontId::proportional(theme::FONT_SMALL), theme::TEXT_COLOR);
     if resp.hovered() {
-        ui.painter().rect_filled(rect.shrink(0.5), 4.0, Color32::from_rgba_unmultiplied(240, 170, 60, 35));
+        ui.painter().rect_filled(rect.shrink(0.5), 4.0, Color32::from_rgba_unmultiplied(240, 170, 60, 28));
     }
     resp.context_menu(|ui| {
         if ui.button("Exportar Groove a esta escena").clicked() {
@@ -258,16 +269,28 @@ fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize
 
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click_and_drag());
 
+    let track_tint = Color32::from_rgb(t.color[0], t.color[1], t.color[2]);
     let bg = if !has_clip {
-        theme::SCENE_COL_BG
+        // Celda vacía: tinte sutil del color de pista sobre fondo oscuro.
+        Color32::from_rgb(
+            24u8.saturating_add((track_tint.r() as u16 / 14) as u8),
+            26u8.saturating_add((track_tint.g() as u16 / 14) as u8),
+            31u8.saturating_add((track_tint.b() as u16 / 14) as u8),
+        )
     } else {
-        match st {
+        let base = match st {
             ClipStateView::Empty => theme::CLIP_BG_STOPPED,
             ClipStateView::Playing => theme::CLIP_BG_PLAYING,
             ClipStateView::Triggered | ClipStateView::RecQueued => theme::CLIP_BG_TRIGGERED,
             ClipStateView::Recording | ClipStateView::Overdubbing => theme::CLIP_BG_RECORDING,
             ClipStateView::Stopping => theme::CLIP_BG_STOPPED,
-        }
+        };
+        // Mezcla el color de pista en el fondo del clip para identidad visual.
+        Color32::from_rgb(
+            ((base.r() as u16 * 72 + track_tint.r() as u16 * 28) / 100) as u8,
+            ((base.g() as u16 * 72 + track_tint.g() as u16 * 28) / 100) as u8,
+            ((base.b() as u16 * 72 + track_tint.b() as u16 * 28) / 100) as u8,
+        )
     };
 
     // Fondo/borde base (el contenido se atenúa si estamos arrastrando esta celda)
@@ -275,17 +298,22 @@ fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize
     let paint = |col: Color32| -> Color32 {
         Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), ((col.a() as f32) * alpha_mul) as u8)
     };
-    let border = if is_selected_track { Color32::from_rgb(200, 165, 80) } else { theme::CLIP_BORDER };
-    let border_w = if is_selected_track { 2.0 } else { 1.0 };
+    let border = if is_selected_track { crate::theme::T.accent_gold } else { track_tint.gamma_multiply(0.45) };
+    let border_w = if is_selected_track { 1.5 } else { 1.0 };
     ui.painter().rect_filled(rect, 4.0, paint(border));
     ui.painter().rect_filled(rect.shrink(border_w), 4.0, paint(bg));
+    // Banda fina de color de pista en el borde superior del clip.
+    if has_clip {
+        let stripe = Rect::from_min_size(rect.shrink(border_w).min, Vec2::new(rect.width() - border_w * 2.0, 3.0));
+        ui.painter().rect_filled(stripe, 0.0, paint(track_tint.gamma_multiply(0.9)));
+    }
 
     let btn = Rect::from_min_size(rect.min + Vec2::new(4.0, 4.0), Vec2::new(18.0, 18.0));
     const YELLOW: Color32 = Color32::from_rgb(240, 200, 70);
     const YELLOW_DIM: Color32 = Color32::from_rgb(110, 90, 30);
-    const GREEN: Color32 = Color32::from_rgb(72, 210, 130);
+    const GREEN: Color32 = Color32::from_rgb(63, 212, 90);
     const REC_RED: Color32 = Color32::from_rgb(232, 70, 70);
-    const IDLE: Color32 = Color32::from_rgb(120, 122, 130);
+    const IDLE: Color32 = Color32::from_rgb(141, 144, 152);
     let time = ui.input(|i| i.time) as f32;
     let blink_on = (time * 5.0).sin() > 0.0;
     let blinking = has_clip && matches!(st, ClipStateView::Triggered | ClipStateView::RecQueued);
@@ -304,9 +332,9 @@ fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize
     if blinking { ui.ctx().request_repaint_after(std::time::Duration::from_millis(50)); }
 
     // Botón de estado: indicador + control de transporte/grabación.
-    ui.painter().rect_filled(btn, 2.0, paint(Color32::from_gray(36)));
-    ui.painter().rect_stroke(btn, 2.0, Stroke::new(1.0, paint(Color32::from_gray(75))));
-    ui.painter().text(btn.center(), Align2::CENTER_CENTER, sym, FontId::proportional(12.0), paint(col));
+    ui.painter().rect_filled(btn, 3.0, paint(Color32::from_rgb(46, 49, 58)));
+    ui.painter().rect_stroke(btn, 3.0, Stroke::new(1.0, paint(theme::GRID_LINE)));
+    ui.painter().text(btn.center(), Align2::CENTER_CENTER, sym, FontId::proportional(11.0), paint(col));
 
     if let Some(x) = c {
         ui.painter().text(
@@ -374,7 +402,7 @@ fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize
     let dragging_file = egui::DragAndDrop::has_payload_of_type::<crate::view::BrowserFile>(ui.ctx());
 
     if resp.hovered() && !dragging_clip && !dragging_file {
-        ui.painter().rect_filled(rect.shrink(0.5), 4.0, Color32::from_rgba_unmultiplied(100, 180, 255, 30));
+        ui.painter().rect_filled(rect.shrink(0.5), 4.0, Color32::from_rgba_unmultiplied(63, 212, 90, 14));
     }
 
     // Destino de drop de clip interno

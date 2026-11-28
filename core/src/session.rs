@@ -45,6 +45,9 @@ pub struct WindowLayoutState {
     #[serde(default)] pub inspector_size: Option<[f32; 2]>,
     #[serde(default)] pub browser_size: Option<[f32; 2]>,
     #[serde(default)] pub mixer_size: Option<[f32; 2]>,
+    /// Ruta anclada del Browser de archivos; se restaura al abrir proyecto.
+    #[serde(default)]
+    pub browser_pinned_path: Option<String>,
 }
 fn default_true() -> bool { true }
 

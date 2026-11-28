@@ -98,7 +98,11 @@ fn show_one(ctx: &egui::Context, w: &mut PluginParamWindow, shared: &SessionShar
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if lanzadera_engine::CLAP_ENABLED {
                         let btn = egui::Button::new("🖥 GUI nativa")
-                            .fill(T.panel.gamma_multiply(1.2))
+                            .fill(Color32::from_rgb(
+                                T.panel.r().saturating_add(20),
+                                T.panel.g().saturating_add(20),
+                                T.panel.b().saturating_add(24),
+                            ))
                             .stroke(Stroke::new(1.0, T.accent.gamma_multiply(0.6)));
                         if ui.add(btn).on_hover_text(
                             "Abre la interfaz gráfica propia del plugin (ventana flotante).\n\

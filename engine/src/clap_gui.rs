@@ -72,6 +72,8 @@ pub struct GuiState {
     pub avail: [bool; MAX_PLUGIN_SLOTS],
     /// La GUI de esa pista esta abierta ahora mismo.
     pub open: [bool; MAX_PLUGIN_SLOTS],
+    /// La GUI ya fue creada y no destruida; permite re-show tras cierre was_destroyed=false.
+    pub created: [bool; MAX_PLUGIN_SLOTS],
     /// La GUI de esta pista ya colgo una vez esta sesion: no reintentar.
     pub broken: [bool; MAX_PLUGIN_SLOTS],
 }
@@ -79,6 +81,7 @@ pub struct GuiState {
 pub static GUI_STATE: Mutex<GuiState> = Mutex::new(GuiState {
     avail: [false; MAX_PLUGIN_SLOTS],
     open: [false; MAX_PLUGIN_SLOTS],
+    created: [false; MAX_PLUGIN_SLOTS],
     broken: [false; MAX_PLUGIN_SLOTS],
 });
 
@@ -152,17 +155,22 @@ pub fn take_closed() -> Vec<(usize, bool)> {
 }
 
 /// Acusa recibo del cierre. La doc de CLAP exige llamar a `destroy` cuando
-/// `was_destroyed` es true. Hilo principal.
+/// `was_destroyed` es true; si es false, la GUI solo se ocultó y se puede
+/// volver a mostrar con `show()` sin recrearla. Hilo principal.
 #[cfg(feature = "clap")]
 pub fn ack_closed(instance: &mut crate::clap_host::Instance, track: usize, was_destroyed: bool) {
     use clack_extensions::gui::PluginGui;
     let main = instance.plugin_handle();
     if let Some(gui) = main.get_extension::<PluginGui>() {
         if was_destroyed {
-            gui.destroy(&main);
+            let _ = guard_gui(std::panic::AssertUnwindSafe(|| { gui.destroy(&main); Ok(()) }));
+            set_created(track, false);
         } else {
-            let _ = gui.hide(&main);
+            let _ = guard_gui(std::panic::AssertUnwindSafe(|| { let _ = gui.hide(&main); Ok(()) }));
+            set_created(track, true);
         }
+    } else {
+        set_created(track, false);
     }
     set_open(track, false);
     println!("[gui] pista {}: el usuario cerro la ventana", track + 1);
@@ -177,6 +185,27 @@ pub fn set_avail(track: usize, v: bool) {
 pub fn set_open(track: usize, v: bool) {
     if let Ok(mut s) = GUI_STATE.lock() {
         if track < MAX_PLUGIN_SLOTS { s.open[track] = v; }
+    }
+}
+
+pub fn set_created(track: usize, v: bool) {
+    if let Ok(mut s) = GUI_STATE.lock() {
+        if track < MAX_PLUGIN_SLOTS { s.created[track] = v; }
+    }
+}
+
+pub fn is_created(track: usize) -> bool {
+    GUI_STATE.lock().map(|s| track < MAX_PLUGIN_SLOTS && s.created[track]).unwrap_or(false)
+}
+
+pub fn clear_slot(track: usize) {
+    if let Ok(mut s) = GUI_STATE.lock() {
+        if track < MAX_PLUGIN_SLOTS {
+            s.avail[track] = false;
+            s.open[track] = false;
+            s.created[track] = false;
+            s.broken[track] = false;
+        }
     }
 }
 pub fn set_broken(track: usize, v: bool) {
@@ -300,20 +329,51 @@ pub fn toggle(instance: &mut crate::clap_host::Instance, track: usize, title: &s
     };
 
     if state(track).1 {
+        // Cierre explícito por usuario: destruir para garantizar reapertura limpia.
         let _ = guard_gui(std::panic::AssertUnwindSafe(|| {
             let _ = gui.hide(&main);
             gui.destroy(&main);
             Ok(())
         }));
-        embed.remove(track); // la ventana host se destruye DESPUES de destroy()
+        embed.remove(track);
         set_open(track, false);
+        set_created(track, false);
         return Ok(());
     }
 
     // Si este plugin ya colgó la GUI esta sesión, no reintentar: congelaría
     // otra vez el hilo principal. Sugerir VST3 o reinicio.
     if is_broken(track) {
-        return Err("la GUI de este plugin ya colgó esta sesión (marcada como                     insegura). Usa su versión VST3 —las ventanas funcionan— o                     reinicia Lanzadera para reintentar.".into());
+        return Err("la GUI de este plugin ya colgó esta sesión (marcada como insegura). Usa su versión VST3 o reinicia Lanzadera para reintentar.".into());
+    }
+
+    // GUI ya creada (oculta, was_destroyed=false): reabrir con show().
+    if is_created(track) {
+        let show_res = guard_gui(std::panic::AssertUnwindSafe(|| {
+            gui.show(&main).map_err(|e| format!("show: {:?}", e))
+        }));
+        match show_res {
+            Ok(()) if !gui_timed_out() => {
+                set_open(track, true);
+                return Ok(());
+            }
+            Ok(()) => {
+                set_broken(track, true);
+                let _ = guard_gui(std::panic::AssertUnwindSafe(|| { gui.destroy(&main); Ok(()) }));
+                embed.remove(track);
+                set_open(track, false);
+                set_created(track, false);
+                return Err("la GUI del plugin tardó demasiado al reabrir; se marcó como insegura para esta sesión".into());
+            }
+            Err(e) => {
+                // show falló; destruir y caer a recreación limpia abajo
+                let _ = guard_gui(std::panic::AssertUnwindSafe(|| { gui.destroy(&main); Ok(()) }));
+                embed.remove(track);
+                set_open(track, false);
+                set_created(track, false);
+                eprintln!("[gui] pista {}: show() falló ({}), recreando", track + 1, e);
+            }
+        }
     }
     // Negociacion, como pide la secuencia documentada de CLAP: primero se
     // consulta la preferencia del plugin, luego se comprueba el soporte.
@@ -354,9 +414,23 @@ pub fn toggle(instance: &mut crate::clap_host::Instance, track: usize, title: &s
             gui.show(&main).map_err(|e| format!("show: {:?}", e))
         };
         match result {
-            Ok(()) => { set_open(track, true); return Ok(()); }
+            Ok(()) => {
+                if gui_timed_out() {
+                    set_broken(track, true);
+                    let _ = guard_gui(std::panic::AssertUnwindSafe(|| { gui.destroy(&main); Ok(()) }));
+                    set_open(track, false);
+                    set_created(track, false);
+                    return Err("la GUI del plugin tardó demasiado en responder; se marcó como insegura para esta sesión".into());
+                }
+                set_open(track, true);
+                set_created(track, true);
+                return Ok(());
+            }
             Err(e) => {
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| gui.destroy(&main)));
+                if gui_timed_out() { set_broken(track, true); }
+                let _ = guard_gui(std::panic::AssertUnwindSafe(|| { gui.destroy(&main); Ok(()) }));
+                set_open(track, false);
+                set_created(track, false);
                 return Err(e);
             }
         }
@@ -374,6 +448,8 @@ pub fn toggle(instance: &mut crate::clap_host::Instance, track: usize, title: &s
     let create_result = gui.create(&main, embedded).map_err(|e| format!("create(embebida): {:?}", e));
     if let Err(e) = create_result {
         if gui_timed_out() { set_broken(track, true); }
+        set_open(track, false);
+        set_created(track, false);
         return Err(e);
     }
     // Escala 1.0: sin esto algunos plugins (JUCE) asumen HiDPI inexistente.
@@ -398,10 +474,21 @@ pub fn toggle(instance: &mut crate::clap_host::Instance, track: usize, title: &s
         if gui_timed_out() { set_broken(track, true); }
         let _ = guard_gui(std::panic::AssertUnwindSafe(|| { gui.destroy(&main); Ok(()) }));
         embed.remove(track);
+        set_open(track, false);
+        set_created(track, false);
         return Err(e);
+    }
+    if gui_timed_out() {
+        set_broken(track, true);
+        let _ = guard_gui(std::panic::AssertUnwindSafe(|| { gui.destroy(&main); Ok(()) }));
+        embed.remove(track);
+        set_open(track, false);
+        set_created(track, false);
+        return Err("la GUI del plugin tardó demasiado en responder; se marcó como insegura para esta sesión".into());
     }
     embed.wins.push((track, win));
     set_open(track, true);
+    set_created(track, true);
     println!("[gui] pista {}: GUI embebida en ventana X11 del host", track + 1);
     Ok(())
 }
@@ -431,12 +518,12 @@ pub fn poll_embedded(instances: &mut [(usize, crate::clap_host::Instance)], embe
         if let Some((_, inst)) = instances.iter_mut().find(|(i, _)| *i == t) {
             let main = inst.plugin_handle();
             if let Some(gui) = main.get_extension::<PluginGui>() {
-                let _ = gui.hide(&main);
-                gui.destroy(&main);
+                let _ = guard_gui(std::panic::AssertUnwindSafe(|| { gui.destroy(&main); Ok(()) }));
             }
         }
         embed.remove(t);
         set_open(t, false);
+        set_created(t, false);
         println!("[gui] pista {}: el usuario cerro la ventana", t + 1);
     }
 }
@@ -446,13 +533,37 @@ pub fn poll_embedded(instances: &mut [(usize, crate::clap_host::Instance)], embe
 pub fn close_all(instances: &mut [(usize, crate::clap_host::Instance)], embed: &mut EmbedHost) {
     use clack_extensions::gui::PluginGui;
     for (t, inst) in instances.iter_mut() {
-        if !state(*t).1 { continue; }
+        if !state(*t).1 && !is_created(*t) { continue; }
         let main = inst.plugin_handle();
         if let Some(gui) = main.get_extension::<PluginGui>() {
-            let _ = gui.hide(&main);
-            gui.destroy(&main);
+            let _ = guard_gui(std::panic::AssertUnwindSafe(|| {
+                let _ = gui.hide(&main);
+                gui.destroy(&main);
+                Ok(())
+            }));
         }
         set_open(*t, false);
+        set_created(*t, false);
     }
     embed.wins.clear(); // despues de destroy(): la ventana padre sobrevive al plugin
+}
+
+/// Oculta/destruye una GUI de slot específico si existe (para unload/reemplazo).
+#[cfg(feature = "clap")]
+pub fn close_slot(instances: &mut [(usize, crate::clap_host::Instance)], embed: &mut EmbedHost, slot: usize) {
+    use clack_extensions::gui::PluginGui;
+    if !state(slot).1 && !is_created(slot) { return; }
+    if let Some((_, inst)) = instances.iter_mut().find(|(i, _)| *i == slot) {
+        let main = inst.plugin_handle();
+        if let Some(gui) = main.get_extension::<PluginGui>() {
+            let _ = guard_gui(std::panic::AssertUnwindSafe(|| {
+                let _ = gui.hide(&main);
+                gui.destroy(&main);
+                Ok(())
+            }));
+        }
+    }
+    embed.remove(slot);
+    set_open(slot, false);
+    set_created(slot, false);
 }

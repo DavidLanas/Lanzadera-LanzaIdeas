@@ -59,14 +59,14 @@ pub fn fader(ui: &mut egui::Ui, value: &mut f32, height: f32, level: f32) -> boo
     p.rect_filled(
         Rect::from_min_max(pos2(track.min.x, y), track.max),
         Rounding::same(3.0),
-        Color32::from_rgba_unmultiplied(90, 160, 220, 60),
+        Color32::from_rgba_unmultiplied(T.accent.r(), T.accent.g(), T.accent.b(), 40),
     );
     let thumb = Rect::from_center_size(pos2(track.center().x, y), vec2(22.0, 8.0));
     p.rect_filled(thumb, Rounding::same(2.0), T.fader_thumb);
 
     // Meter LED (verde → amarillo → rojo).
     let m = Rect::from_min_size(rect.min + vec2(24.0, 0.0), vec2(6.0, height));
-    p.rect_filled(m, Rounding::same(2.0), Color32::from_gray(24));
+    p.rect_filled(m, Rounding::same(2.0), T.fader_track);
     let lv = level.clamp(0.0, 1.0).sqrt();
     let mh = lv * height;
     let col = if lv > 0.85 { T.meter_high } else if lv > 0.55 { T.meter_mid } else { T.meter_low };

@@ -201,6 +201,10 @@ impl AudioHandle {
                 crate::clap_gui::ack_closed(inst, t, destroyed);
             } else if let Some((_, inst)) = self.fx_instances.iter_mut().find(|(i, _)| *i == t) {
                 crate::clap_gui::ack_closed(inst, t, destroyed);
+            } else {
+                // La instancia ya no existe; limpiar estado para no bloquear reapertura.
+                crate::clap_gui::set_open(t, false);
+                crate::clap_gui::set_created(t, false);
             }
         }
         // GUI CLAP embebidas: cierre por la X y resizes del plugin.
@@ -1605,8 +1609,7 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
     // boton "Interfaz" no debe quedar activo.
     #[cfg(feature = "clap")]
     for t in 0..crate::clap_gui::MAX_PLUGIN_SLOTS {
-        crate::clap_gui::set_avail(t, false);
-        crate::clap_gui::set_open(t, false);
+        crate::clap_gui::clear_slot(t);
     }
 
     #[cfg(feature = "clap")]

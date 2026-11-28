@@ -81,6 +81,7 @@ pub struct WindowState {
     pub inspector_size: Option<egui::Vec2>,
     pub browser_size: Option<egui::Vec2>,
     pub mixer_size: Option<egui::Vec2>,
+    pub browser_pinned_path: Option<String>,
 }
 
 impl Default for WindowState {
@@ -101,6 +102,7 @@ impl Default for WindowState {
             inspector_size: None,
             browser_size: None,
             mixer_size: None,
+            browser_pinned_path: None,
         }
     }
 }
@@ -834,6 +836,11 @@ impl SessionView {
         self.windows.inspector_size = wl.inspector_size.map(|s| egui::vec2(s[0], s[1]));
         self.windows.browser_size = wl.browser_size.map(|s| egui::vec2(s[0], s[1]));
         self.windows.mixer_size = wl.mixer_size.map(|s| egui::vec2(s[0], s[1]));
+        self.windows.browser_pinned_path = wl.browser_pinned_path.clone();
+        if let Some(p) = &wl.browser_pinned_path {
+            let pb = std::path::PathBuf::from(p);
+            if pb.is_dir() { self.browser_path = pb; }
+        }
         self.window_layout_apply_frames = 3;
     }
 
@@ -854,6 +861,7 @@ impl SessionView {
             inspector_size: self.windows.inspector_size.map(|s| [s.x, s.y]),
             browser_size: self.windows.browser_size.map(|s| [s.x, s.y]),
             mixer_size: self.windows.mixer_size.map(|s| [s.x, s.y]),
+            browser_pinned_path: self.windows.browser_pinned_path.clone(),
         };
         shared.edit(|st| st.window_layout = wl);
     }
@@ -1206,6 +1214,9 @@ impl SessionView {
         if paste { self.paste_clip(shared); }
         if dup { self.duplicate_selected_clip(shared); }
         if del { self.delete_selected_clip(shared); }
+        if copy || cut || paste || dup || del {
+            ctx.request_repaint();
+        }
 
         let title = format!("{}{} — Lanzadera", self.project_name(), if self.dirty { " *" } else { "" });
         if title != self.last_title {
@@ -1215,7 +1226,8 @@ impl SessionView {
     }
 
     fn selected_clip_slot(&self, shared: &SessionShared) -> Option<(usize, usize)> {
-        shared.state.lock().unwrap_or_else(|e| e.into_inner()).selected_clip
+        let st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        st.selected_clip.or(Some((st.selected_track, st.selected_scene)))
     }
 
     fn copy_selected_clip(&mut self, shared: &SessionShared) {
@@ -2244,12 +2256,12 @@ impl SessionView {
         let level = shared.rt.groove_peak();
         egui::Frame::none()
             .fill(T.strip_bg)
-            .rounding(Rounding::same(5.0))
-            .stroke(egui::Stroke::new(1.0, T.accent_gold))
-            .inner_margin(5.0)
+            .rounding(Rounding::same(6.0))
+            .stroke(egui::Stroke::new(1.0, T.accent_gold.gamma_multiply(0.85)))
+            .inner_margin(6.0)
             .show(ui, |ui| {
                 ui.vertical(|ui| {
-                    ui.set_width(68.0);
+                    ui.set_width(70.0);
                     ui.label(egui::RichText::new("GROOVE").size(11.0).color(T.accent_gold).strong())
                         .on_hover_text("Master del Groove Machine (slider del MK3)");
                     ui.add_space(50.0);
@@ -2283,12 +2295,12 @@ impl SessionView {
         };
         egui::Frame::none()
             .fill(T.strip_bg)
-            .rounding(Rounding::same(5.0))
+            .rounding(Rounding::same(6.0))
             .stroke(border)
-            .inner_margin(5.0)
+            .inner_margin(6.0)
             .show(ui, |ui| {
             ui.vertical(|ui| {
-                ui.set_width(68.0);
+                ui.set_width(70.0);
 
                 let head_col = if selected { T.accent_gold } else { T.text_bright };
                 let head = ui.add(
@@ -2603,7 +2615,9 @@ impl SessionView {
             } else {
                 ui.label("Selecciona un clip (click derecho o click en slot vacío).");
             }
+            ui.add_space(4.0);
             ui.separator();
+            ui.add_space(4.0);
             {
                 let mono = shared.state.lock().unwrap().tracks.get(t).map(|tr| tr.mono).unwrap_or(false);
                 let mut m = mono;
@@ -2626,10 +2640,10 @@ impl SessionView {
             };
             let audio_locked = has_audio_clip || has_input;
             if audio_locked {
-                ui.label(egui::RichText::new("FX de pista (audio/entrada)").size(12.0));
+                ui.label(egui::RichText::new("FX de pista (audio/entrada)").size(12.0).strong().color(T.text_bright));
                 ui.label(egui::RichText::new("Pista con audio o entrada analógica/mic: instrumento MIDI y Note FX bloqueados; solo FX.").size(10.0).color(T.text_dim));
             } else {
-                ui.label(egui::RichText::new("Instrumento · Note FX · FX").size(12.0));
+                ui.label(egui::RichText::new("Instrumento · Note FX · FX").size(12.0).strong().color(T.text_bright));
             }
             if !lanzadera_engine::CLAP_ENABLED {
                 ui.label(egui::RichText::new("Compila con --features clap").size(10.0).color(T.text_dim));
@@ -2677,65 +2691,107 @@ impl SessionView {
                 vec![(BrowserTarget::NoteFx, "Note FX", &nfx_chain), (BrowserTarget::Fx, "FX", &fx_chain)]
             };
             for (target, lbl, chain) in chain_specs {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(lbl).size(11.0).strong());
-                if ui.button(format!("＋ {}", lbl)).on_hover_text("Añadir plugin a la cadena").clicked() {
-                    self.windows.browser_visible = true;
-                    self.browser_tab = match target {
-                        BrowserTarget::NoteFx => BrowserTab::NoteFx,
-                        BrowserTarget::Fx => BrowserTab::Fx,
-                        BrowserTarget::Instrument => BrowserTab::Instruments,
-                    };
-                    self.browser_target = target;
-                    self.browser_mode = if lanzadera_engine::CLAP_ENABLED { BrowserMode::Clap } else { BrowserMode::Vst3 };
-                    self.browser_show_all = false;
-                    self.browser_list = None;
-                }
-                if !chain.is_empty() && ui.small_button("🗑").on_hover_text("Vaciar la cadena").clicked() {
-                    if target == BrowserTarget::NoteFx { shared.set_note_fx(t, None, None); }
-                    else { shared.set_fx(t, None, None); }
-                }
-            });
-            for (i, slot) in chain.iter().enumerate() {
-                let stem = std::path::Path::new(&slot.path)
-                    .file_stem().and_then(|x| x.to_str()).unwrap_or(&slot.path).to_string();
-                ui.horizontal(|ui| {
-                    let gui_id = if target == BrowserTarget::NoteFx {
-                        lanzadera_engine::clap_gui::nfx_gui_id(t, i)
-                    } else {
-                        lanzadera_engine::clap_gui::fx_gui_id(t, i)
-                    };
-                    let (has_gui, gui_open) = lanzadera_engine::clap_gui::state(gui_id);
-                    if ui.add_enabled(has_gui, egui::Button::new(if gui_open { "🖥 Cerrar" } else { "🖥" })
-                        .min_size(vec2(26.0, 18.0)))
-                        .on_hover_text(if has_gui { "Abrir o cerrar la interfaz de este plugin" } else { "Sin interfaz: al pulsar verás aviso" })
-                        .clicked()
-                    {
-                        lanzadera_engine::clap_gui::request_toggle(gui_id);
-                    }
-                    let mut by = slot.bypass;
-                    if ui.checkbox(&mut by, "").on_hover_text("Bypass (se aplica al reiniciar el audio)").changed() {
-                        let tt = target;
-                        shared.edit(|st| {
-                            if let Some(tr) = st.tracks.get_mut(t) {
-                                let chain = if tt == BrowserTarget::NoteFx { &mut tr.note_fx_chain } else { &mut tr.fx_chain };
-                                if let Some(sl) = chain.get_mut(i) { sl.bypass = by; }
-                            }
+                egui::Frame::none()
+                    .fill(T.panel_raised)
+                    .rounding(egui::Rounding::same(6.0))
+                    .stroke(egui::Stroke::new(1.0, T.strip_border))
+                    .inner_margin(8.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(lbl).size(11.0).strong().color(T.text_bright));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if !chain.is_empty() && ui.small_button("🗑").on_hover_text("Vaciar la cadena").clicked() {
+                                    if target == BrowserTarget::NoteFx { shared.set_note_fx(t, None, None); }
+                                    else { shared.set_fx(t, None, None); }
+                                }
+                                if ui.button(format!("＋ {}", lbl)).on_hover_text("Añadir plugin a la cadena").clicked() {
+                                    self.windows.browser_visible = true;
+                                    self.browser_tab = match target {
+                                        BrowserTarget::NoteFx => BrowserTab::NoteFx,
+                                        BrowserTarget::Fx => BrowserTab::Fx,
+                                        BrowserTarget::Instrument => BrowserTab::Instruments,
+                                    };
+                                    self.browser_target = target;
+                                    self.browser_mode = if lanzadera_engine::CLAP_ENABLED { BrowserMode::Clap } else { BrowserMode::Vst3 };
+                                    self.browser_show_all = false;
+                                    self.browser_list = None;
+                                }
+                            });
                         });
-                        shared.audio_restart.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                    ui.label(egui::RichText::new(trunc(&stem, 14)).size(10.0));
-                    if slot.state.is_some() {
-                        ui.label(egui::RichText::new("●").size(9.0).color(T.accent_green))
-                            .on_hover_text("Con parámetros guardados");
-                    }
-                    if ui.small_button("✕").on_hover_text("Quitar de la cadena").clicked() {
-                        if target == BrowserTarget::NoteFx { shared.remove_note_fx(t, i); }
-                        else { shared.remove_fx(t, i); }
-                    }
-                });
+                        ui.add_space(4.0);
+                        if chain.is_empty() {
+                            egui::Frame::none()
+                                .fill(T.bg.gamma_multiply(0.85))
+                                .rounding(egui::Rounding::same(4.0))
+                                .stroke(egui::Stroke::new(1.0, T.strip_border.gamma_multiply(0.7)))
+                                .inner_margin(egui::vec2(8.0, 6.0))
+                                .show(ui, |ui| {
+                                    ui.label(egui::RichText::new("Slot vacío — añade un plugin").size(10.0).color(T.text_dim));
+                                });
+                        }
+                        for (i, slot) in chain.iter().enumerate() {
+                            let stem = std::path::Path::new(&slot.path)
+                                .file_stem().and_then(|x| x.to_str()).unwrap_or(&slot.path).to_string();
+                            let slot_fill = if slot.bypass {
+                                T.bg
+                            } else {
+                                Color32::from_rgb(
+                                    T.panel.r().saturating_add(12),
+                                    T.panel.g().saturating_add(12),
+                                    T.panel.b().saturating_add(14),
+                                )
+                            };
+                            let slot_stroke = if slot.bypass { T.strip_border.gamma_multiply(0.7) } else { T.accent.gamma_multiply(0.35) };
+                            egui::Frame::none()
+                                .fill(slot_fill)
+                                .rounding(egui::Rounding::same(4.0))
+                                .stroke(egui::Stroke::new(1.0, slot_stroke))
+                                .inner_margin(egui::vec2(6.0, 4.0))
+                                .show(ui, |ui| {
+                                    ui.horizontal(|ui| {
+                                        let gui_id = if target == BrowserTarget::NoteFx {
+                                            lanzadera_engine::clap_gui::nfx_gui_id(t, i)
+                                        } else {
+                                            lanzadera_engine::clap_gui::fx_gui_id(t, i)
+                                        };
+                                        let (has_gui, gui_open) = lanzadera_engine::clap_gui::state(gui_id);
+                                        if ui.add_enabled(has_gui, egui::Button::new(if gui_open { "🖥 Cerrar" } else { "🖥" })
+                                            .min_size(vec2(26.0, 18.0)))
+                                            .on_hover_text(if has_gui { "Abrir o cerrar la interfaz de este plugin" } else { "Sin interfaz: al pulsar verás aviso" })
+                                            .clicked()
+                                        {
+                                            lanzadera_engine::clap_gui::request_toggle(gui_id);
+                                        }
+                                        let mut by = slot.bypass;
+                                        if ui.checkbox(&mut by, "").on_hover_text("Bypass (se aplica al reiniciar el audio)").changed() {
+                                            let tt = target;
+                                            shared.edit(|st| {
+                                                if let Some(tr) = st.tracks.get_mut(t) {
+                                                    let chain = if tt == BrowserTarget::NoteFx { &mut tr.note_fx_chain } else { &mut tr.fx_chain };
+                                                    if let Some(sl) = chain.get_mut(i) { sl.bypass = by; }
+                                                }
+                                            });
+                                            shared.audio_restart.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        let name_col = if slot.bypass { T.text_dim } else { T.text_bright };
+                                        ui.label(egui::RichText::new(trunc(&stem, 18)).size(10.0).color(name_col));
+                                        if slot.state.is_some() {
+                                            ui.label(egui::RichText::new("●").size(9.0).color(T.accent_green))
+                                                .on_hover_text("Con parámetros guardados");
+                                        }
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            if ui.small_button("✕").on_hover_text("Quitar de la cadena").clicked() {
+                                                if target == BrowserTarget::NoteFx { shared.remove_note_fx(t, i); }
+                                                else { shared.remove_fx(t, i); }
+                                            }
+                                        });
+                                    });
+                                });
+                            ui.add_space(2.0);
+                        }
+                    });
+                ui.add_space(4.0);
             }
-        }
             ui.separator();
             ui.label(egui::RichText::new(format!("EQ · Pista {}", t + 1)).size(12.0));
             ui.label(egui::RichText::new("Rueda sobre MID = Q (campana) · drag horizontal = freq")
@@ -3849,24 +3905,26 @@ impl SessionView {
             let avail = ui.available_height().max(200.0);
             let rack_h = (avail * 0.24).clamp(110.0, 180.0);
             let top_h = (avail - rack_h - 8.0).max(160.0);
+            let gap = 8.0;
 
+            // Fila superior: pads + editor de muestra + panel lateral (sobre la tira inferior).
             ui.allocate_ui_with_layout(vec2(ui.available_width(), top_h), egui::Layout::left_to_right(egui::Align::TOP), |ui| {
                 let total_w = ui.available_width().max(1.0);
-                let gap = 8.0;
-                // Pads amplio, editor sample compacto (casi cuadrado), SAMPLES/PARAMS con protagonismo.
-                let left_w = (total_w * 0.40).clamp(300.0, 520.0);
-                let right_w = (total_w * 0.34).clamp(320.0, 500.0);
-                let mid_w = (total_w - left_w - right_w - gap * 2.0).clamp(180.0, 280.0);
+                let detail_w = (total_w * 0.30).clamp(290.0, 420.0);
+                let pads_w = (total_w * 0.44).clamp(260.0, 560.0);
+                let sample_w = (total_w - pads_w - detail_w - gap * 2.0).clamp(180.0, 340.0);
 
-                ui.allocate_ui_with_layout(vec2(left_w, top_h), egui::Layout::top_down(egui::Align::LEFT), |ui| {
-                    ui.set_max_width(left_w);
+                ui.allocate_ui_with_layout(vec2(pads_w, top_h), egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                    ui.set_max_width(pads_w);
                     egui::ScrollArea::vertical().id_source("gm_main_pads_scroll").auto_shrink([false, false]).show(ui, |ui| {
                         self.groove_pad_grid_unified(ui, shared);
                     });
                 });
+
                 ui.add_space(gap);
-                ui.allocate_ui_with_layout(vec2(mid_w, top_h), egui::Layout::top_down(egui::Align::LEFT), |ui| {
-                    ui.set_max_width(mid_w);
+
+                ui.allocate_ui_with_layout(vec2(sample_w, top_h), egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                    ui.set_max_width(sample_w);
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("VISTA").size(9.0).color(T.text_dim));
                         if ui.selectable_label(self.groove_bank == 0, "A").clicked() { self.groove_bank = 0; }
@@ -3893,14 +3951,25 @@ impl SessionView {
                             });
                         });
                 });
+
                 ui.add_space(gap);
-                ui.allocate_ui_with_layout(vec2(right_w, top_h), egui::Layout::top_down(egui::Align::LEFT), |ui| {
-                    ui.set_max_width(right_w);
-                    egui::Frame::none().fill(Color32::from_rgb(34, 31, 28)).rounding(Rounding::same(6.0)).stroke(Stroke::new(1.0, T.accent_gold.gamma_multiply(0.35))).inner_margin(8.0).show(ui, |ui| {
-                        egui::ScrollArea::vertical().id_source("gm_main_detail_scroll").auto_shrink([false, false]).show(ui, |ui| {
-                            self.groove_pad_detail_panel(ui, shared);
+
+                // Panel lateral: al lado del editor de muestra, sobre la tira inferior.
+                ui.allocate_ui_with_layout(vec2(detail_w, top_h), egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                    ui.set_max_width(detail_w);
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(34, 31, 28))
+                        .rounding(Rounding::same(6.0))
+                        .stroke(Stroke::new(1.0, T.accent_gold.gamma_multiply(0.35)))
+                        .inner_margin(8.0)
+                        .show(ui, |ui| {
+                            egui::ScrollArea::vertical()
+                                .id_source("gm_main_detail_scroll")
+                                .auto_shrink([false, false])
+                                .show(ui, |ui| {
+                                    self.groove_pad_detail_panel(ui, shared);
+                                });
                         });
-                    });
                 });
             });
 
@@ -4152,23 +4221,23 @@ impl SessionView {
                         let base = if pattern_mode && filled[slot] { Color32::from_rgb(52, 47, 40) } else { Color32::from_rgb(44, 40, 36) };
                         let bg = if selected { Color32::from_rgb(66, 58, 46) } else { base };
                         p.rect_filled(rect, 5.0, bg);
-                        let border_col = if selected { T.accent_gold } else { Color32::from_rgb(84, 76, 66) };
-                        p.rect_stroke(rect, 5.0, Stroke::new(if selected { 2.0 } else { 1.0 }, border_col));
                         let hue = PAD_PALETTE[i % PAD_PALETTE.len()];
-                        p.rect_filled(Rect::from_min_size(rect.min + vec2(0.0, 4.0), vec2(4.0, rect.height() - 8.0)), 2.0, hue.gamma_multiply(0.85));
+                        let border_col = if selected { hue } else { Color32::from_rgb(84, 76, 66) };
+                        p.rect_stroke(rect, 5.0, Stroke::new(if selected { 2.0 } else { 1.0 }, border_col));
+                        p.rect_filled(Rect::from_min_size(rect.min + vec2(0.0, 4.0), vec2(4.0, rect.height() - 8.0)), 2.0, hue.gamma_multiply(0.95));
 
                         let wf_rect = Rect::from_min_max(pos2(rect.min.x + 10.0, rect.min.y + 22.0), pos2(rect.max.x - 8.0, rect.max.y - 20.0));
                         if !pattern_mode {
                             let peaks = self.groove_pad_wave_peaks(shared, i);
                             if peaks.is_empty() {
                                 p.rect_stroke(wf_rect, 3.0, Stroke::new(1.0, Color32::from_rgb(72, 66, 58)));
-                                p.text(wf_rect.center(), Align2::CENTER_CENTER, "+", FontId::proportional(18.0), T.accent_gold.gamma_multiply(0.35));
+                                p.text(wf_rect.center(), Align2::CENTER_CENTER, "+", FontId::proportional(18.0), hue.gamma_multiply(0.45));
                             } else {
-                                crate::waveform::paint(&p, wf_rect, &peaks, None, &crate::waveform::WaveStyle { bg: Color32::from_rgb(28, 26, 24), wave: T.accent_gold.gamma_multiply(0.95), center: Color32::from_rgb(72, 66, 58), head: T.accent_green });
+                                crate::waveform::paint(&p, wf_rect, &peaks, None, &crate::waveform::WaveStyle { bg: Color32::from_rgb(28, 26, 24), wave: hue.gamma_multiply(0.95), center: Color32::from_rgb(72, 66, 58), head: T.accent_green });
                             }
                         } else {
                             let tag = if filled[slot] { "●" } else { "○" };
-                            p.text(wf_rect.center(), Align2::CENTER_CENTER, tag, FontId::proportional(22.0), if filled[slot] { T.accent_gold } else { T.text_dim });
+                            p.text(wf_rect.center(), Align2::CENTER_CENTER, tag, FontId::proportional(22.0), if filled[slot] { hue } else { T.text_dim });
                         }
 
                         p.text(pos2(rect.min.x + 10.0, rect.min.y + 5.0), Align2::LEFT_TOP, &name, FontId::proportional(10.0), if selected { Color32::from_rgb(244, 236, 222) } else { Color32::from_rgb(196, 184, 166) });
@@ -5004,6 +5073,14 @@ impl SessionView {
                     self.browser_path = parent.to_path_buf();
                 }
             }
+            let cur = self.browser_path.to_string_lossy().to_string();
+            let is_pinned = self.windows.browser_pinned_path.as_deref() == Some(cur.as_str());
+            let pin_label = if is_pinned { "📌" } else { "📍" };
+            let pin_tip = if is_pinned { "Desanclar ruta del browser (dejará de persistir en el proyecto)" } else { "Anclar ruta actual del browser (se guarda en el proyecto)" };
+            if ui.button(pin_label).on_hover_text(pin_tip).clicked() {
+                self.windows.browser_pinned_path = if is_pinned { None } else { Some(cur) };
+                self.sync_window_layout_to_state(shared);
+            }
             ui.add(
                 egui::TextEdit::singleline(&mut self.browser_filter)
                     .desired_width(180.0)
@@ -5012,7 +5089,12 @@ impl SessionView {
             ui.checkbox(&mut self.browser_favorites_only, "⭐");
         });
 
-        ui.label(egui::RichText::new(self.browser_path.display().to_string()).color(T.text_dim).size(10.0));
+        let path_line = if let Some(p) = &self.windows.browser_pinned_path {
+            format!("{}  [anclado: {}]", self.browser_path.display(), p)
+        } else {
+            self.browser_path.display().to_string()
+        };
+        ui.label(egui::RichText::new(path_line).color(T.text_dim).size(10.0));
         ui.separator();
 
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -5034,8 +5116,10 @@ impl SessionView {
                     continue;
                 }
 
+                // "⭐" por ahora filtra a carpetas/favoritos de groove bank no aplica aquí;
+                // se reserva para futura base de favoritos de archivos.
                 if self.browser_favorites_only {
-                    // TODO: base de favoritos. Por ahora no filtra nada.
+                    // Sin base de favoritos de archivos todavía: mantener visible.
                 }
 
                 if path.is_dir() {
@@ -5645,9 +5729,9 @@ impl SessionView {
     }
 }
 
-/// Paleta cíclica para las filas del step sequencer (una por pad).
-/// Evita depender de Theme::group de Caja, que usa otra escala de colores.
-const PAD_PALETTE: [egui::Color32; 8] = [
+/// Paleta cíclica para pads/muestras del Groove Machine.
+/// Colores distintos por pad para identificación visual rápida.
+const PAD_PALETTE: [egui::Color32; 16] = [
     egui::Color32::from_rgb(232,  92,  92),  // rojo
     egui::Color32::from_rgb(240, 152,  72),  // naranja
     egui::Color32::from_rgb(232, 208,  88),  // amarillo
@@ -5656,6 +5740,14 @@ const PAD_PALETTE: [egui::Color32; 8] = [
     egui::Color32::from_rgb( 96, 176, 232),  // cian
     egui::Color32::from_rgb(152, 132, 232),  // violeta
     egui::Color32::from_rgb(224, 120, 200),  // magenta
+    egui::Color32::from_rgb(255, 120, 160),  // rosa
+    egui::Color32::from_rgb(120, 220, 255),  // celeste
+    egui::Color32::from_rgb(190, 255, 120),  // lima clara
+    egui::Color32::from_rgb(255, 184, 120),  // durazno
+    egui::Color32::from_rgb(170, 160, 255),  // lavanda
+    egui::Color32::from_rgb(120, 255, 210),  // turquesa
+    egui::Color32::from_rgb(255, 220, 140),  // oro suave
+    egui::Color32::from_rgb(210, 140, 255),  // púrpura
 ];
 
 // ════════════════════════════════════════════════════════════════════════

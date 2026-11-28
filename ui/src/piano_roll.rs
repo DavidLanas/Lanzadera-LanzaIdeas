@@ -117,10 +117,10 @@ impl PianoRoll {
 
                 let w_notes = (loop_ticks as f32 * self.px_per_tick).max(300.0);
                 let h_keys = self.n_rows as f32 * self.row_h;
-                let h_vel = 52.0;
+                let h_vel = 56.0;
 
                 ui.horizontal(|ui| {
-                    let (krect, _) = ui.allocate_exact_size(vec2(KEY_W, h_keys + h_vel + 4.0), Sense::hover());
+                    let (krect, _) = ui.allocate_exact_size(vec2(KEY_W, h_keys + h_vel + 6.0), Sense::hover());
                     self.paint_keyboard(ui, krect.with_max_y(krect.top() + h_keys));
 
                     let scroll_id = egui::Id::new(("roll_hscroll", t, s));
@@ -137,7 +137,7 @@ impl PianoRoll {
                                 self.paint_band_rect(ui, rect);
                             });
                             let (vrect, vresp) = ui.allocate_exact_size(vec2(w_notes, h_vel), Sense::click_and_drag());
-                            self.paint_velocity(ui, vrect, &notes);
+                            self.paint_velocity(ui, vrect, &notes, t, shared);
                             changed |= self.interact_velocity(&vresp, vrect, &mut notes);
                         });
                     });
@@ -239,30 +239,48 @@ impl PianoRoll {
     fn paint_notes(&self, ui: &egui::Ui, rect: Rect, notes: &[MidiNote],
         loop_ticks: u32, t: usize, s: usize, shared: &SessionShared) {
         let p = ui.painter_at(rect); let px = self.px_per_tick;
+        p.rect_filled(rect, Rounding::ZERO, T.bg);
         let top = self.top_key();
         let bottom = self.scroll_key as i32;
         for key in (bottom..=top).rev() {
             let key = key as u8;
             let y = self.row_y_full(rect, key);
             if y + self.row_h < rect.top() || y > rect.bottom() { continue; }
-            let col = if is_black(key) { T.piano_black }
-                else if key % 12 == 0 { T.piano_white.gamma_multiply(0.22) }
-                else { T.piano_white.gamma_multiply(0.14) };
+            let col = if is_black(key) {
+                Color32::from_rgb(24, 26, 31)
+            } else if key % 12 == 0 {
+                Color32::from_rgb(36, 39, 46)
+            } else {
+                Color32::from_rgb(30, 33, 39)
+            };
             p.rect_filled(Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), self.row_h)),
                 Rounding::ZERO, col);
+            p.line_segment([pos2(rect.left(), y + self.row_h), pos2(rect.right(), y + self.row_h)],
+                Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 8)));
         }
         let q = self.quant.max(1);
         let mut tick = 0u32;
         while tick <= loop_ticks {
             let x = rect.left() + tick as f32 * px;
             let bar = tick % TICKS_PER_BAR as u32 == 0;
-            p.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())],
-                Stroke::new(1.0, Color32::from_gray(if bar { 90 } else { 44 })));
+            let beat = tick % (TICKS_PER_BAR as u32 / 4) == 0;
+            let col = if bar {
+                Color32::from_rgba_unmultiplied(255, 255, 255, 34)
+            } else if beat {
+                Color32::from_rgba_unmultiplied(255, 255, 255, 18)
+            } else {
+                Color32::from_rgba_unmultiplied(255, 255, 255, 9)
+            };
+            p.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.0, col));
             tick += q;
         }
         let x_end = rect.left() + loop_ticks as f32 * px;
         p.line_segment([pos2(x_end, rect.top()), pos2(x_end, rect.bottom())],
-            Stroke::new(2.0, T.accent.gamma_multiply(0.5)));
+            Stroke::new(1.5, T.accent.gamma_multiply(0.45)));
+
+        let track_col = shared.state.lock().unwrap_or_else(|e| e.into_inner())
+            .tracks.get(t).map(|tr| Color32::from_rgb(tr.color[0], tr.color[1], tr.color[2]))
+            .unwrap_or(T.accent);
         for (i, n) in notes.iter().enumerate() {
             let y = self.row_y_full(rect, n.note);
             if y + self.row_h < rect.top() || y > rect.bottom() { continue; }
@@ -270,26 +288,35 @@ impl PianoRoll {
             let w = (n.tick_dur as f32 * px).max(3.0);
             let r = Rect::from_min_size(pos2(x, y + 1.0), vec2(w, self.row_h - 2.0));
             let v = n.vel as f32 / 127.0;
-            // Velocity → luminosidad del accent (look DAW)
+            let base = if self.sel.contains(&i) {
+                Color32::from_rgb(
+                    track_col.r().saturating_add(70),
+                    track_col.g().saturating_add(70),
+                    track_col.b().saturating_add(70),
+                )
+            } else {
+                track_col
+            };
             let col = Color32::from_rgb(
-                (40.0 + 50.0 * v) as u8,
-                (90.0 + 80.0 * v) as u8,
-                (160.0 + 75.0 * v) as u8,
+                (base.r() as f32 * (0.45 + 0.55 * v)).min(255.0) as u8,
+                (base.g() as f32 * (0.45 + 0.55 * v)).min(255.0) as u8,
+                (base.b() as f32 * (0.45 + 0.55 * v)).min(255.0) as u8,
             );
-            p.rect_filled(r, Rounding::same(2.0), col);
-            if self.sel.contains(&i) {
-                p.rect_stroke(r, Rounding::same(2.0), Stroke::new(1.5, T.accent_gold));
-            }
+            p.rect_filled(r, Rounding::same(3.0), col);
+            p.rect_stroke(r, Rounding::same(3.0), Stroke::new(1.0, if self.sel.contains(&i) { T.accent_gold } else { Color32::from_rgba_unmultiplied(0, 0, 0, 55) }));
             if self.px_per_tick >= LABEL_ZOOM_THRESHOLD && w > 18.0 {
-                p.text(pos2(x + 2.0, y + self.row_h * 0.5), Align2::LEFT_CENTER,
-                    key_name(n.note), FontId::proportional(8.5),
-                    Color32::WHITE.gamma_multiply(0.85));
+                let lum = (col.r() as u16 + col.g() as u16 + col.b() as u16) / 3;
+                let txt_col = if lum > 140 { Color32::from_rgb(20, 24, 28) } else { Color32::from_rgb(236, 237, 240) };
+                p.text(pos2(x + 3.0, y + self.row_h * 0.5), Align2::LEFT_CENTER,
+                    key_name(n.note), FontId::proportional(8.5), txt_col);
             }
         }
         if shared.rt.active_scene(t) == Some(s as u8) {
             let x = rect.left() + shared.rt.playhead(t) as f32 * px;
             p.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())],
-                Stroke::new(2.0, T.piano_head));
+                Stroke::new(2.0, T.accent_hot));
+            let tri = vec![pos2(x - 5.0, rect.top()), pos2(x + 5.0, rect.top()), pos2(x, rect.top() + 8.0)];
+            p.add(egui::Shape::convex_polygon(tri, T.accent_hot, Stroke::NONE));
         }
     }
 
@@ -298,8 +325,8 @@ impl PianoRoll {
             let r = Rect::from_two_pos(b.start, b.cur).intersect(rect);
             if r.is_positive() {
                 let p = ui.painter_at(rect);
-                p.rect_filled(r, Rounding::ZERO, T.accent.gamma_multiply(0.12));
-                p.rect_stroke(r, Rounding::ZERO, Stroke::new(1.0, T.accent.gamma_multiply(0.7)));
+                p.rect_filled(r, Rounding::same(2.0), Color32::from_rgba_unmultiplied(63, 212, 90, 24));
+                p.rect_stroke(r, Rounding::same(2.0), Stroke::new(1.0, T.accent.gamma_multiply(0.8)));
             }
         }
     }
@@ -443,28 +470,32 @@ impl PianoRoll {
 
     fn paint_keyboard(&self, ui: &egui::Ui, rect: Rect) {
         let p = ui.painter_at(rect);
-        p.rect_filled(rect, Rounding::ZERO, T.panel.gamma_multiply(0.95));
+        p.rect_filled(rect, Rounding::ZERO, Color32::from_rgb(27, 29, 35));
         let top = self.top_key();
         let bottom = self.scroll_key as i32;
         for key in (bottom..=top).rev() {
             let key = key as u8;
             let y = self.row_y_full(rect, key);
             if y + self.row_h < rect.top() || y > rect.bottom() { continue; }
-            let black = is_black(key); let c_note = key % 12 == 0;
+            let black = is_black(key);
+            let c_note = key % 12 == 0;
             if black {
-                p.rect_filled(Rect::from_min_size(pos2(rect.left(), y),
-                    vec2(rect.width() * 0.6, self.row_h)), Rounding::ZERO, Color32::from_gray(40));
-            } else if c_note {
-                p.rect_filled(Rect::from_min_size(pos2(rect.left(), y),
-                    vec2(rect.width(), self.row_h)), Rounding::ZERO, Color32::from_gray(72));
-                p.text(pos2(rect.right() - 2.0, y + self.row_h * 0.5), Align2::RIGHT_CENTER,
-                    key_name(key), FontId::proportional(9.0), T.text_dim);
-            }
-            if !black {
-                p.line_segment([pos2(rect.left(), y), pos2(rect.right(), y)],
-                    Stroke::new(0.5, Color32::from_gray(55)));
+                let r = Rect::from_min_size(pos2(rect.left() + 1.0, y + 1.0), vec2(rect.width() * 0.62, self.row_h - 2.0));
+                p.rect_filled(r, Rounding::same(2.0), Color32::from_rgb(20, 22, 28));
+                p.rect_stroke(r, Rounding::same(2.0), Stroke::new(1.0, Color32::from_rgb(52, 56, 66)));
+            } else {
+                let bg = if c_note { Color32::from_rgb(210, 214, 220) } else { Color32::from_rgb(188, 192, 200) };
+                p.rect_filled(Rect::from_min_size(pos2(rect.left(), y), vec2(rect.width(), self.row_h)), Rounding::ZERO, bg);
+                p.line_segment([pos2(rect.left(), y + self.row_h), pos2(rect.right(), y + self.row_h)],
+                    Stroke::new(1.0, Color32::from_rgba_unmultiplied(0, 0, 0, 28)));
+                if c_note {
+                    p.text(pos2(rect.right() - 4.0, y + self.row_h * 0.5), Align2::RIGHT_CENTER,
+                        key_name(key), FontId::proportional(9.0), Color32::from_rgb(55, 60, 70));
+                }
             }
         }
+        p.line_segment([pos2(rect.right() - 1.0, rect.top()), pos2(rect.right() - 1.0, rect.bottom())],
+            Stroke::new(1.0, Color32::from_rgb(52, 56, 66)));
     }
 
     fn focus_on_notes(&mut self, notes: &[MidiNote]) {
@@ -492,19 +523,30 @@ impl PianoRoll {
         else { None }
     }
 
-    fn paint_velocity(&self, ui: &egui::Ui, rect: Rect, notes: &[MidiNote]) {
+    fn paint_velocity(&self, ui: &egui::Ui, rect: Rect, notes: &[MidiNote], t: usize, shared: &SessionShared) {
         let p = ui.painter_at(rect);
-        p.rect_filled(rect, Rounding::same(3.0), T.strip_bg);
+        p.rect_filled(rect, Rounding::ZERO, Color32::from_rgb(24, 26, 31));
+        p.line_segment([pos2(rect.left(), rect.top()), pos2(rect.right(), rect.top())],
+            Stroke::new(1.0, Color32::from_rgb(52, 56, 66)));
         let px = self.px_per_tick;
+        let track_col = shared.state.lock().unwrap_or_else(|e| e.into_inner())
+            .tracks.get(t).map(|tr| Color32::from_rgb(tr.color[0], tr.color[1], tr.color[2]))
+            .unwrap_or(T.accent);
         for (i, n) in notes.iter().enumerate() {
             let x = rect.left() + n.tick_start as f32 * px;
             if x < rect.left() - 4.0 || x > rect.right() { continue; }
-            let h = (n.vel as f32 / 127.0) * (rect.height() - 6.0);
-            let col = if self.sel.contains(&i) { T.accent } else { T.meter_low };
-            p.rect_filled(Rect::from_min_size(pos2(x, rect.bottom() - 3.0 - h), vec2(3.0, h)),
-                Rounding::same(1.0), col);
+            let h = (n.vel as f32 / 127.0) * (rect.height() - 10.0);
+            let selected = self.sel.contains(&i);
+            let col = if selected {
+                Color32::from_rgb(track_col.r().saturating_add(70), track_col.g().saturating_add(70), track_col.b().saturating_add(70))
+            } else {
+                track_col.gamma_multiply(0.9)
+            };
+            let bar = Rect::from_min_size(pos2(x, rect.bottom() - 4.0 - h), vec2(4.0, h.max(1.0)));
+            p.rect_filled(bar, Rounding::same(1.0), col);
+            p.circle_filled(pos2(x + 2.0, bar.top()), 2.0, col);
         }
-        p.text(rect.left_top() + vec2(4.0, 2.0), Align2::LEFT_TOP,
+        p.text(rect.left_top() + vec2(6.0, 4.0), Align2::LEFT_TOP,
             "Velocity", FontId::proportional(9.0), T.text_dim);
     }
 
