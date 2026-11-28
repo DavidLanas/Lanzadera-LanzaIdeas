@@ -285,6 +285,11 @@ pub struct SessionView {
     pub clip_clipboard: Option<ClipClipboard>,
     /// Frames restantes para forzar posición de ventanas tras cargar layout.
     pub window_layout_apply_frames: u8,
+    /// Historial de deshacer/rehacer (snapshots JSON de SessionState).
+    pub undo_stack: Vec<String>,
+    pub redo_stack: Vec<String>,
+    pub history_last: String,
+    pub history_pending_since: Option<f64>,
 }
 
 impl Default for SessionView {
@@ -385,6 +390,10 @@ impl Default for SessionView {
             groove_sequencer_open: false,
             clip_clipboard: None,
             window_layout_apply_frames: 0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            history_last: String::new(),
+            history_pending_since: None,
         }
     }
 }
@@ -863,6 +872,10 @@ impl SessionView {
         self.dirty = false;
         self.saved_fp = None;
         self.baseline_at = Some(self.now + 2.0);
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.history_last.clear();
+        self.history_pending_since = None;
     }
 
     fn needs_save_as(&self) -> bool {
@@ -872,6 +885,75 @@ impl SessionView {
     fn project_save_or_ask(&mut self, shared: &SessionShared) {
         if self.needs_save_as() { self.spawn_file_dialog(DialogKind::Save); }
         else { self.project_save(shared); }
+    }
+
+    fn history_snapshot(shared: &SessionShared) -> String {
+        shared.state.lock().unwrap_or_else(|e| e.into_inner()).to_json()
+    }
+
+    fn history_sync_midi_all(shared: &SessionShared) {
+        let (nt, ns) = {
+            let st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            (st.tracks.len(), st.scenes.len())
+        };
+        for t in 0..nt { for s in 0..ns { shared.sync_midi(t, s); } }
+    }
+
+    fn history_restore(&mut self, shared: &SessionShared, json: &str) -> bool {
+        let Ok(mut st) = lanzadera_core::SessionState::from_json(json) else { return false; };
+        st.playing = false;
+        st.recording = false;
+        let groove_json = st.groove_json.clone();
+        shared.edit(|cur| *cur = st);
+        if !groove_json.trim().is_empty() {
+            let _ = shared.groove.load_json(&groove_json);
+        }
+        Self::history_sync_midi_all(shared);
+        self.history_last = json.to_string();
+        self.history_pending_since = None;
+        true
+    }
+
+    fn undo(&mut self, shared: &SessionShared) {
+        let Some(prev) = self.undo_stack.pop() else { self.msg = "Nada que deshacer".into(); return; };
+        let cur = Self::history_snapshot(shared);
+        if self.history_restore(shared, &prev) {
+            self.redo_stack.push(cur);
+            self.msg = "Deshacer".into();
+        }
+    }
+
+    fn redo(&mut self, shared: &SessionShared) {
+        let Some(next) = self.redo_stack.pop() else { self.msg = "Nada que rehacer".into(); return; };
+        let cur = Self::history_snapshot(shared);
+        if self.history_restore(shared, &next) {
+            self.undo_stack.push(cur);
+            self.msg = "Rehacer".into();
+        }
+    }
+
+    fn history_tick(&mut self, shared: &SessionShared) {
+        if self.recover_prompt.is_some() || self.baseline_at.is_some() { return; }
+        let snap = Self::history_snapshot(shared);
+        if self.history_last.is_empty() {
+            self.history_last = snap;
+            return;
+        }
+        if snap == self.history_last {
+            self.history_pending_since = None;
+            return;
+        }
+        let now = self.now;
+        match self.history_pending_since {
+            None => self.history_pending_since = Some(now),
+            Some(t) if now - t >= 0.75 => {
+                self.undo_stack.push(std::mem::replace(&mut self.history_last, snap));
+                if self.undo_stack.len() > 120 { self.undo_stack.remove(0); }
+                self.redo_stack.clear();
+                self.history_pending_since = None;
+            }
+            _ => {}
+        }
     }
 
     fn run_action(&mut self, shared: &SessionShared, a: PendingAction) {
@@ -930,8 +1012,10 @@ impl SessionView {
             if now >= t {
                 self.saved_fp = Some(shared.project_fingerprint());
                 self.baseline_at = None;
+                self.history_last = Self::history_snapshot(shared);
             }
         }
+        self.history_tick(shared);
         if now - self.last_fp_check >= 1.0 {
             self.last_fp_check = now;
             if self.baseline_at.is_none() {
@@ -1094,23 +1178,28 @@ impl SessionView {
         use egui::{Key, KeyboardShortcut, Modifiers};
         let wants_text = ctx.wants_keyboard_input();
         let roll_open = self.roll.open;
-        let (save_as, save, open, new, copy, paste, cut, dup, del) = ctx.input_mut(|i| {
+        let (save_as, save, open, new, copy, paste, cut, dup, del, undo_k, redo_k) = ctx.input_mut(|i| {
             let sa = i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::S));
             let s = i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::S));
             let o = i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::O));
             let n = i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::N));
+            let undo_k = !wants_text && i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Z));
+            let redo_k = !wants_text && (i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Y))
+                || i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z)));
             let clip_shortcuts = !wants_text && !roll_open;
             let copy = clip_shortcuts && i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::C));
             let paste = clip_shortcuts && i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::V));
             let cut = clip_shortcuts && i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::X));
             let dup = clip_shortcuts && i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::D));
             let del = clip_shortcuts && (i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace));
-            (sa, s, o, n, copy, paste, cut, dup, del)
+            (sa, s, o, n, copy, paste, cut, dup, del, undo_k, redo_k)
         });
         if new { self.request_action(shared, PendingAction::New); }
         if open { self.request_action(shared, PendingAction::Open); }
         if save_as { self.spawn_file_dialog(DialogKind::Save); }
         else if save { self.project_save_or_ask(shared); }
+        if undo_k { self.undo(shared); }
+        if redo_k { self.redo(shared); }
 
         if copy { self.copy_selected_clip(shared); }
         if cut { self.cut_selected_clip(shared); }
@@ -1292,10 +1381,14 @@ impl SessionView {
                 if ui.button("Duplicar           Ctrl+D").clicked() { self.duplicate_selected_clip(shared); ui.close_menu(); }
                 if ui.button("Eliminar            Supr").clicked() { self.delete_selected_clip(shared); ui.close_menu(); }
                 ui.separator();
-                ui.add_enabled(false, egui::Button::new("Deshacer          Ctrl+Z"))
-                    .on_disabled_hover_text("Pendiente: historial de undo/redo");
-                ui.add_enabled(false, egui::Button::new("Rehacer            Ctrl+Y"))
-                    .on_disabled_hover_text("Pendiente: historial de undo/redo");
+                let can_undo = !self.undo_stack.is_empty();
+                let can_redo = !self.redo_stack.is_empty();
+                if ui.add_enabled(can_undo, egui::Button::new("Deshacer          Ctrl+Z")).clicked() {
+                    self.undo(shared); ui.close_menu();
+                }
+                if ui.add_enabled(can_redo, egui::Button::new("Rehacer            Ctrl+Y")).clicked() {
+                    self.redo(shared); ui.close_menu();
+                }
             });
 
             ui.menu_button("Ver", |ui| {
@@ -1426,6 +1519,8 @@ impl SessionView {
     fn top_bar(&mut self, ctx: &egui::Context, shared: &SessionShared, audio_on: bool) {
         let mut cmds: Vec<ControlCmd> = Vec::new();
         let mut new_q: Option<Quantize> = None;
+        let mut do_undo = false;
+        let mut do_redo = false;
         egui::TopBottomPanel::top("top_bar")
             .frame(egui::Frame::none()
                 .fill(T.transport_bg)
@@ -1444,7 +1539,7 @@ impl SessionView {
                 ui.separator();
 
                 // ── Transporte compacto (estilo Bitwig / Ableton) ──
-                let (mut tempo, playing, recording, q, rec_armed, metronome) = {
+                let (tempo, playing, recording, q, rec_armed, metronome) = {
                     let st = shared.state.lock().unwrap();
                     let (rt, _, _) = st.record_target();
                     let armed = st.tracks.get(rt).map(|tr| tr.arm).unwrap_or(false);
@@ -1470,6 +1565,20 @@ impl SessionView {
                 ).clicked() {
                     cmds.push(ControlCmd::Record);
                 }
+
+                // Overdub: OFF = grabación libre (el largo lo decide el músico), ON = loop fijo.
+                let overdub = { shared.state.lock().unwrap_or_else(|e| e.into_inner()).overdub };
+                let od_resp = ui.add(egui::Button::new(egui::RichText::new("⟳").size(13.0))
+                    .fill(if overdub { T.accent_gold.gamma_multiply(0.55) } else { T.panel_raised })
+                    .min_size(vec2(36.0, 26.0)));
+                if od_resp.clicked() {
+                    shared.edit(|st| st.overdub = !st.overdub);
+                }
+                od_resp.on_hover_text(if overdub {
+                    "Overdub ON: graba en loop fijo (sobreescribe al ciclar)"
+                } else {
+                    "Overdub OFF: grabación libre, el largo lo decide el músico"
+                });
 
                 // Metrónomo (click izq: on/off, click der: menú de modo/subdivisión)
                 let metro_resp = ui.add(egui::Button::new(egui::RichText::new("⏱").size(13.0))
@@ -1515,13 +1624,17 @@ impl SessionView {
 
                 ui.separator();
 
-                // Tempo
+                // Tempo: knob analógico + display calculadora
                 ui.label(egui::RichText::new("BPM").size(10.0).color(T.text_dim));
-                if ui.add(egui::DragValue::new(&mut tempo).speed(0.15).range(20.0..=666.0)
-                    .custom_formatter(|v, _| format!("{:.1}", v))
-                ).changed() {
-                    cmds.push(ControlCmd::SetTempo { bpm: tempo as f32 });
+                let mut bpm_f = tempo as f32;
+                if widgets::knob(ui, &mut bpm_f, 20.0, 666.0, 120.0, "") {
+                    cmds.push(ControlCmd::SetTempo { bpm: bpm_f });
                 }
+                let bpm_text = format!("{:05.1}", bpm_f.clamp(20.0, 666.0));
+                let (lcd_rect, _) = ui.allocate_exact_size(vec2(52.0, 24.0), Sense::hover());
+                ui.painter().rect_filled(lcd_rect, Rounding::same(3.0), Color32::from_rgb(28, 38, 28));
+                ui.painter().rect_stroke(lcd_rect, Rounding::same(3.0), Stroke::new(1.0, Color32::from_rgb(70, 90, 70)));
+                ui.painter().text(lcd_rect.center(), Align2::CENTER_CENTER, bpm_text, FontId::monospace(14.0), Color32::from_rgb(140, 255, 140));
 
                 ui.separator();
 
@@ -1591,6 +1704,17 @@ impl SessionView {
                     self.windows.mixer_visible = !self.windows.mixer_visible;
                 }
 
+                ui.separator();
+                let can_undo = !self.undo_stack.is_empty();
+                let can_redo = !self.redo_stack.is_empty();
+                let hist_btn = |ui: &mut egui::Ui, label: &str, enabled: bool| -> bool {
+                    let fill = if enabled { T.panel_raised } else { T.panel.gamma_multiply(0.5) };
+                    let color = if enabled { T.text_bright } else { T.text_dim };
+                    ui.add_enabled(enabled, egui::Button::new(egui::RichText::new(label).size(11.0).color(color)).fill(fill)).clicked()
+                };
+                if hist_btn(ui, "↶ Deshacer", can_undo) { do_undo = true; }
+                if hist_btn(ui, "↷ Rehacer", can_redo) { do_redo = true; }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(egui::RichText::new(
                         if audio_on { "● AUDIO" } else { "○ SIN AUDIO" }
@@ -1619,6 +1743,8 @@ impl SessionView {
         });
         for c in cmds { shared.apply_control(c); }
         if let Some(q) = new_q { shared.edit(|st| st.quantize = q); }
+        if do_undo { self.undo(shared); }
+        if do_redo { self.redo(shared); }
     }
 
     // ── CLIP GRID ──────────────────────────────────────────────────────────
@@ -1638,6 +1764,9 @@ impl SessionView {
                 .collect();
             (gi, map)
         };
+        let selected_real = { shared.state.lock().unwrap_or_else(|e| e.into_inner()).selected_track };
+        snapshot.selected_track = vis_to_real.iter().position(|&t| t == selected_real).unwrap_or(usize::MAX);
+        snapshot.selected_scene = shared.state.lock().unwrap_or_else(|e| e.into_inner()).selected_scene;
 
         // El estado REAL lo publica el ClipEngine via rt, no SessionState.
         if _audio_on {
@@ -2172,6 +2301,7 @@ impl SessionView {
                         cmds.push(ControlCmd::SelectTrack {
                             delta: (t as i32 - cur as i32) as i8,
                         });
+                        self.inspector_focus = InspectorFocus::Track;
                     }
                 }
 
@@ -2298,14 +2428,71 @@ impl SessionView {
         let mut plugin_clear: Option<usize> = None;
         {
             ui.heading("Inspector");
-            let (sel, t) = {
+            let (sel, sel_track, sel_scene) = {
                 let st = shared.state.lock().unwrap();
-                (st.selected_clip, st.selected_track)
+                (st.selected_clip, st.selected_track, st.selected_scene)
             };
-            if let Some((t, s)) = sel {
+            let (t, s) = sel.unwrap_or((sel_track, sel_scene));
+            let track_focus = matches!(self.inspector_focus, InspectorFocus::Track);
+            let (mut track_name, track_color, mut scene_name) = {
+                let st = shared.state.lock().unwrap();
+                let tr = st.tracks.get(t);
+                let sc = st.scenes.get(s);
+                (
+                    tr.map(|tr| tr.name.clone()).unwrap_or_else(|| format!("Pista {}", t + 1)),
+                    tr.map(|tr| tr.color).unwrap_or([90, 160, 220]),
+                    sc.map(|sc| sc.name.clone()).unwrap_or_else(|| format!("Escena {}", s + 1)),
+                )
+            };
+            let mut track_name_changed = false;
+            let mut scene_name_changed = false;
+            let mut track_color_changed: Option<[u8; 3]> = None;
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Pista").size(11.0).color(T.text_dim));
+                track_name_changed |= ui.add(egui::TextEdit::singleline(&mut track_name).desired_width(120.0)).changed();
+                ui.label(egui::RichText::new("·").size(11.0).color(T.text_dim));
+                ui.label(egui::RichText::new("Escena").size(11.0).color(T.text_dim));
+                scene_name_changed |= ui.add(egui::TextEdit::singleline(&mut scene_name).desired_width(120.0)).changed();
+            });
+            if track_name_changed {
+                shared.edit(|st| {
+                    if let Some(tr) = st.tracks.get_mut(t) { tr.name = track_name.clone(); }
+                });
+            }
+            if scene_name_changed {
+                shared.edit(|st| {
+                    if let Some(sc) = st.scenes.get_mut(s) { sc.name = scene_name.clone(); }
+                });
+            }
+            if track_focus || sel.is_none() || self.inspector_focus == InspectorFocus::Track {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new("Color pista").size(10.0).color(T.text_dim));
+                    let palette: [[u8; 3]; 12] = [
+                        [231, 76, 60], [230, 126, 34], [241, 196, 15], [46, 204, 113],
+                        [26, 188, 156], [52, 152, 219], [155, 89, 182], [236, 100, 170],
+                        [200, 165, 80], [149, 165, 166], [52, 73, 94], [243, 156, 18],
+                    ];
+                    for col in palette {
+                        let c32 = egui::Color32::from_rgb(col[0], col[1], col[2]);
+                        let selected = col == track_color;
+                        let (rect, resp) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
+                        ui.painter().rect_filled(rect, 3.0, c32);
+                        ui.painter().rect_stroke(rect, 3.0, egui::Stroke::new(if selected { 2.0 } else { 1.0 }, if selected { T.accent_gold } else { T.strip_border }));
+                        if resp.on_hover_text("Color de pista").clicked() {
+                            track_color_changed = Some(col);
+                        }
+                    }
+                });
+                if let Some(col) = track_color_changed {
+                    shared.edit(|st| {
+                        if let Some(tr) = st.tracks.get_mut(t) { tr.color = col; }
+                    });
+                }
+            }
+            ui.separator();
+            if let Some((_ct, _cs)) = sel {
                 let clip = { shared.state.lock().unwrap().tracks.get(t).and_then(|tr| tr.clips.get(s)).cloned().flatten() };
                 if let Some(mut c) = clip {
-                    ui.label(egui::RichText::new(format!("Pista {} · Escena {}", t + 1, s + 1)).size(11.0).color(T.text_dim));
                     let mut changed = false;
                     ui.horizontal(|ui| {
                         ui.label("Nombre");
@@ -2427,55 +2614,69 @@ impl SessionView {
                     shared.edit(|st| { if let Some(tr) = st.tracks.get_mut(t) { tr.mono = m; } });
                 }
             }
-            ui.label(egui::RichText::new("Instrumento · Note FX · FX").size(12.0));
+            let (has_audio_clip, has_input, cur, nfx_chain, fx_chain) = {
+                let st = shared.state.lock().unwrap();
+                let tr = st.tracks.get(t);
+                let has_audio_clip = tr.map(|tr| tr.clips.iter().flatten().any(|c| c.audio_path.is_some())).unwrap_or(false);
+                let has_input = tr.and_then(|tr| tr.input_device.as_ref()).map(|d| !d.trim().is_empty()).unwrap_or(false);
+                let cur = tr.and_then(|tr| tr.plugin_path.clone());
+                let nfx = tr.map(|tr| tr.note_fx_chain.clone()).unwrap_or_default();
+                let fx = tr.map(|tr| tr.fx_chain.clone()).unwrap_or_default();
+                (has_audio_clip, has_input, cur, nfx, fx)
+            };
+            let audio_locked = has_audio_clip || has_input;
+            if audio_locked {
+                ui.label(egui::RichText::new("FX de pista (audio/entrada)").size(12.0));
+                ui.label(egui::RichText::new("Pista con audio o entrada analógica/mic: instrumento MIDI y Note FX bloqueados; solo FX.").size(10.0).color(T.text_dim));
+            } else {
+                ui.label(egui::RichText::new("Instrumento · Note FX · FX").size(12.0));
+            }
             if !lanzadera_engine::CLAP_ENABLED {
                 ui.label(egui::RichText::new("Compila con --features clap").size(10.0).color(T.text_dim));
             }
-            let cur = { shared.state.lock().unwrap().tracks.get(t).and_then(|tr| tr.plugin_path.clone()) };
             if let Some(p) = &cur {
                 ui.label(egui::RichText::new(format!("🔌 {}", trunc(p, 24))).size(10.0).color(T.accent));
             }
-            // Instrumento: se elige con 🔍 CLAP / 🔍 VST3. Los antiguos botones
-            // Cargar / Quitar / Parámetros (ruta manual) ya no hacen falta.
-            ui.horizontal_wrapped(|ui| {
-                // Interfaz propia del plugin (Fase G6a). Atenuado si el plugin no
-                // expone la extension GUI: mismo criterio que Rec sin arm.
-                let (has_gui, gui_open) = lanzadera_engine::clap_gui::state(t);
-                let label = if gui_open { "🖥 Cerrar interfaz" } else { "🖥 Interfaz" };
-                if ui.add_enabled(has_gui, egui::Button::new(label)).clicked() {
-                    lanzadera_engine::clap_gui::request_toggle(t);
-                }
-                if lanzadera_engine::CLAP_ENABLED && ui.button("🔍 CLAP").on_hover_text("Elegir instrumento CLAP").clicked() {
-                    self.windows.browser_visible = true;
-                    self.browser_tab = BrowserTab::Instruments;
-                    self.browser_target = BrowserTarget::Instrument;
-                    self.browser_mode = BrowserMode::Clap;
-                    self.browser_show_all = false;
-                    self.browser_list = None;
-                }
-                if lanzadera_engine::VST3_ENABLED && ui.button("🔍 VST3").on_hover_text("Elegir instrumento VST3").clicked() {
-                    self.windows.browser_visible = true;
-                    self.browser_tab = BrowserTab::Instruments;
-                    self.browser_target = BrowserTarget::Instrument;
-                    self.browser_mode = BrowserMode::Vst3;
-                    self.browser_show_all = false;
-                    self.browser_list = None;
-                }
-                if cur.is_some() && ui.small_button("✕").on_hover_text("Quitar instrumento (vuelve al sinte interno)").clicked() {
-                    plugin_clear = Some(t);
-                }
-            });
+            if !audio_locked {
+                ui.horizontal_wrapped(|ui| {
+                    let (has_gui, gui_open) = lanzadera_engine::clap_gui::state(t);
+                    let label = if gui_open { "🖥 Cerrar interfaz" } else { "🖥 Interfaz" };
+                    if ui.add_enabled(has_gui, egui::Button::new(label)).clicked() {
+                        lanzadera_engine::clap_gui::request_toggle(t);
+                    }
+                    if lanzadera_engine::CLAP_ENABLED && ui.button("🔍 CLAP").on_hover_text("Elegir instrumento CLAP").clicked() {
+                        self.windows.browser_visible = true;
+                        self.browser_tab = BrowserTab::Instruments;
+                        self.browser_target = BrowserTarget::Instrument;
+                        self.browser_mode = BrowserMode::Clap;
+                        self.browser_show_all = false;
+                        self.browser_list = None;
+                    }
+                    if lanzadera_engine::VST3_ENABLED && ui.button("🔍 VST3").on_hover_text("Elegir instrumento VST3").clicked() {
+                        self.windows.browser_visible = true;
+                        self.browser_tab = BrowserTab::Instruments;
+                        self.browser_target = BrowserTarget::Instrument;
+                        self.browser_mode = BrowserMode::Vst3;
+                        self.browser_show_all = false;
+                        self.browser_list = None;
+                    }
+                    if cur.is_some() && ui.small_button("✕").on_hover_text("Quitar instrumento (vuelve al sinte interno)").clicked() {
+                        plugin_clear = Some(t);
+                    }
+                });
+            } else if cur.is_some() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(egui::RichText::new("Instrumento MIDI presente en pista de audio/entrada.").size(10.0).color(T.clip_rec));
+                    if ui.small_button("Quitar instrumento").clicked() { plugin_clear = Some(t); }
+                });
+            }
             // Note FX y FX de la pista seleccionada: CADENAS de inserts (Paso 2).
-        let (nfx_chain, fx_chain) = {
-            let st = shared.state.lock().unwrap();
-            st.tracks.get(t)
-                .map(|tr| (tr.note_fx_chain.clone(), tr.fx_chain.clone()))
-                .unwrap_or_default()
-        };
-        for (target, lbl, chain) in [
-            (BrowserTarget::NoteFx, "Note FX", &nfx_chain),
-            (BrowserTarget::Fx, "FX", &fx_chain),
-        ] {
+            let chain_specs: Vec<(BrowserTarget, &str, &Vec<lanzadera_core::track::PluginSlot>)> = if audio_locked {
+                vec![(BrowserTarget::Fx, "FX", &fx_chain)]
+            } else {
+                vec![(BrowserTarget::NoteFx, "Note FX", &nfx_chain), (BrowserTarget::Fx, "FX", &fx_chain)]
+            };
+            for (target, lbl, chain) in chain_specs {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(lbl).size(11.0).strong());
                 if ui.button(format!("＋ {}", lbl)).on_hover_text("Añadir plugin a la cadena").clicked() {
@@ -5502,7 +5703,7 @@ impl SessionView {
 
         ui.separator();
 
-        // ── Muestras asignadas a este pad ──
+        // ── Muestra actual / pin / cambio por celda ──
         let (cell, loaded) = {
             let lib = library_state::shared();
             let g = lib.lock().unwrap_or_else(|e| e.into_inner());
@@ -5510,48 +5711,22 @@ impl SessionView {
             let loaded = g.loaded.get(pad).copied().unwrap_or(0);
             (cell, loaded)
         };
-        ui.label(egui::RichText::new(format!("Muestras · {} cargadas de {}", loaded, cell.len()))
-            .color(T.accent).size(12.0));
-        egui::ScrollArea::vertical().id_source("gm_cell_samples")
-            .max_height(140.0).auto_shrink([false, false]).show(ui, |ui| {
-            for rel in cell.iter().take(120) {
-                let name = std::path::Path::new(rel)
-                    .file_name().map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| rel.clone());
-                ui.label(egui::RichText::new(trunc(&name, 30)).size(9.0))
-                    .on_hover_text(rel);
-            }
-            if cell.is_empty() {
-                ui.label(egui::RichText::new("Sin muestras asignadas").color(T.text_dim).size(10.0));
-            }
-        });
-
-        ui.separator();
-
-        // ── Slot y semilla (CHORDS-style: dado) ──
         ui.label(egui::RichText::new("Muestra actual").color(T.accent).size(12.0));
         let live = kit.snapshot_live();
         let slot = live.get(pad).map(|l| l.slot as usize).unwrap_or(0);
-        ui.label(egui::RichText::new(format!("Slot {}/{}", slot + 1, 8))
-            .color(T.text_dim).size(10.0));
+        ui.label(egui::RichText::new(format!("Slot {}/{}", slot + 1, 8)).color(T.text_dim).size(10.0));
         ui.horizontal(|ui| {
-            if ui.button("🎲 Dado").clicked() {
-                kit.roll_slot(pad);
-            }
+            if ui.button("🎲 Dado").clicked() { kit.roll_slot(pad); }
             for s in 0..8u8 {
-                if ui.selectable_label(slot == s as usize, format!("{}", s + 1)).clicked() {
-                    kit.set_active_slot(pad, s);
-                }
+                if ui.selectable_label(slot == s as usize, format!("{}", s + 1)).clicked() { kit.set_active_slot(pad, s); }
             }
         });
 
-        ui.separator();
         ui.label(egui::RichText::new("Muestra bloqueada (pin)").color(T.accent).size(12.0));
         let pin_label = c.pin.as_deref().unwrap_or("(ninguna)").to_string();
         ui.label(egui::RichText::new(trunc(&pin_label, 28)).color(T.text_dim).size(10.0));
         if ui.button("Fijar la muestra actual").clicked() {
             if let Some(rel) = cell.get(slot).cloned() {
-                // Aplicar inmediatamente en RT/store; persistencia en background para no congelar UI.
                 kit.set_pin(pad, Some(rel.clone()));
                 kit.set_lock(pad, caja_core::kit::P_SAMPLE, true);
                 _shared.caja_store.pin_idx[pad].store(slot as i32, std::sync::atomic::Ordering::Relaxed);
@@ -5583,7 +5758,6 @@ impl SessionView {
         }
 
         ui.separator();
-        // ── Cambio de muestra por celda ──
         ui.label(egui::RichText::new("Cambio de muestra").color(T.accent).size(12.0));
         ui.horizontal_wrapped(|ui| {
             for (bars, lbl) in [(0u8, "Al toque"), (1, "1c"), (2, "2c"), (3, "3c"), (4, "4c")] {
@@ -5591,43 +5765,22 @@ impl SessionView {
                 if ui.add(egui::Button::new(lbl).fill(if on { T.accent } else { T.panel }))
                     .on_hover_text(if bars == 0 { "Cambia en cada golpe".to_string() } else { format!("Cada {} compases", bars) })
                     .clicked()
-                {
-                    kit.set_rate(pad, bars);
-                }
+                { kit.set_rate(pad, bars); }
             }
         });
 
         ui.separator();
-        // ── Síntesis por celda ──
-        ui.label(egui::RichText::new("Síntesis por celda").color(T.accent).size(12.0));
-        use caja_core::kit::{ParamCfg, P_DECAY, P_FILTER, P_PITCH, P_SAMPLE};
-        use lanzadera_engine::caja_drums::engine::{cutoff_hz, decay_seconds, pitch_semitones};
-        let mut param = c.param;
-        let mut changes: Vec<(usize, ParamCfg)> = Vec::new();
-        for (idx, lbl) in [(P_SAMPLE, "Muestra"), (P_PITCH, "Pitch"), (P_DECAY, "Decay"), (P_FILTER, "Filtro")] {
-            let center = param[idx].base as f32 / 1000.0;
-            let readout = match idx {
-                P_SAMPLE => format!("{}% banco", (param[idx].range / 10).max(1)),
-                P_PITCH => format!("{:+.1} st", pitch_semitones(center)),
-                P_DECAY => match decay_seconds(center) { Some(s) => format!("{:.0} ms", s * 1000.0), None => "sin recorte".to_string() },
-                _ => match cutoff_hz(center) { Some(h) => format!("{:.0} Hz", h), None => "abierto".to_string() },
-            };
-            ui.label(egui::RichText::new(format!("{} · {}", lbl, readout)).color(T.text_dim).size(11.0));
-            let mut base = i32::from(param[idx].base);
-            let mut range = i32::from(param[idx].range);
-            let mut prob = i32::from(param[idx].prob);
-            let mut dirty = false;
-            ui.horizontal(|ui| {
-                dirty |= ui.add(egui::Slider::new(&mut base, 0..=1000).text("base")).changed();
-                dirty |= ui.add(egui::Slider::new(&mut range, 0..=1000).text("rango")).changed();
-            });
-            dirty |= ui.add(egui::Slider::new(&mut prob, 0..=1000).text("prob ‰")).changed();
-            if dirty {
-                param[idx] = ParamCfg { base: base.clamp(0, 1000) as u16, range: range.clamp(0, 1000) as u16, prob: prob.clamp(0, 1000) as u16 };
-                changes.push((idx, param[idx]));
+        // ── Muestras asignadas (al final, sin síntesis por celda en PARAMS) ──
+        ui.label(egui::RichText::new(format!("Muestras · {} cargadas de {}", loaded, cell.len()))
+            .color(T.accent).size(12.0));
+        egui::ScrollArea::vertical().id_source("gm_cell_samples")
+            .max_height(140.0).auto_shrink([false, false]).show(ui, |ui| {
+            for rel in cell.iter().take(120) {
+                let name = std::path::Path::new(rel).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| rel.clone());
+                ui.label(egui::RichText::new(trunc(&name, 30)).size(9.0)).on_hover_text(rel);
             }
-        }
-        for (idx, pc) in changes { kit.set_param(pad, idx, pc); }
+            if cell.is_empty() { ui.label(egui::RichText::new("Sin muestras asignadas").color(T.text_dim).size(10.0)); }
+        });
     }
 }
 
@@ -5661,7 +5814,7 @@ impl SessionView {
         let c = cfg[pad].clone();
         let mode = kit.snapshot_live().get(pad).map(|l| l.mode).unwrap_or(0);
         let current = shared.chords_current_sample(pad);
-        let bank = shared.chords_bank(pad);
+        let _bank = shared.chords_bank(pad);
 
         ui.heading("SAMPLES · Biblioteca");
         ui.label(
@@ -5671,113 +5824,12 @@ impl SessionView {
         );
         ui.separator();
 
-        // ── Acciones globales (PITCH / MOD / PERFORM / NOTES) ──
-        ui.label(egui::RichText::new("Todas las celdas").color(T.accent).size(12.0));
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("🎲 All roll").clicked() {
-                shared.chords_all_roll();
-                self.msg = "All roll: las celdas vuelven a tirar el dado".to_string();
-            }
-            if ui.button("🔒 All lock").clicked() {
-                shared.chords_all_lock();
-                self.msg = "All lock: kit congelado".to_string();
-            }
-        });
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new("Cambio de muestra de la celda").color(T.accent).size(12.0));
-        ui.label(egui::RichText::new("Cada cuánto re-tira el dado de muestra (por defecto 4c)").size(10.0).color(T.text_dim));
-        ui.horizontal_wrapped(|ui| {
-            for (bars, lbl) in [(0u8, "Al toque"), (1, "1c"), (2, "2c"), (3, "3c"), (4, "4c")] {
-                let on = c.rate == bars;
-                let tip = if bars == 0 {
-                    "Cambia la muestra en cada golpe (dado activo)".to_string()
-                } else {
-                    format!("Re-tirar el dado cada {} compases", bars)
-                };
-                if ui.add(egui::Button::new(lbl).fill(if on { T.accent } else { T.panel }))
-                    .on_hover_text(tip)
-                    .clicked()
-                {
-                    shared.kit.set_rate(pad, bars);
-                    self.msg = if bars == 0 {
-                        "Muestra: al toque".to_string()
-                    } else {
-                        format!("Muestra: cambia cada {} compases", bars)
-                    };
-                }
-            }
-        });
-        if ui.button("💥 Todos golpe").clicked() {
-            for p in 0..lanzadera_engine::groove_kit::NUM_CELLS as u8 {
-                shared.apply_control(ControlCmd::LivePadOn { pad: p, vel: 100 });
-            }
-        }
-
-        ui.separator();
-
-        // ── Locks de la celda (GROUP / AUTO / LOCK / NOTE REPEAT) ──
+        // ── Síntesis por celda (arriba) con locks alrededor de cada parámetro ──
+        ui.label(egui::RichText::new("Síntesis por celda").color(T.accent).size(12.0));
         ui.label(
-            egui::RichText::new("Locks de la celda")
-                .color(T.accent)
-                .size(12.0),
+            egui::RichText::new("Lock por parámetro: brillante/bloqueado = no varía; dado = cambia con aleatoriedad")
+                .color(T.text_dim).size(9.0),
         );
-        for (idx, lbl) in [
-            (P_SAMPLE, "Muestra"),
-            (P_PITCH, "Pitch"),
-            (P_DECAY, "Decay"),
-            (P_FILTER, "Filtro"),
-        ] {
-            let mut on = is_lock(mode, idx);
-            if ui.checkbox(&mut on, lbl).changed() {
-                shared.chords_toggle_lock(pad, idx);
-                // El encoder se asigna aunque el parámetro quede bloqueado.
-                let target = if idx == P_SAMPLE { 255 } else { idx as u8 };
-                shared.mk3_chords_param.store(target, std::sync::atomic::Ordering::Relaxed);
-            }
-        }
-        ui.label(
-            egui::RichText::new("En el MK3: LED brillante = bloqueado, débil = dado")
-                .color(T.text_dim)
-                .size(9.0),
-        );
-
-        ui.separator();
-
-        // ── Muestra actual: dado, fijar, favorito ──
-        ui.label(egui::RichText::new("Muestra").color(T.accent).size(12.0));
-        let label = current
-            .clone()
-            .unwrap_or_else(|| "(sin muestras cargadas)".to_string());
-        ui.label(egui::RichText::new(trunc(&label, 34)).color(T.text_dim).size(10.0))
-            .on_hover_text(&label);
-        let pinned = c.pin.clone();
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("🎲 Dado").on_hover_text("Otra muestra de la celda").clicked() {
-                shared.chords_roll(pad);
-                shared.apply_control(ControlCmd::LivePadOn { pad: pad as u8, vel: 100 });
-            }
-            if ui.button("📌 Fijar").on_hover_text("Deja sonando esta muestra").clicked() {
-                self.msg = match shared.chords_pin_current(pad) {
-                    Some(rel) => format!("Fijada {}", rel),
-                    None => "No hay muestra que fijar".to_string(),
-                };
-            }
-            if pinned.is_some() && ui.button("✕ Quitar pin").clicked() {
-                shared.chords_unpin(pad);
-            }
-            if let Some(rel) = current.clone() {
-                let fav = shared.chords_is_favorite(&rel);
-                let caption = if fav { "★ Quitar fav" } else { "☆ Favorito" };
-                if ui.button(caption).clicked() {
-                    shared.chords_toggle_favorite(&rel);
-                }
-            }
-        });
-
-        ui.separator();
-
-        // ── Síntesis por celda: base ± rango + probabilidad ──
-        ui.label(egui::RichText::new("Síntesis de la celda").color(T.accent).size(12.0));
         let mut param = c.param;
         let mut changes: Vec<(usize, ParamCfg)> = Vec::new();
         for (idx, lbl) in [
@@ -5799,26 +5851,28 @@ impl SessionView {
                     None => "abierto".to_string(),
                 },
             };
-            ui.label(
-                egui::RichText::new(format!("{} · {}", lbl, readout))
-                    .color(T.text_dim)
-                    .size(11.0),
-            );
+            ui.horizontal(|ui| {
+                let locked = is_lock(mode, idx);
+                let lock_txt = if locked { "🔒" } else { "🎲" };
+                if ui.selectable_label(locked, lock_txt)
+                    .on_hover_text(if locked { format!("{} bloqueado (click para soltar)", lbl) } else { format!("{} en dado (click para bloquear)", lbl) })
+                    .clicked()
+                {
+                    shared.chords_toggle_lock(pad, idx);
+                    let target = if idx == P_SAMPLE { 255 } else { idx as u8 };
+                    shared.mk3_chords_param.store(target, std::sync::atomic::Ordering::Relaxed);
+                }
+                ui.label(egui::RichText::new(format!("{} · {}", lbl, readout)).color(T.text_dim).size(11.0));
+            });
             let mut base = i32::from(param[idx].base);
             let mut range = i32::from(param[idx].range);
             let mut prob = i32::from(param[idx].prob);
             let mut dirty = false;
             ui.horizontal(|ui| {
-                if ui.add(egui::Slider::new(&mut base, 0..=1000).text("base")).changed() {
-                    dirty = true;
-                }
-                if ui.add(egui::Slider::new(&mut range, 0..=1000).text("rango")).changed() {
-                    dirty = true;
-                }
+                if ui.add(egui::Slider::new(&mut base, 0..=1000).text("base")).changed() { dirty = true; }
+                if ui.add(egui::Slider::new(&mut range, 0..=1000).text("rango")).changed() { dirty = true; }
             });
-            if ui.add(egui::Slider::new(&mut prob, 0..=1000).text("prob ‰")).changed() {
-                dirty = true;
-            }
+            if ui.add(egui::Slider::new(&mut prob, 0..=1000).text("prob ‰")).changed() { dirty = true; }
             if dirty {
                 param[idx] = ParamCfg {
                     base: base.clamp(0, 1000) as u16,
@@ -5835,56 +5889,77 @@ impl SessionView {
         ui.separator();
 
         // ── Banco de la celda (clic = fijar + escuchar) ──
+        ui.separator();
+        // ── Acciones globales / cambio de muestra de celda (debajo de síntesis) ──
+        ui.label(egui::RichText::new("Todas las celdas").color(T.accent).size(12.0));
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("🎲 All roll").clicked() {
+                shared.chords_all_roll();
+                self.msg = "All roll: las celdas vuelven a tirar el dado".to_string();
+            }
+            if ui.button("🔒 All lock").clicked() {
+                shared.chords_all_lock();
+                self.msg = "All lock: kit congelado".to_string();
+            }
+            if ui.button("💥 Todos golpe").clicked() {
+                for p in 0..lanzadera_engine::groove_kit::NUM_CELLS as u8 {
+                    shared.apply_control(ControlCmd::LivePadOn { pad: p, vel: 100 });
+                }
+            }
+        });
+        ui.add_space(4.0);
+        ui.label(egui::RichText::new("Cambio de muestra de la celda").color(T.accent).size(12.0));
+        ui.label(egui::RichText::new("Cada cuánto re-tira el dado de muestra (por defecto 4c)").size(10.0).color(T.text_dim));
+        ui.horizontal_wrapped(|ui| {
+            for (bars, lbl) in [(0u8, "Al toque"), (1, "1c"), (2, "2c"), (3, "3c"), (4, "4c")] {
+                let on = c.rate == bars;
+                let tip = if bars == 0 { "Cambia la muestra en cada golpe (dado activo)".to_string() } else { format!("Re-tirar el dado cada {} compases", bars) };
+                if ui.add(egui::Button::new(lbl).fill(if on { T.accent } else { T.panel })).on_hover_text(tip).clicked() {
+                    shared.kit.set_rate(pad, bars);
+                    self.msg = if bars == 0 { "Muestra: al toque".to_string() } else { format!("Muestra: cambia cada {} compases", bars) };
+                }
+            }
+        });
+
+        ui.separator();
+        // ── Muestra actual: dado, fijar, favorito ──
+        ui.label(egui::RichText::new("Muestra").color(T.accent).size(12.0));
+        let label = current.clone().unwrap_or_else(|| "(sin muestras cargadas)".to_string());
+        ui.label(egui::RichText::new(trunc(&label, 34)).color(T.text_dim).size(10.0)).on_hover_text(&label);
+        let pinned = c.pin.clone();
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("🎲 Dado").on_hover_text("Otra muestra de la celda").clicked() {
+                shared.chords_roll(pad);
+                shared.apply_control(ControlCmd::LivePadOn { pad: pad as u8, vel: 100 });
+            }
+            if ui.button("📌 Fijar").on_hover_text("Deja sonando esta muestra").clicked() {
+                self.msg = match shared.chords_pin_current(pad) { Some(rel) => format!("Fijada {}", rel), None => "No hay muestra que fijar".to_string() };
+            }
+            if pinned.is_some() && ui.button("✕ Quitar pin").clicked() { shared.chords_unpin(pad); }
+            if let Some(rel) = current.clone() {
+                let fav = shared.chords_is_favorite(&rel);
+                let caption = if fav { "★ Quitar fav" } else { "☆ Favorito" };
+                if ui.button(caption).clicked() { shared.chords_toggle_favorite(&rel); }
+            }
+        });
+
+        let bank = shared.chords_bank(pad);
         egui::CollapsingHeader::new(format!("Banco de la celda ({})", bank.len()))
             .default_open(false)
             .show(ui, |ui| {
                 let mut pick: Option<String> = None;
-                egui::ScrollArea::vertical()
-                    .id_source("gm_chords_bank")
-                    .max_height(180.0)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        for rel in bank.iter().take(200) {
-                            let name = std::path::Path::new(rel)
-                                .file_name()
-                                .map(|s| s.to_string_lossy().to_string())
-                                .unwrap_or_else(|| rel.clone());
-                            let is_cur = current.as_deref() == Some(rel.as_str());
-                            let fill = if is_cur {
-                                T.accent.gamma_multiply(0.35)
-                            } else {
-                                T.panel
-                            };
-                            if ui
-                                .add(
-                                    egui::Button::new(
-                                        egui::RichText::new(trunc(&name, 30)).size(10.0),
-                                    )
-                                    .fill(fill),
-                                )
-                                .on_hover_text(rel)
-                                .clicked()
-                            {
-                                pick = Some(rel.clone());
-                            }
-                        }
-                        if bank.is_empty() {
-                            ui.label(
-                                egui::RichText::new(
-                                    "Sin muestras: revisa la carpeta en el Inspector del modo Pad",
-                                )
-                                .color(T.text_dim)
-                                .size(10.0),
-                            );
-                        }
-                    });
-                if let Some(rel) = pick {
-                    if shared.chords_pin(pad, &rel) {
-                        shared.apply_control(ControlCmd::LivePadOn { pad: pad as u8, vel: 100 });
-                        self.msg = format!("Fijada {}", rel);
-                    } else {
-                        self.msg = "Esa muestra ya no está en el banco".to_string();
+                egui::ScrollArea::vertical().id_source("gm_chords_bank").max_height(180.0).auto_shrink([false, false]).show(ui, |ui| {
+                    for rel in bank.iter().take(200) {
+                        let name = std::path::Path::new(rel).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| rel.clone());
+                        let is_cur = current.as_deref() == Some(rel.as_str());
+                        let fill = if is_cur { T.accent.gamma_multiply(0.35) } else { T.panel };
+                        if ui.add(egui::Button::new(egui::RichText::new(trunc(&name, 30)).size(10.0)).fill(fill)).on_hover_text(rel).clicked() { pick = Some(rel.clone()); }
                     }
+                    if bank.is_empty() { ui.label(egui::RichText::new("Sin muestras: revisa la carpeta en el Inspector del modo Pad").color(T.text_dim).size(10.0)); }
+                });
+                if let Some(rel) = pick {
+                    if shared.chords_pin(pad, &rel) { shared.apply_control(ControlCmd::LivePadOn { pad: pad as u8, vel: 100 }); self.msg = format!("Fijada {}", rel); }
+                    else { self.msg = "Esa muestra ya no está en el banco".to_string(); }
                 }
             });
 

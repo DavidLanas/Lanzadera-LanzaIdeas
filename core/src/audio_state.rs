@@ -99,6 +99,8 @@ pub struct SessionAudio {
     pub rec_loop_ticks: u32,
     /// Rejilla de la grabación en ticks (0 = Immediate).
     pub rec_q_ticks: u32,
+    /// Overdub en grabación: true = loop fijo; false = grabación libre (el largo lo decide el músico).
+    pub overdub: bool,
     /// Longitud del loop de Groove Machine en ticks (0 = apagado / desconocido).
     /// El launcher alinea el quantize de lanzamiento a este ciclo para que
     /// clips y batería compartan el mismo downbeat de frase.
@@ -117,6 +119,7 @@ impl Default for SessionAudio {
             metronome_mode: 0, metronome_subdiv: 1,
             recording: false, rec_track: 0, rec_scene: 0, rec_loop_ticks: 3840,
             rec_q_ticks: 0,
+            overdub: false,
             groove_loop_ticks: 0,
             clips: [ClipMeta::EMPTY; MAX_TRACKS * MAX_SCENES],
         }
@@ -130,6 +133,7 @@ impl SessionAudio {
             track_count: s.tracks.len().min(MAX_TRACKS) as u8,
             recording: s.recording, rec_track: rt as u8, rec_scene: rs as u8, rec_loop_ticks: rl,
             rec_q_ticks: s.quantize.ticks() as u32,
+            overdub: s.overdub,
             tempo: s.tempo, playing: s.playing, master_volume: s.master_volume,
             groove_master: s.groove_master,
             groove_fx_pitch: s.groove_fx_pitch,

@@ -34,7 +34,7 @@ fn is_black(k: u8) -> bool { matches!(k % 12, 1|3|6|8|10) }
 fn key_name(k: u8) -> String { format!("{}{}", KEY_NAMES[(k%12) as usize], (k as i32/12)-1) }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum RollMode { Draw, Select, Cut }
+pub enum RollMode { Draw, Select, Cut, Knife }
 
 #[derive(Clone)]
 struct MoveDrag { resize: bool, start_x: f32, start_y: f32,
@@ -84,6 +84,7 @@ impl PianoRoll {
             if i.key_pressed(Key::D) { self.mode = RollMode::Draw; }
             if i.key_pressed(Key::S) { self.mode = RollMode::Select; }
             if i.key_pressed(Key::C) { self.mode = RollMode::Cut; }
+            if i.key_pressed(Key::K) { self.mode = RollMode::Knife; }
             if i.key_pressed(Key::A) && i.modifiers.ctrl {
                 self.sel = (0..notes.len()).collect();
             }
@@ -170,7 +171,8 @@ impl PianoRoll {
             ui.separator();
             for (m, lbl, tip) in [(RollMode::Draw, "✏ D", "Dibujar (D)"),
                                    (RollMode::Select, "⬚ S", "Seleccionar (S)"),
-                                   (RollMode::Cut, "✂ C", "Cortar (C)")] {
+                                   (RollMode::Cut, "✂ C", "Cortar (C)"),
+                                   (RollMode::Knife, "🔪 K", "Cuchillo/Dividir (K)")] {
                 let active = self.mode == m;
                 if ui.add(egui::Button::new(egui::RichText::new(lbl).size(11.0)).small()
                     .fill(if active { T.accent.gamma_multiply(0.45) } else { T.panel_raised }))
@@ -323,6 +325,29 @@ impl PianoRoll {
                 RollMode::Cut => { if let Some(i) = hit {
                     notes.remove(i); self.sel.retain(|&x| x != i); changed = true;
                 } }
+                RollMode::Knife => {
+                    let split = ((tk / q as f32).round() as u32 * q).clamp(1, loop_ticks.saturating_sub(1));
+                    let mut to_split: Vec<usize> = notes.iter().enumerate().filter_map(|(i, n)| {
+                        let end = n.tick_start.saturating_add(n.tick_dur.max(1));
+                        (split > n.tick_start && split < end).then_some(i)
+                    }).collect();
+                    to_split.sort_unstable();
+                    to_split.reverse();
+                    for i in to_split {
+                        let n = notes[i];
+                        let end = n.tick_start.saturating_add(n.tick_dur.max(1));
+                        let right_dur = end.saturating_sub(split);
+                        let left_dur = split.saturating_sub(n.tick_start);
+                        if left_dur == 0 || right_dur == 0 { continue; }
+                        notes[i].tick_dur = left_dur;
+                        let mut right = n;
+                        right.tick_start = split;
+                        right.tick_dur = right_dur;
+                        notes.push(right);
+                        changed = true;
+                    }
+                    if changed { self.sel.clear(); }
+                }
                 RollMode::Draw => {
                     let target = hit.or(edge_hit.map(|(i, _)| i));
                     if let Some(i) = target {

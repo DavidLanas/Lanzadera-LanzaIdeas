@@ -235,8 +235,13 @@ impl eframe::App for LanzaderaApp {
         // escena: el destino NO se deduce del cursor actual, que puede haber cambiado
         // (p. ej. al lanzar otro clip mientras se grababa).
         let mut groups: Vec<((usize, usize), Vec<lanzadera_core::MidiNote>)> = Vec::new();
+        let mut finals: Vec<(usize, usize, u32)> = Vec::new();
         while let Some(n) = self.shared.rec_rx.pop() {
             let key = (n.track as usize, n.scene as usize);
+            if n.note == 0 && n.vel == 0 && n.dur == 0 {
+                finals.push((key.0, key.1, n.tick));
+                continue;
+            }
             let note = lanzadera_core::MidiNote {
                 tick_start: n.tick, tick_dur: n.dur, note: n.note, vel: n.vel,
                 channel: 0, occurrence: 0, probability: 1.0,
@@ -248,23 +253,41 @@ impl eframe::App for LanzaderaApp {
         }
         for ((t, s), notes) in groups {
             let count = notes.len();
-            let (tmin, tmax) = notes.iter().fold((u32::MAX, 0u32), |(a, b), n| (a.min(n.tick_start), b.max(n.tick_start)));
+            let (tmin, tmax) = notes.iter().fold((u32::MAX, 0u32), |(a, b), n| (a.min(n.tick_start), b.max(n.tick_start + n.tick_dur.max(1))));
             let loop_bars = {
                 let st = self.shared.state.lock().unwrap();
                 st.tracks.get(t).and_then(|tr| tr.clips.get(s)).and_then(|c| c.as_ref()).map(|c| c.loop_bars).unwrap_or(0)
             };
             self.shared.edit(|st| {
+                let overdub = st.overdub;
                 if let Some(tr) = st.tracks.get_mut(t) {
                     if let Some(Some(c)) = tr.clips.get_mut(s) {
                         for n in &notes { if n.note > 0 || n.vel > 0 { c.midi_notes.push(*n); } }
+                        if !overdub && tmax > 0 {
+                            let bars = ((tmax as u64 + lanzadera_core::TICKS_PER_BAR - 1) / lanzadera_core::TICKS_PER_BAR).max(1) as u8;
+                            c.loop_bars = c.loop_bars.max(bars);
+                        }
                     }
                 }
             });
             self.shared.sync_midi(t, s);
-            // Diagnóstico: rango de ticks de lo grabado frente a la duración del loop.
             eprintln!("[rec] {} notas → pista {} escena {} (ticks {}..{}, loop de {} compases)",
                 count, t + 1, s + 1, tmin, tmax, loop_bars);
             self.view.msg = format!("● {} notas grabadas en Pista {} · Escena {}", count, t + 1, s + 1);
+        }
+        for (t, s, end_tick) in finals {
+            self.shared.edit(|st| {
+                if st.overdub { return; }
+                if let Some(tr) = st.tracks.get_mut(t) {
+                    if let Some(Some(c)) = tr.clips.get_mut(s) {
+                        let max_note_end = c.midi_notes.iter().map(|n| n.tick_start.saturating_add(n.tick_dur.max(1))).max().unwrap_or(0);
+                        let end = end_tick.max(max_note_end);
+                        let bars = ((end as u64 + lanzadera_core::TICKS_PER_BAR - 1) / lanzadera_core::TICKS_PER_BAR).max(1) as u8;
+                        c.loop_bars = c.loop_bars.max(bars);
+                    }
+                }
+            });
+            self.shared.sync_midi(t, s);
         }
         // GUI de plugins: la UI encola la pista y aqui se atiende, en el hilo
         // principal y con las instancias vivas.

@@ -353,6 +353,8 @@ struct Renderer {
     /// Las notas se graban relativas a este origen para que el primer
     /// ataque caiga en tick 0 del clip, no en el compás 2 del transporte.
     rec_origin_ticks: u64,
+    /// Pista donde se está grabando MIDI libre (overdub OFF); se finaliza en la UI al soltar Rec.
+    rec_free_midi: Option<(usize, usize)>,
     /// Último global_ticks visto: si retrocede (escena relanzada en play), Groove se reinicia.
     last_global_ticks: u64,
     channels: usize,
@@ -490,11 +492,14 @@ impl Renderer {
         }
     }
 
-    /// Tick dentro del loop del clip que se está grabando: si la pista tiene
     /// Tick relativo al origen de la grabación (o al playhead del clip activo).
-    /// Así el primer ataque tras la frontera de quantize cae en 0.1 del clip,
-    /// no en 2.1 del transporte global.
+    /// Overdub ON: envuelve en el loop del clip. Overdub OFF: grabación libre,
+    /// el tick crece sin envolver para que el músico decida la duración.
     fn rec_tick(&self, audio: &SessionAudio, t: usize) -> u32 {
+        if !audio.overdub {
+            let abs = self.engine.global_ticks().saturating_sub(self.rec_origin_ticks);
+            return abs.min(u32::MAX as u64) as u32;
+        }
         let lt = audio.rec_loop_ticks.max(1) as u64;
         if let Some(a) = self.engine.active(t) {
             return a.playhead % lt as u32;
@@ -649,34 +654,56 @@ impl Renderer {
                     shared.rt.set_clip_state(rt_t, rt_s, ClipState::Recording);
                 }
             } else {
-                // La grabación terminó. Si el cursor sigue en ese clip, se cerró con Rec y el
-                // clip queda listo (Playing). Si el cursor se movió (se lanzó otro clip de la
-                // pista) el clip grabado queda parado: antes el estado se escribía sobre el
-                // clip equivocado y la GUI seguía mostrando «grabando».
                 let displaced = (rt_t, rt_s) != (audio.rec_track as usize, audio.rec_scene as usize);
                 let st = if displaced || !self.rec_on { ClipState::Empty } else { ClipState::Playing };
                 shared.rt.set_clip_state(rt_t, rt_s, st);
             }
         }
-        if self.rec_on && !rec_live {
+
+        // Final de grabación libre (overdub OFF): emitir marcador con duración real para ajustar loop_bars.
+        let free_rec_now = audio.recording && !audio.overdub;
+        let was_free_midi = self.rec_free_midi.is_some();
+        if let Some((ft, fs)) = self.rec_free_midi {
+            if !(free_rec_now && rec_live) {
+                let now = self.rec_tick(audio, ft);
+                for slot in self.rec_pending.iter_mut() {
+                    if let Some((n, v, st)) = slot.take() {
+                        let dur = now.saturating_sub(st);
+                        let _ = shared.rec_rx.push(RecNote { track: ft as u8, scene: fs as u8, note: n, vel: v, tick: st, dur: dur.max(1) });
+                    }
+                }
+                let _ = shared.rec_rx.push(RecNote { track: ft as u8, scene: fs as u8, note: 0, vel: 0, tick: now, dur: 0 });
+                self.rec_free_midi = None;
+            }
+        }
+        if free_rec_now && rec_live {
+            self.rec_free_midi = self.rec_clip;
+        }
+
+        if self.rec_on && !rec_live && !was_free_midi {
             let (t, sc) = self.rec_clip.unwrap_or((audio.rec_track as usize, audio.rec_scene as usize));
             let now = self.rec_tick(audio, t);
             for slot in self.rec_pending.iter_mut() {
                 if let Some((n, v, st)) = slot.take() {
-                    let dur = if now >= st { now - st }
-                              else { audio.rec_loop_ticks.saturating_sub(st) + now };
+                    let dur = if audio.overdub {
+                        if now >= st { now - st } else { audio.rec_loop_ticks.saturating_sub(st) + now }
+                    } else {
+                        now.saturating_sub(st)
+                    };
                     let _ = shared.rec_rx.push(RecNote { track: t as u8, scene: sc as u8, note: n, vel: v, tick: st, dur: dur.max(1) });
                 }
+            }
+            if !audio.overdub {
+                let _ = shared.rec_rx.push(RecNote { track: t as u8, scene: sc as u8, note: 0, vel: 0, tick: now, dur: 0 });
             }
         }
         let old_rec_on = self.rec_on;
         self.rec_on = rec_live;
         if !audio.recording { self.rec_clip = None; }
+        let rec_live_midi = rec_live;
 
-        // Fijar origen de ticks al armar la grabación. La parada del clip
-        // anterior solo ocurre cuando la puerta de captura se abre realmente
-        // (rec_live), no durante el count-in/RecQueued: así se mantiene la
-        // fluidez en vivo mientras se espera el 1.1 de grabación.
+        // Fijar origen de ticks al armar la grabación. La parada del clip anterior
+        // solo ocurre cuando la puerta de captura se abre realmente.
         if armed_now {
             let now = self.engine.global_ticks();
             self.rec_origin_ticks = if rec_q > 0 { (now / rec_q as u64) * rec_q as u64 } else { now };
@@ -780,7 +807,7 @@ impl Renderer {
                             // Si la nota estaba retenida por el pedal, se re-ataca limpia.
                             self.sustained[t][(note & 0x7F) as usize] = false;
                             self.note(t, f as u32, MidiMsg::On { note, vel, ch: 0 });
-                            if rec_live && t == audio.rec_track as usize {
+                            if rec_live_midi && t == audio.rec_track as usize {
                                 let tick = self.rec_tick(audio, t);
                                 if let Some(slot) = self.rec_pending.iter_mut().find(|s| s.is_none()) {
                                     *slot = Some((note, vel, tick));
@@ -797,14 +824,17 @@ impl Renderer {
                             } else {
                                 self.note(t, f as u32, MidiMsg::Off { note, ch: 0 });
                             }
-                            if rec_live && t == audio.rec_track as usize {
+                            if rec_live_midi && t == audio.rec_track as usize {
                                 let now = self.rec_tick(audio, t);
                                 let found = self.rec_pending.iter_mut()
                                     .find(|s| matches!(s, Some((nn, _, _)) if *nn == note));
                                 if let Some(slot) = found {
                                     if let Some((nn, v, st)) = slot.take() {
-                                        let dur = if now >= st { now - st }
-                                                  else { audio.rec_loop_ticks.saturating_sub(st) + now };
+                                        let dur = if audio.overdub {
+                                            if now >= st { now - st } else { audio.rec_loop_ticks.saturating_sub(st) + now }
+                                        } else {
+                                            now.saturating_sub(st)
+                                        };
                                         let _ = shared.rec_rx.push(RecNote {
                                             track: t as u8,
                                             scene: self.rec_clip.map(|(_, sc)| sc as u8).unwrap_or(audio.rec_scene as u8),
@@ -1849,6 +1879,7 @@ fn build_for_host(host: cpal::Host, shared: Arc<SessionShared>) -> Result<AudioH
         rec_seq_seen: 0,
         rec_audio_slot: None,
         rec_origin_ticks: 0,
+        rec_free_midi: None,
         last_global_ticks: 0,
         channels,
         sample_rate,

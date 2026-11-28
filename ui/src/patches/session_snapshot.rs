@@ -32,4 +32,9 @@ pub struct GrooveSnapshotRow {
 pub struct SessionSnapshot {
     pub tracks: Vec<TrackSnapshot>, pub scene_count: usize, pub transport: TransportSnapshot,
     pub groove: Option<GrooveSnapshotRow>,
+    #[allow(dead_code)]
+    pub selected_track: usize,
+    #[allow(dead_code)]
+    pub selected_scene: usize,
+    pub scene_names: Vec<String>,
 }

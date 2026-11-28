@@ -66,15 +66,17 @@ pub fn render_session_matrix(ui: &mut Ui, s: &SessionSnapshot, a: &mut ClipGridA
                 ui.allocate_exact_size(vec2(header_w, scene_header_h), Sense::hover());
 
                 for si in 0..n_scenes {
-                    scene_header(ui, si, cell_w, scene_header_h, a);
+                    let scene_name = s.scene_names.get(si).map(|n| n.as_str()).unwrap_or("");
+                    scene_header(ui, si, scene_name, cell_w, scene_header_h, a);
                 }
                 ui.end_row();
 
                 for (ti, track) in s.tracks.iter().enumerate() {
-                    track_header(ui, track, ti, header_w, cell_h, a);
+                    let is_selected = ti == s.selected_track;
+                    track_header(ui, track, ti, header_w, cell_h, is_selected, a);
                     for si in 0..n_scenes {
                         let clip = track.clips.get(si).and_then(|c| c.as_ref());
-                        clip_cell(ui, track, clip, ti, si, cell_w, cell_h, a);
+                        clip_cell(ui, track, clip, ti, si, cell_w, cell_h, is_selected, a);
                     }
                     ui.end_row();
                 }
@@ -108,15 +110,20 @@ fn render_top_bar(ui: &mut Ui, t: &TransportSnapshot, a: &mut ClipGridActions) {
     });
 }
 
-fn scene_header(ui: &mut Ui, si: usize, w: f32, h: f32, a: &mut ClipGridActions) {
+fn scene_header(ui: &mut Ui, si: usize, scene_name: &str, w: f32, h: f32, a: &mut ClipGridActions) {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
     ui.painter().rect_filled(rect, 4.0, theme::SCENE_COL_BG);
     ui.painter().rect_stroke(rect, 4.0, Stroke::new(1.0, theme::GRID_LINE));
 
+    let label = if scene_name.trim().is_empty() {
+        format!("Escena {}", si + 1)
+    } else {
+        scene_name.to_string()
+    };
     ui.painter().text(
         rect.left_center() + Vec2::new(6.0, 0.0),
         Align2::LEFT_CENTER,
-        format!("Escena {}", si + 1),
+        label,
         FontId::proportional(theme::FONT_BASE),
         theme::TEXT_COLOR,
     );
@@ -142,12 +149,15 @@ fn scene_header(ui: &mut Ui, si: usize, w: f32, h: f32, a: &mut ClipGridActions)
     });
 }
 
-fn track_header(ui: &mut Ui, t: &TrackSnapshot, track_idx: usize, w: f32, h: f32, a: &mut ClipGridActions) {
+fn track_header(ui: &mut Ui, t: &TrackSnapshot, track_idx: usize, w: f32, h: f32, is_selected: bool, a: &mut ClipGridActions) {
     let (outer, resp) = ui.allocate_exact_size(Vec2::new(w, h), Sense::click());
     let p = ui.painter();
 
     p.rect_filled(outer, 0.0, theme::TRACK_HEADER_BG);
     p.rect_filled(Rect::from_min_size(outer.min, Vec2::new(w, 5.0)), 0.0, t.color);
+    if is_selected {
+        p.rect_stroke(outer.shrink(0.5), 0.0, Stroke::new(2.0, Color32::from_rgb(200, 165, 80)));
+    }
 
     p.text(
         Pos2::new(outer.left() + 6.0, outer.top() + 8.0),
@@ -239,7 +249,7 @@ fn groove_cell(ui: &mut Ui, c: Option<&ClipSnapshot>, si: usize, w: f32, h: f32,
     }
 }
 
-fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize, si: usize, w: f32, h: f32, a: &mut ClipGridActions) {
+fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize, si: usize, w: f32, h: f32, is_selected_track: bool, a: &mut ClipGridActions) {
     let has_clip = c.is_some();
     let st = c.map(|x| x.state).unwrap_or(ClipStateView::Empty);
     let drag_id = egui::Id::new(("clip_drag", ti, si));
@@ -265,8 +275,10 @@ fn clip_cell(ui: &mut Ui, t: &TrackSnapshot, c: Option<&ClipSnapshot>, ti: usize
     let paint = |col: Color32| -> Color32 {
         Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), ((col.a() as f32) * alpha_mul) as u8)
     };
-    ui.painter().rect_filled(rect, 4.0, paint(theme::CLIP_BORDER));
-    ui.painter().rect_filled(rect.shrink(1.0), 4.0, paint(bg));
+    let border = if is_selected_track { Color32::from_rgb(200, 165, 80) } else { theme::CLIP_BORDER };
+    let border_w = if is_selected_track { 2.0 } else { 1.0 };
+    ui.painter().rect_filled(rect, 4.0, paint(border));
+    ui.painter().rect_filled(rect.shrink(border_w), 4.0, paint(bg));
 
     let btn = Rect::from_min_size(rect.min + Vec2::new(4.0, 4.0), Vec2::new(18.0, 18.0));
     const YELLOW: Color32 = Color32::from_rgb(240, 200, 70);

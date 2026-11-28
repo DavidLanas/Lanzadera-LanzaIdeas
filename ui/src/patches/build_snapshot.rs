@@ -21,7 +21,16 @@ pub fn build_snapshot(state: &SessionState) -> SessionSnapshot {
             .map(|t| (0..scene_count).map(|si| t.clips.get(si).and_then(|c| c.as_ref()).map(snapshot_clip)).collect())
             .unwrap_or_else(|| vec![None; scene_count]),
     });
-    SessionSnapshot { tracks, scene_count, transport, groove }
+    let scene_names = state.scenes.iter().map(|s| s.name.clone()).collect();
+    SessionSnapshot {
+        tracks,
+        scene_count,
+        transport,
+        groove,
+        selected_track: state.selected_track,
+        selected_scene: state.selected_scene,
+        scene_names,
+    }
 }
 
 fn snapshot_track(t: &Track) -> TrackSnapshot {

@@ -123,6 +123,10 @@ pub struct SessionState {
     /// Layout de ventanas emergentes (posición/tamaño/visibilidad).
     #[serde(default)]
     pub window_layout: WindowLayoutState,
+    /// Overdub en grabación de Clip Launch. OFF (default): grabación libre, el largo lo decide el músico.
+    /// ON: graba en loop fijo (overdub/sobreescritura sobre el largo del clip).
+    #[serde(default)]
+    pub overdub: bool,
     /// Contador de grabaciones iniciadas (runtime, no se guarda). El audio lo usa para
     /// detectar «grabación nueva sin haber parado la anterior».
     #[serde(skip)]
@@ -177,6 +181,7 @@ impl Default for SessionState {
             groove_fx_filter: 0.5,
             groove_fx_perform: 0.0,
             window_layout: WindowLayoutState::default(),
+            overdub: false,
             rec_seq: 0,
         }
     }
